@@ -133,16 +133,10 @@ export function denyReason(
 	peerMode: PeerMode,
 	toolName: string,
 ): string {
-	if (
-		role === "peer" &&
-		(toolName === "mcp" || toolName === "mcp_script")
-	) {
+	if (role === "peer" && (toolName === "mcp" || toolName === "mcp_script")) {
 		return "Peer cannot use the MCP proxy (it would expose Paseo orchestration tools). Report a DEPENDENCY_REQUEST to the Lead instead.";
 	}
-	if (
-		role === "peer" &&
-		matchesPaseoToolName(toolName, ALL_PASEO_TOOLS)
-	) {
+	if (role === "peer" && matchesPaseoToolName(toolName, ALL_PASEO_TOOLS)) {
 		return "Peer cannot orchestrate agents or manage workspaces. Report a DEPENDENCY_REQUEST to the Lead instead.";
 	}
 	if (
@@ -349,16 +343,16 @@ export default function (pi: ExtensionAPI) {
 						"Peer cannot use the MCP proxy (it would expose Paseo orchestration tools). Report a DEPENDENCY_REQUEST to the Lead instead.",
 				};
 			}
-		if (role === "supervisor") {
-			const target =
-				typeof event.input.tool === "string" ? event.input.tool : undefined;
-			if (target && !isSupervisorAllowedMcpTarget(target)) {
-				return {
-					block: true,
-					reason: `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt). "${target}" is blocked — send an observation to the Lead instead.`,
-				};
+			if (role === "supervisor") {
+				const target =
+					typeof event.input.tool === "string" ? event.input.tool : undefined;
+				if (target && !isSupervisorAllowedMcpTarget(target)) {
+					return {
+						block: true,
+						reason: `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt). "${target}" is blocked — send an observation to the Lead instead.`,
+					};
+				}
 			}
-		}
 		}
 		if (role === "peer" && isToolCallEventType("bash", event)) {
 			const command = event.input.command ?? "";
