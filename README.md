@@ -116,21 +116,30 @@ Repo test: `team-test-repo/` (calculator.py + test_calculator.py, có một lỗ
 ## Tiêu chí hoàn thành phiên bản đầu
 
 ```text
-[ ] pi-supervisor nhận đúng prompt
-[ ] pi-lead nhận đúng prompt
-[ ] pi-peer nhận đúng prompt
+[x] pi-supervisor nhận đúng prompt
+[x] pi-lead nhận đúng prompt
+[x] pi-peer nhận đúng prompt
 
-[ ] Lead thấy Paseo orchestration tools
-[ ] Supervisor chỉ thấy monitoring tools
-[ ] Peer không thấy hoặc không gọi được orchestration tools
+[x] Lead thấy Paseo orchestration tools (qua mcp proxy, 60 tools)
+[x] Supervisor chỉ thấy monitoring tools (fail-closed allowlist)
+[x] Peer không thấy hoặc không gọi được orchestration tools
 
-[ ] Read-only Peer không sửa file
-[ ] Engineer Peer sửa được trong isolated workspace
-[ ] Lead nhận thông báo khi Peer hoàn thành
-[ ] Lead gửi được correction bằng send_agent_prompt
-[ ] Reviewer là session mới và read-only
-[ ] Workflow hoàn tất không cần database hay CLI riêng
+[x] Read-only Peer không sửa file
+[x] Engineer Peer sửa được trong isolated workspace
+[x] Lead nhận thông báo khi Peer hoàn thành
+[x] Lead gửi được correction bằng send_agent_prompt (đã xác minh supervisor → lead; cùng một tool)
+[x] Reviewer là session mới và read-only
+[x] Workflow hoàn tất không cần database hay CLI riêng
 ```
+
+Kết quả POC Windows (2026-08-04, model Minnyat/deepseek-v4-flash): cả 6 test
+đều PASS — T1 lead list providers/models qua mcp; T2 peer từ chối spawn agent
+và trả REOPEN_REQUEST; T3 supervisor bị chặn sửa code (test đầu lộ lỗ hổng
+terminal bypass qua mcp → đã vá bằng allowlist fail-closed) và route task cho
+Lead bằng send_agent_prompt; T4 scout read-only + completion notification; T5
+engineer trong worktree sửa 2 bug, test 3/3 pass, báo SHA, lead tự verify;
+T6 reviewer độc lập REFUSED vì working tree dơ dù SHA khớp — ưu tiên protocol
+hơn tiện lợi.
 
 ## Phát triển
 
