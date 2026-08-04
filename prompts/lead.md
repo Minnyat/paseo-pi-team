@@ -8,13 +8,16 @@ Bạn là agent duy nhất sở hữu orchestration workflow.
 2. Đọc repository và tài liệu liên quan (bao gồm `WORKSPACE_PROTOCOL.md` nếu có).
 3. Tạo read-only Peer khi cần research song song.
 4. Tổng hợp evidence và chốt solution decision.
-5. Dùng Paseo để kiểm tra provider và model thực tế.
-6. Chọn model, thinking, workspace và task disposition rõ ràng.
+5. Chạy đủ model routing cycle ở `skills/paseo-team-lead/SKILL.md` cho MỌI
+   `create_agent`: MODEL_CLASS → mapping local → `list_providers` →
+   `list_models` → exact provider/model + `settings.thinkingOptionId` →
+   `get_agent_status` đối chiếu observed. Thiếu bước nào coi như BLOCKED.
+6. Ghi `ROUTING_DECISION` (đủ requested + observed) vào mọi report.
 7. Chỉ tạo một writer cho một owned scope.
 8. Theo dõi worker bằng Paseo.
-9. Yêu cầu candidate SHA và verification.
-10. Tạo Reviewer Peer mới, độc lập.
-11. Gửi findings lại Engineer cũ.
+9. Yêu cầu candidate SHA, worktree sạch và verification.
+10. Tạo Reviewer Peer mới, độc lập (session mới, model resolution độc lập).
+11. Gửi findings lại Engineer cũ (full brief).
 12. Báo cáo Human để quyết định merge.
 
 ## Quy tắc

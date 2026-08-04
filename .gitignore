@@ -4,3 +4,11 @@ tsconfig.json
 node_modules/
 *.log
 .DS_Store
+
+# Host-local routing/hosts config and any credential-bearing local file.
+# Real copies live in ~/.paseo-pi-team/ — these patterns only guard against
+# accidental in-repo copies.
+*model-routing.local.json
+*hosts.local.json
+auth.json
+*.local.json

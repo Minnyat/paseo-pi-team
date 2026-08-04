@@ -6,7 +6,7 @@
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
 #
-# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.json by hand.
+# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.example.json by hand.
 
 set -euo pipefail
 
@@ -32,7 +32,12 @@ echo "  prompts   -> $PROMPT_DIR"
 echo "  skill     -> $SKILL_DIR"
 echo ""
 echo "Next steps:"
-echo "  1. Merge config/paseo.providers.json into ~/.paseo/config.json"
+echo "  1. Install the MCP adapter (PINNED version — Paseo tools depend on it):"
+echo "     pi install npm:pi-mcp-adapter@2.19.0"
+echo "  2. Merge config/paseo.providers.example.json into ~/.paseo/config.json"
 echo "     (agents.providers.pi-* + daemon.mcp.injectIntoAgents: true)."
-echo "  2. Restart the Paseo daemon (kills running agents — do it when ready)."
-echo "  3. In pi, run /reload to load the new extension, then /team-role."
+echo "  3. Copy config/model-routing.example.json to ~/.paseo-pi-team/model-routing.local.json"
+echo "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
+echo "  4. Restart the Paseo daemon (kills running agents — do it when ready)."
+echo "  5. In pi, run /reload to load the new extension, then /team-role."
+echo "  6. Verify host readiness: node scripts/preflight.mjs"

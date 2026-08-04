@@ -44,17 +44,69 @@ Paseo tools are not separate tools in the prompt — they are reached through th
    to discover the exact tool name.
 3. `mcp` with `{ "tool": "<name>", "args": { ... } }` to invoke.
 
-## Implementation
+## Implementation — model routing cycle (mandatory)
 
-1. Use `mcp` to call `list_providers`.
-2. Use `mcp` to call `list_models`.
-3. Select an explicit provider, model and thinking level.
-4. Create a worktree-isolated workspace (`create_workspace` with
-   `isolation: "worktree"`).
-5. Create one Engineer Peer in that workspace (`create_agent`).
-6. Send a complete `PASEO_TEAM_TASK_V1` brief (template below).
+For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 
-Never guess model or workspace IDs — inspect them first.
+1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
+2. Pick `HOST_ID` (usually `local`; see hosts config for multi-host).
+3. Read that host's routing config: ask yourself for
+   `~/.paseo-pi-team/model-routing.local.json` (via `read`, or run the
+   resolver: `node scripts/model-router.mjs resolve --class <CLASS>` when
+   the role pack repo is available).
+4. Call `list_providers` (mcp) on the target daemon.
+5. Verify the route's role provider exists and is enabled/available →
+   else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
+6. Call `list_models` for that role provider.
+7. Verify the exact model ID exists → else `BLOCKED: MODEL_UNAVAILABLE`.
+8. Verify the configured thinking level is in the model's thinking options →
+   else `BLOCKED: THINKING_OPTION_UNAVAILABLE`.
+9. Compute the exact create_agent provider string:
+   `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
+   slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
+   Thinking goes in `settings.thinkingOptionId` — never inside the model string.
+10. Create the workspace when needed (worktree isolation for writers).
+11. Call `create_agent` with the exact provider string + thinking. NEVER omit
+    the model to inherit a daemon default.
+12. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
+    `runtimeInfo.thinkingOptionId`; compare against requested values →
+    mismatch (or missing runtimeInfo) → `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
+    archive the wrongly-resolved agent.
+13. Only then deliver/continue the initial task.
+
+Never: omit the model field, silently change models, fall back to another
+model or host without recording a routing decision, launch first and "hope",
+or trust a model name written in a prompt instead of runtime config.
+
+Model classes (decided by task risk + disposition, not by role name):
+
+| MODEL_CLASS | Use for |
+|---|---|
+| MONITOR_ECONOMY | supervisor heartbeat, structured observation |
+| FAST_READ | scout, researcher, inventory, factual summary |
+| CODING_MEDIUM | bounded implementation, clear-ownership bugfix, tests |
+| REASONING_HIGH | architect, lifecycle/ownership/concurrency, migration, security design |
+| REVIEW_HIGH | independent reviewer, proof auditor, exact-SHA acceptance |
+
+Record every routing decision verbatim in your report:
+
+```text
+ROUTING_DECISION
+
+TASK_ID:
+DISPOSITION:
+MODEL_CLASS:
+HOST_ID:
+PASEO_PROVIDER:
+REQUESTED_MODEL:
+REQUESTED_THINKING:
+OBSERVED_PROVIDER:
+OBSERVED_MODEL:
+OBSERVED_THINKING:
+WORKSPACE_REF: <host-id>/<workspace-id>
+AGENT_REF: <host-id>/<agent-id>
+ROUTING_EVIDENCE: <list_models match line + get_agent_status runtimeInfo>
+```
 
 ## Monitoring
 
@@ -123,6 +175,12 @@ TASK_ID: T-<number>
 DISPOSITION: <see list below>
 MODE: write | read-only
 
+MODEL_CLASS: <MONITOR_ECONOMY|FAST_READ|CODING_MEDIUM|REASONING_HIGH|REVIEW_HIGH>
+RESOLVED_HOST_ID: <host-id>
+RESOLVED_PASEO_PROVIDER: <pi-supervisor|pi-lead|pi-peer>
+RESOLVED_MODEL: <pi-provider>/<model-id>   # exact, from list_models
+RESOLVED_THINKING: <off|minimal|low|medium|high|xhigh|max>
+
 OBJECTIVE:
 SCOPE:
 OWNED_SCOPE:
@@ -141,6 +199,11 @@ VERIFICATION:
 HANDOFF:
 ```
 
+The RESOLVED_*fields are informational evidence for the peer — the model was
+already chosen by you at `create_agent` time. A peer that notices a mismatch
+(observed vs RESOLVED_*) escalates `MODEL_MISMATCH`; it never changes its own
+model.
+
 V1 briefs (no authority fields) still parse: `EDIT` follows `MODE`,
 `COMMIT`/`PUSH` default to **denied** — so a V1 writer cannot `git commit`
 or `git push` from bash. Do not ask for a candidate SHA unless you granted
@@ -156,10 +219,35 @@ constraints and evidence — not the answer. Peer has the right to
 
 ## Peer output contract
 
-Require from every Peer report:
+Require from every Peer report (v2):
 
-- `STATUS`, `SUMMARY`, `FILES_READ`, `FILES_CHANGED`, `COMMANDS_RUN`;
-- `VERIFICATION` with real command output;
-- `RISKS`, `OPEN_QUESTIONS`, `HANDOFF`.
+```text
+STATUS:
+TASK_ID:
+DISPOSITION:
+
+OBSERVED_HOST_ID:
+OBSERVED_PROVIDER:
+OBSERVED_MODEL:
+OBSERVED_THINKING:
+
+READINESS:
+FILES_READ:
+FILES_CHANGED:
+COMMANDS_RUN:
+VERIFICATION:
+
+CANDIDATE_SHA:
+BRANCH:
+WORKTREE_CLEAN:
+
+RISKS:
+OPEN_QUESTIONS:
+HANDOFF:
+```
+
+Valid escalations: `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, `BLOCKED`,
+`MODEL_MISMATCH` (observed model/thinking differs from RESOLVED_* in the
+brief — the peer must never change its model itself), `AUTHORITY_MISMATCH`.
 
 Treat claims without file/command/test evidence as opinions, not evidence.

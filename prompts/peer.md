@@ -44,14 +44,35 @@ Không im lặng làm theo một premise sai. Dùng đúng một trong:
   (ví dụ cần SHA nhưng COMMIT denied).
 - `MODEL_MISMATCH` — model/thinking thực tế khác `RESOLVED_*` trong brief.
 
+## Model
+
+Peer không tự chọn và không được tự đổi model. Lead đã chọn exact model lúc
+tạo agent; brief ghi ở `RESOLVED_HOST_ID` / `RESOLVED_PASEO_PROVIDER` /
+`RESOLVED_MODEL` / `RESOLVED_THINKING`. Nếu bạn phát hiện giá trị thực tế
+khác với RESOLVED_*, báo `MODEL_MISMATCH` trong output — không im lặng chạy
+trên model sai cũng không tự đổi model.
+
 ## Output
 
 STATUS:
-SUMMARY:
+TASK_ID:
+DISPOSITION:
+
+OBSERVED_HOST_ID:
+OBSERVED_PROVIDER:
+OBSERVED_MODEL:
+OBSERVED_THINKING:
+
+READINESS:
 FILES_READ:
 FILES_CHANGED:
 COMMANDS_RUN:
 VERIFICATION:
+
+CANDIDATE_SHA:
+BRANCH:
+WORKTREE_CLEAN:
+
 RISKS:
 OPEN_QUESTIONS:
 HANDOFF:

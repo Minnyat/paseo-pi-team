@@ -5,7 +5,7 @@
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
 #
-# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.json by hand.
+# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.example.json by hand.
 
 param(
   [string]$PiHome = "$env:USERPROFILE\.pi",
@@ -32,7 +32,12 @@ Write-Host "  prompts   -> $promptDir"
 Write-Host "  skill     -> $skillDir"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Merge config/paseo.providers.json into ~/.paseo/config.json"
+Write-Host "  1. Install the MCP adapter (PINNED version — Paseo tools depend on it):"
+Write-Host "     pi install npm:pi-mcp-adapter@2.19.0"
+Write-Host "  2. Merge config/paseo.providers.example.json into ~/.paseo/config.json"
 Write-Host "     (agents.providers.pi-* + daemon.mcp.injectIntoAgents: true)."
-Write-Host "  2. Restart the Paseo daemon (kills running agents — do it when ready)."
-Write-Host "  3. In pi, run /reload to load the new extension, then /team-role."
+Write-Host "  3. Copy config/model-routing.example.json to ~/.paseo-pi-team/model-routing.local.json"
+Write-Host "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
+Write-Host "  4. Restart the Paseo daemon (kills running agents — do it when ready)."
+Write-Host "  5. In pi, run /reload to load the new extension, then /team-role."
+Write-Host "  6. Verify host readiness: node scripts/preflight.mjs"

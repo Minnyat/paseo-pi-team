@@ -1,0 +1,398 @@
+// model-routing.test.mjs — unit tests for the stateless routing resolver.
+// Run: node test/model-routing.test.mjs   (node >= 22)
+
+import assert from "node:assert/strict";
+import {
+	ERROR_CODES,
+	MODEL_CLASSES,
+	ROLE_PROVIDERS,
+	THINKING_LEVELS,
+	RoutingError,
+	composeProviderModel,
+	loadRoutingConfig,
+	resolveRoute,
+	splitProviderModel,
+	validateRoutingConfig,
+	verifyObserved,
+} from "../scripts/model-routing.mjs";
+
+function expectRoutingError(code, fn) {
+	try {
+		fn();
+	} catch (error) {
+		assert.ok(
+			error instanceof RoutingError,
+			`expected RoutingError, got ${error}`,
+		);
+		assert.equal(
+			error.code,
+			code,
+			`expected code ${code}, got "${error.code}" (${error.message})`,
+		);
+		return error;
+	}
+	assert.fail(`expected RoutingError(${code}) but nothing was thrown`);
+}
+
+// --- fixtures ----------------------------------------------------------------
+
+const validConfigData = {
+	version: 1,
+	hostId: "host-a",
+	routes: {
+		MONITOR_ECONOMY: {
+			paseoProvider: "pi-supervisor",
+			model: "testprov/fast-small",
+			thinking: "low",
+		},
+		FAST_READ: {
+			paseoProvider: "pi-peer",
+			model: "testprov/fast-small",
+			thinking: "low",
+		},
+		CODING_MEDIUM: {
+			paseoProvider: "pi-peer",
+			model: "testprov/coder-mid",
+			thinking: "medium",
+		},
+		REASONING_HIGH: {
+			paseoProvider: "pi-peer",
+			model: "vendor/scoped/deep-reasoner",
+			thinking: "high",
+		},
+		REVIEW_HIGH: {
+			paseoProvider: "pi-peer",
+			model: "testprov/reviewer-pro",
+			thinking: "high",
+		},
+	},
+};
+
+const inventory = {
+	providers: [
+		{ id: "pi-supervisor", enabled: true },
+		{ id: "pi-lead", enabled: true },
+		{ id: "pi-peer", enabled: true },
+	],
+	models: [
+		{
+			id: "testprov/fast-small",
+			thinkingOptions: [{ id: "off" }, { id: "low" }, { id: "medium" }],
+		},
+		{
+			id: "testprov/coder-mid",
+			thinkingOptionIds: ["off", "minimal", "low", "medium", "high"],
+		},
+		{
+			id: "vendor/scoped/deep-reasoner",
+			thinkingOptions: [{ id: "low" }, { id: "high" }],
+		},
+		{
+			id: "testprov/reviewer-pro",
+			thinkingOptions: [{ id: "low" }, { id: "high" }],
+		},
+		{ id: "testprov/non-reasoning" }, // no thinkingOptions at all
+	],
+};
+
+const config = validateRoutingConfig(validConfigData);
+
+// --- validateRoutingConfig ----------------------------------------------------
+
+assert.equal(config.hostId, "host-a");
+assert.equal(config.routes.REASONING_HIGH.model, "vendor/scoped/deep-reasoner");
+
+expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(null));
+expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig([]));
+expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig({}));
+expectRoutingError("CONFIG_INVALID", () =>
+	validateRoutingConfig({ ...validConfigData, version: 2 }),
+);
+expectRoutingError("CONFIG_INVALID", () =>
+	validateRoutingConfig({ ...validConfigData, hostId: "" }),
+);
+{
+	const missing = structuredClone(validConfigData);
+	delete missing.routes.REVIEW_HIGH;
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(missing));
+}
+{
+	const unknown = structuredClone(validConfigData);
+	unknown.routes.SUPER_MODEL = {
+		paseoProvider: "pi-peer",
+		model: "a/b",
+		thinking: "low",
+	};
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(unknown));
+}
+{
+	const badProvider = structuredClone(validConfigData);
+	badProvider.routes.FAST_READ.paseoProvider = "pi-peer-fast";
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateRoutingConfig(badProvider),
+	);
+}
+{
+	const bareModel = structuredClone(validConfigData);
+	bareModel.routes.FAST_READ.model = "gpt-5.4";
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(bareModel));
+}
+{
+	const badThinking = structuredClone(validConfigData);
+	badThinking.routes.FAST_READ.thinking = "turbo";
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateRoutingConfig(badThinking),
+	);
+}
+expectRoutingError("CONFIG_INVALID", () =>
+	loadRoutingConfig("/nonexistent/path.json"),
+);
+
+// --- splitProviderModel / composeProviderModel --------------------------------
+
+assert.deepEqual(splitProviderModel("pi-peer/testprov/coder-mid"), {
+	provider: "pi-peer",
+	model: "testprov/coder-mid",
+});
+// Multi-slash model IDs: split at FIRST slash only (mirrors Paseo source).
+assert.deepEqual(splitProviderModel("pi-peer/vendor/scoped/deep-reasoner"), {
+	provider: "pi-peer",
+	model: "vendor/scoped/deep-reasoner",
+});
+assert.deepEqual(splitProviderModel("pi-peer/a/b/c/d"), {
+	provider: "pi-peer",
+	model: "a/b/c/d",
+});
+expectRoutingError("CONFIG_INVALID", () => splitProviderModel("pi-peer"));
+expectRoutingError("CONFIG_INVALID", () => splitProviderModel("/model"));
+expectRoutingError("CONFIG_INVALID", () => splitProviderModel("provider/"));
+
+assert.equal(
+	composeProviderModel("pi-peer", "vendor/scoped/deep-reasoner"),
+	"pi-peer/vendor/scoped/deep-reasoner",
+);
+assert.equal(
+	composeProviderModel("pi-supervisor", "testprov/fast-small"),
+	"pi-supervisor/testprov/fast-small",
+);
+expectRoutingError("CONFIG_INVALID", () =>
+	composeProviderModel("pi-peer-x", "a/b"),
+);
+expectRoutingError("CONFIG_INVALID", () =>
+	composeProviderModel("pi-peer", "noprovider"),
+);
+
+// Roundtrip: split(compose(x)) must recover x exactly (verifies Paseo-side parsing).
+for (const roleProvider of ROLE_PROVIDERS) {
+	const composed = composeProviderModel(roleProvider, "a/b/c");
+	const split = splitProviderModel(composed);
+	assert.equal(split.provider, roleProvider);
+	assert.equal(split.model, "a/b/c");
+}
+
+// --- resolveRoute --------------------------------------------------------------
+
+{
+	const route = resolveRoute(config, "CODING_MEDIUM", inventory);
+	assert.equal(route.paseoProvider, "pi-peer");
+	assert.equal(route.model, "testprov/coder-mid");
+	assert.equal(route.thinking, "medium");
+	assert.equal(route.createAgentProvider, "pi-peer/testprov/coder-mid");
+	assert.equal(route.thinkingValidated, "exact");
+}
+{
+	// Multi-slash model survives resolution end to end.
+	const route = resolveRoute(config, "REASONING_HIGH", inventory);
+	assert.equal(
+		route.createAgentProvider,
+		"pi-peer/vendor/scoped/deep-reasoner",
+	);
+}
+{
+	// Supervisor route goes through pi-supervisor profile.
+	const route = resolveRoute(config, "MONITOR_ECONOMY", inventory);
+	assert.equal(route.paseoProvider, "pi-supervisor");
+	assert.equal(route.createAgentProvider, "pi-supervisor/testprov/fast-small");
+}
+
+// Missing model → MODEL_UNAVAILABLE (NO silent fallback to anything else).
+{
+	const missingConfig = structuredClone(validConfigData);
+	missingConfig.routes.FAST_READ.model = "testprov/gone";
+	expectRoutingError("MODEL_UNAVAILABLE", () =>
+		resolveRoute(validateRoutingConfig(missingConfig), "FAST_READ", inventory),
+	);
+}
+
+// Disabled/missing role provider → ROLE_PROVIDER_UNAVAILABLE.
+expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
+	resolveRoute(config, "MONITOR_ECONOMY", {
+		...inventory,
+		providers: [
+			{ id: "pi-peer", enabled: true },
+			{ id: "pi-supervisor", enabled: false },
+		],
+	}),
+);
+expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
+	resolveRoute(config, "MONITOR_ECONOMY", { ...inventory, providers: [] }),
+);
+
+// Unsupported thinking → THINKING_OPTION_UNAVAILABLE.
+{
+	const badThinking = structuredClone(validConfigData);
+	badThinking.routes.REVIEW_HIGH.thinking = "xhigh";
+	expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
+		resolveRoute(validateRoutingConfig(badThinking), "REVIEW_HIGH", inventory),
+	);
+}
+
+// Unknown class / missing class route → HOST_ROUTE_UNAVAILABLE.
+expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
+	resolveRoute(config, "WHATEVER", inventory),
+);
+{
+	const partial = {
+		hostId: "h",
+		routes: { FAST_READ: validConfigData.routes.FAST_READ },
+	};
+	expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
+		resolveRoute(partial, "REASONING_HIGH", inventory),
+	);
+}
+
+// CLI --json shapes work too (provider/status/enabled strings, thinkingOptionIds).
+{
+	const cliInventory = {
+		providers: [
+			{ provider: "pi-peer", status: "available", enabled: "Enabled" },
+		],
+		models: [
+			{ id: "testprov/coder-mid", thinkingOptionIds: ["medium", "high"] },
+		],
+	};
+	// Fast-read needs pi-peer + testprov/fast-small (absent here) → MODEL_UNAVAILABLE.
+	expectRoutingError("MODEL_UNAVAILABLE", () =>
+		resolveRoute(config, "FAST_READ", cliInventory),
+	);
+	const codecInventory = {
+		...cliInventory,
+		models: [
+			{ id: "testprov/coder-mid", thinkingOptionIds: ["medium", "high"] },
+		],
+	};
+	const route = resolveRoute(config, "CODING_MEDIUM", codecInventory);
+	assert.equal(route.createAgentProvider, "pi-peer/testprov/coder-mid");
+}
+
+// Model without any thinking list → unverifiable but allowed to pass here;
+// observed-value verification is the backstop.
+{
+	const unverifiable = structuredClone(validConfigData);
+	unverifiable.routes.FAST_READ.model = "testprov/non-reasoning";
+	const route = resolveRoute(
+		validateRoutingConfig(unverifiable),
+		"FAST_READ",
+		inventory,
+	);
+	assert.equal(route.thinkingValidated, "unverifiable");
+}
+
+// --- verifyObserved -----------------------------------------------------------
+
+const requested = resolveRoute(config, "CODING_MEDIUM", inventory);
+
+{
+	const result = verifyObserved(requested, {
+		provider: "pi-peer",
+		model: "testprov/coder-mid",
+		thinkingOptionId: "medium",
+	});
+	assert.equal(result.ok, true);
+}
+
+// Observed model mismatch → MODEL_RESOLUTION_MISMATCH (no silent fallback).
+expectRoutingError("MODEL_RESOLUTION_MISMATCH", () =>
+	verifyObserved(requested, {
+		model: "testprov/other-model",
+		thinkingOptionId: "medium",
+	}),
+);
+
+// Observed thinking mismatch (e.g. pi clamped an unsupported level).
+const clamped = verifyObserved;
+{
+	const error = expectRoutingError("MODEL_RESOLUTION_MISMATCH", () =>
+		clamped(requested, {
+			model: "testprov/coder-mid",
+			thinkingOptionId: "low",
+		}),
+	);
+	assert.match(error.message, /clamped|thinking/);
+	assert.equal(error.details.observed.thinking, "low");
+	assert.equal(error.details.requested.thinking, "medium");
+}
+
+// Provider mismatch is caught when the provider field is present.
+expectRoutingError("MODEL_RESOLUTION_MISMATCH", () =>
+	verifyObserved(requested, {
+		provider: "pi",
+		model: "testprov/coder-mid",
+		thinkingOptionId: "medium",
+	}),
+);
+
+// Missing runtimeInfo / missing fields → fail-closed, NOT a pass.
+expectRoutingError("MODEL_RESOLUTION_MISMATCH", () =>
+	verifyObserved(requested, null),
+);
+expectRoutingError("MODEL_RESOLUTION_MISMATCH", () =>
+	verifyObserved(requested, {}),
+);
+expectRoutingError("MODEL_RESOLUTION_MISMATCH", () =>
+	verifyObserved(requested, { model: "testprov/coder-mid" }),
+);
+
+// Multi-slash observed model verifies verbatim.
+{
+	const high = resolveRoute(config, "REASONING_HIGH", inventory);
+	const result = verifyObserved(high, {
+		model: "vendor/scoped/deep-reasoner",
+		thinkingOptionId: "high",
+	});
+	assert.equal(result.ok, true);
+}
+
+// --- constants sanity -----------------------------------------------------------
+
+assert.deepEqual(MODEL_CLASSES, [
+	"MONITOR_ECONOMY",
+	"FAST_READ",
+	"CODING_MEDIUM",
+	"REASONING_HIGH",
+	"REVIEW_HIGH",
+]);
+assert.deepEqual(ROLE_PROVIDERS, ["pi-supervisor", "pi-lead", "pi-peer"]);
+assert.ok(THINKING_LEVELS.includes("max") && THINKING_LEVELS.includes("off"));
+assert.ok(ERROR_CODES.includes("MODEL_UNAVAILABLE"));
+// The example config file must itself validate.
+{
+	const { readFileSync } = await import("node:fs");
+	const { resolve, dirname } = await import("node:path");
+	const { fileURLToPath } = await import("node:url");
+	const examplePath = resolve(
+		dirname(fileURLToPath(import.meta.url)),
+		"../config/model-routing.example.json",
+	);
+	let example;
+	try {
+		example = JSON.parse(readFileSync(examplePath, "utf8"));
+	} catch (error) {
+		assert.fail(`example config is not valid JSON: ${error?.message ?? error}`);
+	}
+	delete example.$comment;
+	const validated = validateRoutingConfig(example);
+	assert.equal(validated.hostId, "replace-me-host-id");
+}
+
+console.log("[paseo-team] model-routing tests passed");

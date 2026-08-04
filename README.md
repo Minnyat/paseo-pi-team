@@ -14,7 +14,9 @@ Tham chiếu thiết kế đầy đủ:
 paseo-pi-team/
 ├── README.md
 ├── config/
-│   └── paseo.providers.json        # 3 profile Pi: supervisor / lead / peer
+│   ├── paseo.providers.example.json   # 3 profile Pi: supervisor / lead / peer
+│   ├── model-routing.example.json     # template route MODEL_CLASS → model (copy per host)
+│   └── hosts.example.json             # template host registry N-host (copy per cụm)
 ├── prompts/
 │   ├── supervisor.md               # Governance Supervisor
 │   ├── lead.md                     # Project Lead (orchestration owner)
@@ -23,14 +25,24 @@ paseo-pi-team/
 │   └── paseo-team-policy.ts        # inject prompt + áp tool policy theo role
 ├── skills/
 │   └── paseo-team-lead/
-│       └── SKILL.md                # workflow orchestration của Lead
+│       └── SKILL.md                # workflow orchestration + routing cycle của Lead
 ├── examples/
-│   ├── engineer-task.md            # brief PASEO_TEAM_TASK_V1 (MODE: write)
-│   ├── reviewer-task.md            # brief reviewer độc lập (MODE: read-only)
+│   ├── engineer-task.md            # brief PASEO_TEAM_TASK_V2 (engineer, write)
+│   ├── reviewer-task.md            # brief reviewer độc lập (read-only)
+│   ├── architect-task.md           # brief solution-architect (read-only)
+│   ├── scout-task.md               # brief repository-scout (read-only)
 │   └── supervisor-observation.md   # khuôn observation
-└── scripts/
-    ├── install.ps1                 # Windows
-    └── install.sh                  # macOS / Linux
+├── scripts/
+│   ├── install.ps1 / install.sh    # installer
+│   ├── model-routing.mjs           # stateless resolver (+ validate/resolve CLI)
+│   └── preflight.mjs               # host readiness check (--json)
+├── test/
+│   ├── policy.test.mts             # policy + lifecycle regression
+│   └── model-routing.test.mjs      # resolver regression
+└── docs/
+    ├── demonthorn-agent-orchestration-deep-dive.md   # thiết kế gốc
+    ├── model-routing.md            # 4 lớp model routing, verified commands
+    └── multi-host.md               # N-host routing + cross-host test plan
 ```
 
 ## Vai trò
@@ -64,12 +76,13 @@ Script copy:
 - `prompts/*.md` → `~/.pi/agent/extensions/prompts/`
 - `skills/paseo-team-lead/` → `~/.pi/agent/skills/`
 
-### Bắt buộc: pi-mcp-adapter
+### Bắt buộc: pi-mcp-adapter (pinned)
 
-Paseo tools tới pi agent qua MCP; pi không có MCP built-in, nên cần cài adapter:
+Paseo tools tới pi agent qua MCP; pi không có MCP built-in, nên cần cài adapter
+**đúng version đã verify**:
 
 ```bash
-pi install npm:pi-mcp-adapter
+pi install npm:pi-mcp-adapter@2.19.0
 ```
 
 Khi đó Paseo tự detect adapter và truyền `--mcp-config` khi launch agent. Paseo
@@ -86,7 +99,7 @@ Lead/Supervisor dùng `mcp` và chặn Peer dùng nó.
 
 Script **không tự merge** `~/.paseo/config.json` — làm thủ công để kiểm soát:
 
-1. Merge `config/paseo.providers.json` vào `~/.paseo/config.json`
+1. Merge `config/paseo.providers.example.json` vào `~/.paseo/config.json`
    (`agents.providers.pi-*` + `daemon.mcp.injectIntoAgents: true` — bật để agent
    nhận Paseo orchestration tools).
 2. Restart daemon Paseo (kills mọi agent đang chạy — chỉ làm khi sẵn sàng).
@@ -94,6 +107,46 @@ Script **không tự merge** `~/.paseo/config.json` — làm thủ công để k
 
 Extension không có `PASEO_PI_ROLE` → passive (không inject, không giới hạn tool),
 an toàn khi cài global trên máy dùng pi thường.
+
+### Model routing (bắt buộc cho mọi create_agent)
+
+Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
+[`docs/model-routing.md`](docs/model-routing.md). Tóm gọn:
+
+1. Per host (Lớp 1, không commit): pi + credential + `~/.pi/agent/models.json`
+   nếu dùng custom provider.
+2. Copy `config/model-routing.example.json` →
+   `~/.paseo-pi-team/model-routing.local.json`, điền model THẬT của host lấy từ
+   `paseo provider models pi-peer --json` (5 lớp: `MONITOR_ECONOMY`, `FAST_READ`,
+   `CODING_MEDIUM`, `REASONING_HIGH`, `REVIEW_HIGH`).
+3. N-host: copy `config/hosts.example.json` → `~/.paseo-pi-team/hosts.local.json`;
+   endpoint remote chỉ tham chiếu qua **tên env var**. Xem
+   [`docs/multi-host.md`](docs/multi-host.md).
+4. Lead truyền exact model vào mọi `create_agent` dạng
+   `pi-peer/<pi-provider>/<model-id>` + `settings.thinkingOptionId`, rồi đối
+   chiếu `get_agent_status` runtimeInfo — lệch thì
+   `BLOCKED: MODEL_RESOLUTION_MISMATCH`, không fallback.
+
+### Compatibility matrix (đã verify 2026-08-04)
+
+| Thành phần | Phiên bản | Ghi chú |
+|---|---|---|
+| Paseo CLI/daemon | 0.2.5 | `create_agent` schema, split-first-slash, runtimeInfo |
+| Pi | 0.83.0 | `--model` (pattern), `--thinking` (7 levels), models.json |
+| pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool name có prefix `paseo_` |
+| Node | ≥ 22 | test trên 25.9.0 |
+
+### Preflight
+
+```bash
+node scripts/preflight.mjs            # human-readable
+node scripts/preflight.mjs --json     # machine-readable, exit 1 khi có check fail
+```
+
+Kiểm: node/git/paseo/pi + version pin, daemon, adapter (pin), extension,
+role prompts, 3 role providers, routing config, từng route so với inventory
+thật, `thinkingLevelMap` per-model của pi (level `null` = bị clamp — cảnh báo),
+hosts config + endpoint env, trạng thái repo. Không in secret.
 
 ## Debug commands
 
@@ -153,10 +206,11 @@ Type-check extension (tsconfig là dev-only, máy-specific, đã gitignore):
 npx tsc --noEmit -p tsconfig.json
 ```
 
-Test nhanh các hàm thuần (node 22.6+/23+ chạy được `.ts` trực tiếp):
+Test (node 22.6+/23+ chạy được `.ts` trực tiếp):
 
 ```bash
-node --experimental-strip-types test/policy.test.mts   # hoặc node test/policy.test.mts trên node 23.6+
+node test/policy.test.mts          # policy + per-turn lifecycle regression
+node test/model-routing.test.mjs   # routing resolver regression
 ```
 
 Smoke-test load extension không cần LLM (in mode):
