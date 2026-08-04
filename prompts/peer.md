@@ -48,6 +48,31 @@ VERIFICATION_PLAN:
 Nếu chưa hiểu code path hoặc ownership, tiếp tục đọc hoặc trả
 `DEPENDENCY_REQUEST`.
 
+## Base gate (bắt buộc với writer, TRƯỚC lần edit đầu tiên)
+
+Với task writer có `EXPECTED_BASE_SHA` trong brief, chạy ngay:
+
+```bash
+git rev-parse HEAD
+git status --porcelain
+```
+
+và ghi vào report:
+
+```text
+BASE_SHA_OBSERVED: <sha thực>
+INITIAL_WORKTREE_CLEAN: yes | no
+```
+
+- `BASE_SHA_OBSERVED != EXPECTED_BASE_SHA`
+  → `STATUS: BLOCKED`, `REASON: BASE_SHA_MISMATCH` (worktree được tạo từ
+  base sai; KHÔNG tự rebase/cherry-pick để chữa).
+- `INITIAL_WORKTREE_CLEAN: no`
+  → `STATUS: BLOCKED`, `REASON: DIRTY_INITIAL_WORKTREE` (có thể là unrelated
+  changes của user khác; không ghi đè, không tự reset).
+
+Chỉ bắt đầu edit khi cả hai gate pass.
+
 ## Escalations
 
 Dùng một trong:
@@ -93,9 +118,11 @@ git push -u origin HEAD:refs/heads/agent/<TASK_ID>
 ```
 
 Mọi form khác (remote khác, branch khác, `--all`/`--tags`/`--mirror`, xóa
-branch, lệnh nối chuỗi `&&`) đều bị chặn. Không force-push, merge hoặc
-deploy — bị chặn vĩnh viễn bởi extension (kể cả `-f`, `-uf`, `-fu`,
-`--force*`, refspec dấu `+`).
+branch, lệnh nối chuỗi `&&`) đều bị chặn. Force-push mọi spelling (`-f`,
+`-uf`, `-fu`, `--force*`, refspec dấu `+`), merge và `git commit --amend`
+đều bị extension chặn vĩnh viễn. Deploy bị cấm ở mức PROTOCOL (chỉ Human
+deploy) — bash guard là guard, không phải security boundary hoàn chỉnh;
+đừng thử đường vòng.
 
 Khi được commit và push:
 
@@ -130,6 +157,9 @@ FILES_READ:
 FILES_CHANGED:
 COMMANDS_RUN:
 VERIFICATION:
+
+BASE_SHA_OBSERVED:           (writer; sha của `git rev-parse HEAD` lúc start)
+INITIAL_WORKTREE_CLEAN:      (writer; yes | no)
 
 ASSIGNED_HOST_ID:
 ASSIGNED_PROVIDER:
