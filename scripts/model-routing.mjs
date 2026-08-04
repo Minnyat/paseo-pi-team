@@ -143,23 +143,16 @@ export function validateRoutingConfig(data) {
 				{ modelClass, model: trimmedModel },
 			);
 		}
-		if (trimmedModel.endsWith("/")) {
-			throw fail(
-				`route ${modelClass}: model "${trimmedModel}" has an empty trailing segment`,
-				{ modelClass, model: trimmedModel },
-			);
-		}
+		// Split the model value DIRECTLY (not prefixed by paseoProvider):
+		// splitProviderModel rejects an empty provider segment ("/model-id")
+		// and an empty model segment ("provider/") at the position where the
+		// config author made the mistake, not later at route composition.
+		splitProviderModel(trimmedModel);
 		if (!THINKING_LEVELS.includes(thinking)) {
 			throw fail(
 				`route ${modelClass}: thinking "${thinking}" is not a pi thinking level (${THINKING_LEVELS.join(", ")})`,
 				{ modelClass, thinking },
 			);
-		}
-		const { provider } = splitProviderModel(`${paseoProvider}/${trimmedModel}`);
-		if (provider !== paseoProvider) {
-			throw fail(`route ${modelClass}: model splits to wrong provider`, {
-				modelClass,
-			});
 		}
 		validated[modelClass] = {
 			paseoProvider,
@@ -290,7 +283,9 @@ export function validateClusterConfig(data) {
 		// limits
 		if (
 			raw.limits !== undefined &&
-			(typeof raw.limits !== "object" || raw.limits === null)
+			(typeof raw.limits !== "object" ||
+				raw.limits === null ||
+				Array.isArray(raw.limits))
 		) {
 			throw failHost("limits must be an object when present", {
 				limits: raw.limits,
@@ -497,8 +492,15 @@ function normalizeModelEntry(entry) {
 
 /** Provider status strings we accept as "available". Anything else present
  * in the inventory (e.g. "unavailable", "error", "unauthenticated") means
- * the provider is up but NOT usable — strict validation must not pass it. */
-const PROVIDER_OK_STATUSES = new Set(["available", "ok", "enabled", "active"]);
+ * the provider is up but NOT usable — strict validation must not pass it.
+ * Exported so preflight.mjs applies the SAME health predicate as the route
+ * resolver (one source of truth for provider health). */
+export const PROVIDER_OK_STATUSES = new Set([
+	"available",
+	"ok",
+	"enabled",
+	"active",
+]);
 
 function normalizeProviderEntry(entry) {
 	if (typeof entry !== "object" || entry === null) return null;
@@ -507,11 +509,11 @@ function normalizeProviderEntry(entry) {
 	// MCP list_providers: { id, enabled: boolean, status? }
 	// CLI provider ls --json: { provider, status: "available", enabled: "Enabled" }
 	const enabled =
-		typeof entry.enabled === "boolean"
-			? entry.enabled
-			: typeof entry.enabled === "string"
-				? entry.enabled.toLowerCase() === "enabled"
-				: true;
+		// Fail-closed: a missing or mistyped `enabled` field means the provider
+		// is UNVERIFIABLE, and unverifiable is not usable.
+		entry.enabled === true ||
+		(typeof entry.enabled === "string" &&
+			entry.enabled.toLowerCase() === "enabled");
 	const status =
 		typeof entry.status === "string" ? entry.status.toLowerCase() : null;
 	return { id: id.trim(), enabled, status };
@@ -668,6 +670,20 @@ export function validateRemoteEndpoint(value) {
  */
 export function modelsCacheKey(scope, provider) {
 	return `${scope}\0${provider}`;
+}
+
+/**
+ * cmd.exe %VAR% expansion risk: a value with TWO OR MORE `%` characters can
+ * be expanded/re-written by cmd.exe BEFORE paseo receives it, even when the
+ * value is passed as one quoted argv element (% expansion happens at parse
+ * time). A single literal `%` (e.g. one percent-encoded character in a
+ * password) is safe because expansion requires a closing `%`.
+ * On Windows, preflight refuses such endpoints outright rather than trying
+ * to escape them — switch the endpoint to a pairing offer or run the
+ * controller on a non-cmd host.
+ */
+export function cmdPercentExpansionRisk(value) {
+	return (String(value).match(/%/g) ?? []).length >= 2;
 }
 
 // ---------------------------------------------------------------------------

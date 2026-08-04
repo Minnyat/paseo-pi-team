@@ -8,6 +8,7 @@ import {
 	ROLE_PROVIDERS,
 	THINKING_LEVELS,
 	RoutingError,
+	cmdPercentExpansionRisk,
 	composeProviderModel,
 	loadClusterConfig,
 	loadRoutingConfig,
@@ -339,6 +340,25 @@ expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
 	trailing.routes.FAST_READ.model = "testprov/";
 	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(trailing));
 }
+// Route model with an empty LEADING segment ("/model-id") is rejected at
+// config validation too — previously it slipped into prefix-split logic and
+// only failed later at route composition (cluster-config PASS, route FAIL).
+{
+	const leading = structuredClone(validConfigData);
+	leading.routes.FAST_READ.model = "/fast-small";
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(leading));
+}
+
+// Provider with missing/mistyped `enabled` is UNVERIFIABLE → not usable
+// (fail-closed; a lone `{ id: "pi-peer" }` must not be routed to).
+for (const bad of [undefined, null, {}, "maybe", "disabled"]) {
+	expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
+		resolveRoute(config, "CODING_MEDIUM", {
+			...inventory,
+			providers: [{ id: "pi-peer", enabled: bad }],
+		}),
+	);
+}
 
 // --- verifyObserved -----------------------------------------------------------
 
@@ -518,6 +538,11 @@ expectRoutingError("CONFIG_INVALID", () =>
 	const nullLimits = structuredClone(clusterData);
 	nullLimits.hosts["win-primary"].limits = null;
 	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(nullLimits));
+	const arrayLimits = structuredClone(clusterData);
+	arrayLimits.hosts["win-primary"].limits = [];
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateClusterConfig(arrayLimits),
+	);
 }
 {
 	// Host routes are validated with the same strictness as single-host configs.
@@ -656,5 +681,21 @@ assert.equal(
 	modelsCacheKey("mac-review", "pi-peer"),
 	"deterministic for identical scope+provider",
 );
+
+// --- cmdPercentExpansionRisk (cmd.exe %VAR% guard) ------------------------------
+
+assert.equal(cmdPercentExpansionRisk("tcp://a:6767?password=abc"), false);
+assert.equal(
+	cmdPercentExpansionRisk("tcp://a:6767?password=abc%40x"),
+	false,
+	"a single literal % cannot expand (needs a closing %)",
+);
+assert.equal(
+	cmdPercentExpansionRisk("tcp://a:6767?password=a%40%20z"),
+	true,
+	"two % expand as %VAR% under cmd.exe even when percent-encoded",
+);
+assert.equal(cmdPercentExpansionRisk("192.168.1.20:6767"), false);
+assert.equal(cmdPercentExpansionRisk("https://app.paseo.sh/#offer=xyz"), false);
 
 console.log("[paseo-team] model-routing tests passed");

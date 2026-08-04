@@ -31,7 +31,9 @@ import {
 	resolveClusterRoute,
 	resolveRoute,
 	validateRemoteEndpoint,
+	cmdPercentExpansionRisk,
 	MODEL_CLASSES,
+	PROVIDER_OK_STATUSES,
 } from "./model-routing.mjs";
 
 const PINNED = Object.freeze({
@@ -562,22 +564,22 @@ function runRemotePreflight(hostId, host, endpointValue) {
 		const entry = remoteProviders.get(roleProvider);
 		const status = String(entry?.status ?? "").toLowerCase();
 		const enabled =
-			String(entry?.enabled ?? "").toLowerCase() === "enabled" ||
-			entry?.enabled === true;
+			entry?.enabled === true ||
+			String(entry?.enabled ?? "").toLowerCase() === "enabled";
 		if (!entry) {
 			fail(
 				`cluster-remote:${hostId}:provider:${roleProvider}`,
 				"role provider NOT registered on remote daemon",
 			);
-		} else if (!enabled || status !== "available") {
+		} else if (!enabled || !PROVIDER_OK_STATUSES.has(status)) {
 			fail(
 				`cluster-remote:${hostId}:provider:${roleProvider}`,
-				`status="${entry.status}" enabled=${entry.enabled} (need enabled + available)`,
+				`status="${entry.status}" enabled=${entry.enabled} (need enabled + healthy status: ${[...PROVIDER_OK_STATUSES].join("/")})`,
 			);
 		} else {
 			pass(
 				`cluster-remote:${hostId}:provider:${roleProvider}`,
-				"enabled + available",
+				"enabled + healthy",
 			);
 		}
 	}
@@ -619,6 +621,10 @@ function runRemotePreflight(hostId, host, endpointValue) {
 		}
 	}
 }
+
+// The repo-clean writer gate must use the host that was actually selected
+// for verification (possibly inferred), not only an explicit --host-id.
+let clusterVerifyHostId;
 
 // --- cluster routing contract (controller-local) ------------------------------
 
@@ -679,6 +685,9 @@ if (cluster) {
 	}
 
 	// Resolve the route for the host this preflight was asked to verify.
+	// Verify targets a single host: --host-id, or the only host when the
+	// cluster has exactly one. Nothing is ever verified silently — every
+	// skip produces an explicit result line.
 	const verifyHostId =
 		hostIdArg ??
 		(Object.keys(cluster.hosts).length === 1
@@ -689,13 +698,24 @@ if (cluster) {
 			"cluster-host-select",
 			"multiple hosts in cluster config; strict preflight requires --host-id <id>",
 		);
+	} else if (!hostIdArg && verifyHostId === undefined) {
+		warn(
+			"cluster-host-select",
+			`multiple hosts in cluster config (${Object.keys(cluster.hosts).join(", ")}); no per-host route verification performed — pass --host-id <id>`,
+		);
 	}
+	clusterVerifyHostId = verifyHostId;
 	if (verifyHostId !== undefined) {
 		const host = cluster.hosts[verifyHostId];
 		if (!host) {
 			fail(
 				`cluster-host:${verifyHostId}`,
 				`--host-id "${verifyHostId}" not present in cluster routing config`,
+			);
+		} else if (host.connection.type === "local" && skipModels) {
+			warn(
+				`cluster-route:${verifyHostId}`,
+				"local route verification skipped (--skip-models)",
 			);
 		} else if (host.connection.type === "local" && daemonUp && !skipModels) {
 			// Local host: full route resolution against the live daemon, strict.
@@ -755,6 +775,14 @@ if (cluster) {
 					`cluster-remote:${verifyHostId}`,
 					`endpoint env ${envName} has an unexpected shape (expected paseo offer URL or tcp:// target) — refusing to use it`,
 				);
+			} else if (NEEDS_SHELL && cmdPercentExpansionRisk(envValue)) {
+				// cmd.exe expands %VAR% before paseo sees the argv — the endpoint
+				// would be silently corrupted or leak into expansions. Fail loudly
+				// rather than trying to out-quote cmd's parser.
+				fail(
+					`cluster-remote:${verifyHostId}`,
+					`endpoint env ${envName} contains 2+ '%' characters — unsafe with cmd.exe %VAR% expansion on Windows controllers (use a pairing offer URL or a non-cmd controller)`,
+				);
 			} else if (skipModels) {
 				warn(
 					`cluster-remote:${verifyHostId}`,
@@ -782,16 +810,16 @@ if (cluster) {
 			pass("repo-clean", "working tree clean");
 		} else if (status.ok) {
 			const dirtyWriter =
-				cluster &&
-				hostIdArg &&
-				cluster.hosts[hostIdArg] &&
-				cluster.hosts[hostIdArg].limits.writers > 0;
+				clusterVerifyHostId !== undefined &&
+				cluster !== null &&
+				cluster.hosts[clusterVerifyHostId] &&
+				cluster.hosts[clusterVerifyHostId].limits.writers > 0;
 			if (dirtyWriter) {
 				strictCheck(
 					"repo-clean",
-					`writer host "${hostIdArg}" has uncommitted changes — writer workspaces must start clean`,
+					`writer host "${clusterVerifyHostId}" has uncommitted changes — writer workspaces must start clean`,
 				);
-			} else {
+			} else if (status.ok) {
 				warn(
 					"repo-clean",
 					"uncommitted changes present (user-owned changes must never be overwritten by agents)",
