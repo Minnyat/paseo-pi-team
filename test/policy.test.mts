@@ -440,6 +440,17 @@ assert.match(
 	/MERGE_AUTHORITY/,
 	"merge always blocked",
 );
+assert.match(
+	gitAuthorityBlockReason("git commit --amend -m msg", fullAuth, "T-101") ?? "",
+	/amend/,
+	"amend always blocked (SHA chain must advance by new commits)",
+);
+assert.match(
+	gitAuthorityBlockReason("git commit && git commit --amend", fullAuth, "T-101") ??
+		"",
+	/amend/,
+	"amend blocked even in chained command",
+);
 assert.equal(
 	gitAuthorityBlockReason("git status && git diff", noAuth),
 	null,
@@ -619,6 +630,28 @@ assert.match(
 	/allowlist/,
 	"supervisor mcp_script cannot create agents",
 );
+// Literal template-string target (no expression) is still a static literal.
+assert.equal(
+	mcpScriptBlockReason("lead", "await tools.call(`paseo_list_agents`, {});"),
+	null,
+	"plain template literal is a static literal",
+);
+// Dynamic dispatch: ANY non-literal target is unverifiable → fail-closed,
+// never fail-open.
+for (const [code, why] of [
+	['const t = "paseo_create_terminal"; await tools.call(t);', "variable"],
+	['await tools.call("paseo_" + "create_terminal");', "concatenation"],
+	["await tools.call(`paseo_${mode}_agent`);", "template with expression"],
+	["await tools[target]();", "computed key"],
+	["const a=[\"x\"]; await tools[a[0]]();", "indexed key"],
+	['await tools["call"](blockedTool);', "call alias with variable"],
+	["await tools['call'](target);", "single-quoted call alias"],
+] as const) {
+	assert.ok(
+		mcpScriptBlockReason("lead", code) !== null,
+		`dynamic target blocked (${why}): ${code}`,
+	);
+}
 
 // --- policyFor --------------------------------------------------------------
 
@@ -688,6 +721,10 @@ assert.ok(
 );
 assert.ok(sup.allow.includes("mcp"), "supervisor needs the mcp proxy");
 assert.ok(!sup.allow.includes("mcp_script"));
+assert.ok(
+	sup.deny.includes("mcp_script"),
+	"supervisor mcp_script is denied outright (dynamic dispatch unverifiable)",
+);
 
 // --- policyWithAuthority (edit denial enforcement) ---------------------------
 
@@ -1003,7 +1040,7 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 	else process.env.PASEO_PI_ROLE = prevRole;
 }
 
-// --- Extension lifecycle: supervisor mcp_script backstop ----------------------
+// --- Extension lifecycle: supervisor mcp_script denied outright -------------
 
 {
 	const { piStub, handlers } = makePiStub(["read", "mcp", "mcp_script"]);
@@ -1017,21 +1054,11 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 	const script = async (code: string) =>
 		toolCall({ toolName: "mcp_script", input: { code } });
 
-	assert.equal(
-		await script("const r = await tools.paseo_list_agents(); emit(r);"),
-		undefined,
-		"monitoring call passes",
-	);
 	assert.match(
-		(await script("await tools.paseo_create_agent({ provider: 'pi-peer/x' });"))
+		(await script("const r = await tools.paseo_list_agents(); emit(r);"))
 			?.reason ?? "",
-		/allowlist/,
-		"supervisor cannot create agents via mcp_script backstop",
-	);
-	assert.match(
-		(await script('await tools.call("paseo_create_terminal", {});'))?.reason ??
-			"",
-		/allowlist/,
+		/dynamic MCP dispatch/,
+		"supervisor mcp_script is denied outright — even monitoring targets go through the mcp proxy instead",
 	);
 
 	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
@@ -1077,6 +1104,31 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 
 	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
 	else process.env.PASEO_PI_ROLE = prevRole;
+}
+
+// --- Examples regression: every V3 brief in examples/*.md must parse clean ---
+
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const examplesDir = resolve(
+	dirname(fileURLToPath(import.meta.url)),
+	"../examples",
+);
+for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
+	const lines = readFileSync(join(examplesDir, file), "utf8").split(/\r?\n/);
+	const beginIndex = lines.findIndex(
+		(l) => l.trim() === "PASEO_TEAM_TASK_V3_BEGIN",
+	);
+	if (beginIndex < 0) continue; // not a task-brief example
+	const brief = parseTaskBrief(lines.slice(beginIndex).join("\n"));
+	assert.ok(brief, `${file}: embedded V3 brief parses`);
+	assert.deepEqual(
+		brief.malformed,
+		[],
+		`${file}: brief must be clean, got: ${brief.malformed.join("; ")}`,
+	);
 }
 
 console.log("[paseo-team] policy tests passed");

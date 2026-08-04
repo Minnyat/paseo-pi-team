@@ -152,7 +152,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 		case "supervisor":
 			return {
 				allow: ["read", "mcp", ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
-				deny: ["write", "edit", ...ALL_PASEO_TOOLS],
+				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
 			return peerMode === "write"
@@ -209,6 +209,9 @@ export function denyReason(
 	}
 	if (role === "supervisor" && (toolName === "write" || toolName === "edit")) {
 		return "Supervisor cannot modify product code. Send an observation to the Lead instead.";
+	}
+	if (role === "supervisor" && toolName === "mcp_script") {
+		return "Supervisor cannot use mcp_script: dynamic MCP dispatch cannot be verified against the monitoring allowlist. Call monitoring tools individually through the mcp proxy (list_agents, get_agent_status, get_agent_activity, send_agent_prompt).";
 	}
 	if (role === "supervisor") {
 		return "Supervisor cannot create or manage agents or workspaces. Send an observation to the Lead instead.";
@@ -329,17 +332,34 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 /**
  * mcp_script executes arbitrary JS that can call MCP tools directly, bypassing
  * the `mcp` guard. Heuristic backstop: scan for direct tool references
- * (`tools.<name>()` or `tools.call("<name>")`) and reject names outside the
- * role allowlist. Not a security boundary.
+ * (`tools.<name>()`, `tools["<name>"]()` or `tools.call("<name>", ...)`) and
+ * reject names outside the role allowlist. Any call whose target is NOT a
+ * string literal (variable, concatenation, computed key) is unverifiable and
+ * blocked — fail-closed, not fail-open. Not a security boundary.
  */
 const MCP_SCRIPT_DIRECT_CALL_RE =
 	/\btools\.call\(\s*["'`]([^"'`]+)["'`]|\btools\[["'`]([^"'`]+)["'`]\]\s*\(|\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
+/**
+ * Dynamic dispatch forms we can never resolve statically:
+ *   tools.call(<non-literal>)     — tools.call(target)              
+ *   tools["call"](<non-literal>)  — tools["call"](target)           
+ *   tools[<non-literal>](         — tools[target]() / tools[i + 1]()
+ * `tools.call("literal")`/`tools["call"]("literal")` are matched by
+ * MCP_SCRIPT_DIRECT_CALL_RE above, so the dynamic regexes only fire on
+ * unclassifiable arguments.
+ */
+const MCP_SCRIPT_DYNAMIC_CALL_RE =
+	/\btools\s*\.\s*call\s*\(\s*(?!["'`])|\btools\s*\[\s*["'`]call["'`]\s*\]\s*\(\s*(?!["'`])|\btools\s*\[\s*(?![\s"'`\]])/g;
 
 export function mcpScriptBlockReason(
 	role: TeamRole,
 	code: string,
 ): string | null {
 	const allowed = mcpAllowedTargets(role);
+	for (const _match of code.matchAll(MCP_SCRIPT_DYNAMIC_CALL_RE)) {
+		return `mcp_script invokes an MCP tool through a non-literal target (variable, expression or computed key) — the ${role} allowlist cannot verify it, so the call is blocked fail-closed. Use a literal tool name: tools.call("<allowed_tool>", ...) or tools.<allowed_tool>().`;
+	}
 	for (const match of code.matchAll(MCP_SCRIPT_DIRECT_CALL_RE)) {
 		// Group order mirrors the pattern: tools.call(...), tools[...],
 		// tools.<name>(...). tools.call must be tried first — otherwise the
@@ -679,6 +699,7 @@ export function expectedTaskBranch(taskId: string | undefined): string | null {
 }
 
 const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b/i;
+const GIT_AMEND_RE = /\bgit\b[^|;&]*\bcommit\b[^|;&]*--amend\b/i;
 
 export function gitAuthorityBlockReason(
 	command: string,
@@ -687,6 +708,9 @@ export function gitAuthorityBlockReason(
 ): string | null {
 	if (detectForcePush(command)) {
 		return "FORCE_PUSH_AUTHORITY is always denied for Peers (including -f/-uf/-fu, --force*= and +refspec forms). Ask the Lead to update the brief — peers never force-push.";
+	}
+	if (GIT_AMEND_RE.test(command)) {
+		return "git commit --amend is always denied for Peers: a pushed branch must advance by NEW commits so the SHA chain stays reviewable. Create a new correction commit and (when granted) push it with the exact branch-scoped form.";
 	}
 	if (GIT_PUSH_RE.test(command)) {
 		if (!authority.pushTaskBranch) {
