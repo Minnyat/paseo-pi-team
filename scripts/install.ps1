@@ -1,11 +1,11 @@
-# install.ps1 — install the paseo-pi-team role pack into the current user's pi config.
+# install.ps1 - install the paseo-pi-team role pack into the current user's pi config.
 #
 # Copies:
 #   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
 #
-# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.example.json by hand.
+# Does NOT touch ~/.paseo/config.json - merge config/paseo.providers.example.json by hand.
 
 param(
   [string]$PiHome = "$env:USERPROFILE\.pi",
@@ -32,7 +32,7 @@ Write-Host "  prompts   -> $promptDir"
 Write-Host "  skill     -> $skillDir"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Install the MCP adapter (PINNED version — Paseo tools depend on it):"
+Write-Host "  1. Install the MCP adapter (PINNED version - Paseo tools depend on it):"
 Write-Host "     pi install npm:pi-mcp-adapter@2.19.0"
 Write-Host "  2. Merge config/paseo.providers.example.json into ~/.paseo/config.json"
 Write-Host "     (agents.providers.pi-* + daemon.mcp.injectIntoAgents: true)."
@@ -40,6 +40,7 @@ Write-Host "  3. Copy config/model-routing.example.json to ~/.paseo-pi-team/mode
 Write-Host "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
 Write-Host "     Cross-host controller: also copy config/cluster-routing.example.json to"
 Write-Host "     ~/.paseo-pi-team/cluster-routing.local.json (endpoint values live in env)"
-Write-Host "  4. Restart the Paseo daemon (kills running agents — do it when ready)."
+Write-Host "  4. Restart the Paseo daemon (kills running agents - do it when ready)."
 Write-Host "  5. In pi, run /reload to load the new extension, then /team-role."
-Write-Host "  6. Verify host readiness: node scripts/preflight.mjs"
+Write-Host "  6. Verify host readiness (repo-root independent):"
+Write-Host "     node `"$(Join-Path $RolePackRoot 'scripts\preflight.mjs')`""

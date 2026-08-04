@@ -42,4 +42,5 @@ echo "     Cross-host controller: also copy config/cluster-routing.example.json 
 echo "     ~/.paseo-pi-team/cluster-routing.local.json (endpoint values live in env)"
 echo "  4. Restart the Paseo daemon (kills running agents — do it when ready)."
 echo "  5. In pi, run /reload to load the new extension, then /team-role."
-echo "  6. Verify host readiness: node scripts/preflight.mjs"
+echo "  6. Verify host readiness (repo-root independent):"
+echo "     node \"$ROLE_PACK_ROOT/scripts/preflight.mjs\""

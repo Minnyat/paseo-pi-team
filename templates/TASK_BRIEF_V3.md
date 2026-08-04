@@ -77,3 +77,8 @@ Field semantics:
 - `EDIT_AUTHORITY: denied` chặn write/edit kể cả khi `MODE: write`
   (enforced bởi extension).
 - `CANDIDATE_SHA` trong output chỉ có nghĩa khi `COMMIT_AUTHORITY: allowed`.
+- `PUSH_TASK_BRANCH_AUTHORITY: allowed` là branch-scoped: extension chỉ cho
+  phép đúng `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` — task
+  branch của writer BẮT BUỘC đặt tên `agent/<TASK_ID>`. Mọi push form khác
+  (remote/branch khác, `--all`/`--tags`/`--mirror`, xóa, lệnh nối chuỗi) bị
+  chặn; force-push mọi spelling luôn bị chặn.

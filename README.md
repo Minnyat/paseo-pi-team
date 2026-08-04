@@ -59,10 +59,15 @@ paseo-pi-team/
 
 Policy là **allowlist thuần** (`setActiveTools`), cộng lớp backstop chặn trong
 `song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối. Mọi authority
-được tính lại từ brief của **turn hiện tại**: thiếu header `PASEO_TEAM_TASK_V1|V2`
-hoặc thiếu/sai `MODE` → Peer read-only; `git commit`/`git push` qua bash của
-Peer bị chặn trừ khi brief cấp `*_AUTHORITY: allowed`; force-push/merge của
-Peer luôn bị chặn.
+được tính lại từ brief của **turn hiện tại**: chỉ marker block V3
+(`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`) cấp được write mode hoặc
+git authority; **legacy header `PASEO_TEAM_TASK_V1|V2` luôn resolve read-only**
+(mọi `MODE` và `*_AUTHORITY` field bị bỏ qua — parser legacy từng quét toàn
+prompt và là lổ hổng injection). `git commit`/`git push` qua bash của Peer bị
+chặn trừ khi V3 brief cấp `*_AUTHORITY: allowed`; push authority là
+**branch-scoped** (duy nhất `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`);
+force-push (mọi spelling: `-f`, `-uf`, `-fu`, `--force*`, refspec `+`) và merge
+của Peer luôn bị chặn.
 
 ## Cài đặt
 
@@ -142,7 +147,7 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
 | Paseo CLI/daemon | 0.2.5 | `create_agent` schema, split-first-slash, runtimeInfo |
 | Pi | 0.83.0 | `--model` (pattern), `--thinking` (7 levels), models.json |
 | pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool name có prefix `paseo_` |
-| Node | ≥ 22 | test trên 25.9.0 |
+| Node | ≥ 22.18 | type stripping sẵn có; test trên 25.9.0 |
 
 ### Preflight
 
@@ -220,7 +225,8 @@ Type-check extension (tsconfig là dev-only, máy-specific, đã gitignore):
 npx tsc --noEmit -p tsconfig.json
 ```
 
-Test (node 22.6+/23+ chạy được `.ts` trực tiếp):
+Test (node **22.18+ hoặc 23.6+** chạy được `.ts`/`.mts` trực tiếp nhờ type
+stripping bật sẵn):
 
 ```bash
 node test/policy.test.mts          # policy + per-turn lifecycle regression

@@ -21,7 +21,11 @@ Create read-only Peers when independent work can run in parallel:
 - Solution Challenger
 
 Read-only Peers may share the existing workspace. Send them a
-`PASEO_TEAM_TASK_V1` brief with `MODE: read-only`.
+**V3 read-only brief** (`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`
+with `MODE: read-only` — see "Task brief template" below). Legacy
+`PASEO_TEAM_TASK_V1|V2` headers are parseable for diagnostics only: the
+extension ALWAYS resolves them read-only and ignores their MODE and
+`*_AUTHORITY` fields, so never use them for new work.
 
 ## Decision
 
@@ -170,13 +174,15 @@ Never merge or deploy yourself — that decision belongs to Human.
 
 ## Task brief template
 
-Every Peer prompt that should grant authority must be a V3 brief: an
+Every Peer prompt is a V3 brief — read-only ones included: an
 authority block between the markers `PASEO_TEAM_TASK_V3_BEGIN` and
 `PASEO_TEAM_TASK_V3_END`, with the Prose task body AFTER the end marker
 (canonical template: `templates/TASK_BRIEF_V3.md`). The extension enforces
 this fail-closed on **every turn**:
 
-- prompt without a valid V3 block (or legacy V1/V2 header) → `read-only`;
+- prompt without a valid V3 block → `read-only`;
+- legacy `PASEO_TEAM_TASK_V1|V2` header → ALWAYS `read-only`, all
+  authority fields ignored (whole-prompt scan injection surface, closed);
 - V3 block without the closing marker → invalid → `read-only`, no fields;
 - field outside the allowlist, duplicate field, or bad value → invalid;
 - `EDIT_AUTHORITY: denied` blocks write/edit even when `MODE: write`;
@@ -225,6 +231,15 @@ CONSTRAINTS / REQUIRED HANDOFF
 TASK_BODY_END
 ```
 
+PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
+extension permits is exactly
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>` (no other remote,
+branch, flag, deletion or chained command; force-push in any spelling —
+`-f`, `-uf`, `-fu`, `--force*`, `+refspec` — is always blocked). Task
+branches therefore MUST be named `agent/<TASK_ID>`. Branch protection on
+the shared remote stays mandatory; the extension is a guard, not the full
+security boundary.
+
 The `ASSIGNED_*` fields are evidence for the peer — the model was already
 chosen by you at `create_agent` time. The peer echoes them back and, when
 its tools let it see a mismatch, escalates `MODEL_MISMATCH`. The peer never
@@ -247,17 +262,12 @@ constraints and evidence — not the answer. Peer has the right to
 
 ## Peer output contract
 
-Require from every Peer report (v2):
+Require from every Peer report:
 
 ```text
 STATUS:
 TASK_ID:
 DISPOSITION:
-
-OBSERVED_HOST_ID:
-OBSERVED_PROVIDER:
-OBSERVED_MODEL:
-OBSERVED_THINKING:
 
 READINESS:
 FILES_READ:
@@ -273,6 +283,12 @@ RISKS:
 OPEN_QUESTIONS:
 HANDOFF:
 ```
+
+The peer ECHOES its `ASSIGNED_*` fields back when useful for traceability,
+but reports NO `OBSERVED_*` values: observed runtime identity
+(host/provider/model/thinking) belongs to YOU (routing cycle, step 14). A
+peer that invents observed values is a protocol violation, the same class
+as a claim without file/command/test evidence.
 
 Valid escalations: `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, `BLOCKED`,
 `MODEL_MISMATCH` (runtime identity differs from the `ASSIGNED_*` fields in

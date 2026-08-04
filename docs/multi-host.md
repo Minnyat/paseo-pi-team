@@ -1,34 +1,40 @@
 # Multi-host (N host) — routing và vận hành
 
-Thiết kế N-host của role pack. Không có tên máy nào được hard-code trong
-> **UPDATE (V3 contract)**: chuẩn mới là file controller-local duy nhất
-> `~/.paseo-pi-team/cluster-routing.local.json` (schema: `config/cluster-routing.example.json`,
-> validator: `scripts/model-routing.mjs#validateClusterConfig`). Mỗi host có
-> `connection` (local/remote + `endpointEnv` trỏ TÊN env var), `required`,
-> `capabilities`, `limits` và `routes` riêng trong CÙNG một file — Lead resolve
-> route bằng `resolveClusterRoute(cluster, hostId, MODEL_CLASS, inventory)` và
-> preflight gate bằng `node scripts/preflight.mjs --strict --host-id <id>`.
-> `hosts.local.json` bên dưới là dạng legacy, giữ để tham khảo.
+Thiết kế N-host của role pack. Không có tên máy nào hard-code trong core
+logic; mọi host là một entry trong file controller-local duy nhất:
 
+```text
+~/.paseo-pi-team/cluster-routing.local.json    (template: config/cluster-routing.example.json,
+                                                validator: scripts/model-routing.mjs#validateClusterConfig)
+```
 
-core logic; mọi host là một entry trong config host-local.
+> `hosts.local.json` (template `config/hosts.example.json`) là dạng LEGACY,
+> chỉ giữ để tham khảo. Cluster file là chuẩn: Lead resolve route bằng
+> `resolveClusterRoute(cluster, hostId, MODEL_CLASS, inventory)` và gate bằng
+> `node scripts/preflight.mjs --strict --host-id <id>`.
 
 ## Tài nguyên thiết kế
 
-Mỗi host được mô tả bởi sáu trường (trong `~/.paseo-pi-team/hosts.local.json`,
-template tại `config/hosts.example.json`):
+Mỗi host trong cluster file có sáu trường:
 
 ```text
-HOST_ID               định danh duy nhất (trùng hostId trong model-routing.local.json)
-ENDPOINT_ENV          TÊN env var chứa endpoint pair (không lưu value)
-CAPABILITIES          ['git-read', 'git-write', 'docker', 'integration-test', 'focused-test', 'independent-review', ...]
-TRUST_ZONE            nhãn vùng tin cậy (ghi trong WORKSPACE_PROTOCOL; extension không ép)
-RESOURCE_LIMITS       { writers, readers } — trần concurrency
-MODEL_ROUTES          ~ nội dung của model-routing.local.json trên host đó
+HOST_ID        key của hosts{} — trùng hostId trong model-routing.local.json của host đó
+connection     { type: "local" | "remote", endpointEnv: <TÊN env var, không phải value> }
+required       boolean BẮT BUỘC — strict preflight fail nếu required host mất endpoint
+capabilities   ['git-read', 'git-write', 'docker', 'integration-test', 'focused-test',
+                'independent-review', ...]
+limits         { writers, readers } — trần concurrency (object rõ ràng)
+routes         per-MODEL_CLASS route — CÙNG schema với model-routing.local.json
 ```
 
-`HOST_ID = "local"` là đặc biệt: daemon mà Lead nói chuyện qua MCP server
-được inject (không cần endpoint).
+`connection.type: "local"` là daemon mà Lead nói chuyện qua MCP server được
+inject (không cần endpoint). Endpoint VALUE (pairing offer / tcp URI) chỉ sống
+trong env var được trỏ qua `endpointEnv`; file không bao giờ chứa secret.
+
+Dạng endpoint được chấp nhận (parse-based validation, không character
+whitelist): pairing offer URL `https://app.paseo.sh/#offer=...`, TCP URI
+`tcp://host:port?ssl=true&password=...`, `https://...` URL, hoặc `host:port`
+trần.
 
 ## Luồng host routing (mandatory order)
 
@@ -40,8 +46,9 @@ MODEL_ROUTES          ~ nội dung của model-routing.local.json trên host đ�
    ngầm nhiên; chuyển host phải là routing decision được ghi lại).
 3. **Repository availability** — repo/project tồn tại trên host (workspace
    source path) hoặc clone/pull được.
-4. **Model route hợp lệ trên host đó** — đọc `model-routing.local.json`
-   của host đích (preflight host-local), list_models trên đúng daemon.
+4. **Model route hợp lệ trên host đó** — đọc route của host từ cluster file,
+   verify `list_models` trên ĐÚNG daemon đích (cache inventory theo hostId,
+   không theo provider name).
 5. **Concurrency** — `limits.writers/readers`; một moving scope chỉ một
    writer toàn cụm, không phải chỉ một writer mỗi host.
 6. **Chọn host và ghi routing evidence** (xem ROUTING_DECISION trong
@@ -55,7 +62,7 @@ config ở `createPiMcpConfigFile` với URL daemon của chính daemon cha).
 Vì vậy với host remote, Lead dùng **chính Paseo CLI qua bash**:
 
 ```bash
-# Endpoint value NẰM TRONG ENV (ví dụ PASEO_HOST_B), hosts config chỉ tên:
+# Endpoint value NẰM TRONG ENV (ví dụ PASEO_HOST_B), cluster file chỉ tên:
 paseo status  --host "$PASEO_HOST_B" --json
 paseo provider ls --host "$PASEO_HOST_B" --json
 paseo provider models pi-peer --host "$PASEO_HOST_B" --json
@@ -68,7 +75,7 @@ CLI chấp nhận `host:port`, socket/pipe, `tcp://host:port?ssl=true&password=.
 hoặc pairing offer URL (xem `paseo run --help`). Credential của endpoint sống
 trong env, không trong file.
 
-> Lưu ý bảo mật policy: policy extension hiện chặn Peer dùng `paseo` CLI từ
+> Lưu ý bảo mật policy: policy extension chặn Peer dùng `paseo` CLI từ
 > bash (heuristic) và cho Lead quyền `bash`. Lead dùng CLI cho remote được
 > coi là đường orchestration chính thức — vẫn qua control plane Paseo, không
 > phải control plane thứ hai.
@@ -88,7 +95,9 @@ CANDIDATE_REF  <repository-url>@<commit-sha>
 `CANDIDATE_REF` độc lập host: git SHA là điểm neo duy nhất giữa writer và
 reviewer nằm hai host — vì vậy cross-host review **bắt buộc**
 `COMMIT_AUTHORITY: allowed` + `PUSH_TASK_BRANCH_AUTHORITY: allowed` trong
-brief của Engineer, và reviewer dùng fresh clone/fetch tới đúng SHA.
+brief của Engineer (push authority là branch-scoped: chỉ
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`), và reviewer dùng fresh
+clone/fetch tới đúng SHA.
 
 ## Failure & recovery
 
@@ -99,21 +108,25 @@ brief của Engineer, và reviewer dùng fresh clone/fetch tới đúng SHA.
 - **Writer không phản hồi** → Lead check qua `--host` trước khi tuyên bố
   mất; nếu daemon sống mà agent kẹt → cancel_agent/archive_agent trên đúng
   daemon đó rồi handoff scope (commit SHA cuối cùng = progress checkpoint).
-- **Endpoint env mất** → preflight warn; routing tới host đó là BLOCKED,
-  không suy đoán endpoint từ lịch sử.
+- **Endpoint env mất** → strict preflight FAIL (warn trong non-strict);
+  routing tới host đó là BLOCKED, không suy đoán endpoint từ lịch sử.
 
 ## Cross-host test plan (MANUAL — cần máy thứ hai)
 
-Trạng thái: **chưa chạy** (chỉ có một host tại thời điểm implement).
-Khi có host thứ hai, chạy đủ chuỗi sau và ghi kết quả vào issue liên quan:
+Trạng thái (2026-08): **live remote preflight đã chạy qua relay offer**
+(commit phase 6+). Full chuỗi Windows Engineer → Mac Reviewer → correction →
+re-review CHƯA hoàn tất. Khi chạy đủ, ghi kết quả vào PR/issue liên quan:
 
 1. `node scripts/preflight.mjs` PASS trên cả hai host (riêng biệt).
 2. Host A: đặt `PASEO_HOST_B=tcp://<ip>:6767?ssl=true&password=...`;
-   `paseo status --host "$PASEO_HOST_B" --json` reachable.
-3. Host B cài role pack với `model-routing.local.json` khác host A (đúng
-   mục đích: N host có model mapping khác nhau).
+   `paseo status --host "$PASEO_HOST_B" --json` reachable;
+   `node scripts/preflight.mjs --strict --host-id <host-b-id>` PASS (remote
+   inventory đúng host — cache theo hostId).
+3. Host B cài role pack; routes của host B khác host A (đúng mục đích: N host
+   có model mapping khác nhau).
 4. Lead (host A) spawn reviewer trên host B:
-   Engineer (A) được cấp COMMIT+PUSH → push task branch tới remote chung
+   Engineer (A) được cấp COMMIT+PUSH → push đúng form
+   `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` tới remote chung
    → reviewer (B) clone/fetch đúng `CANDIDATE_SHA`, refuse nếu HEAD ≠ SHA.
 5. Kill daemon host B giữa task writer → Lead báo `HOST_ROUTE_UNAVAILABLE`,
    không spawn writer thứ hai cùng scope.

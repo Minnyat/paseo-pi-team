@@ -86,7 +86,16 @@ Chỉ push task branch khi:
 PUSH_TASK_BRANCH_AUTHORITY: allowed
 ```
 
-Không force-push, merge hoặc deploy — bị chặn vĩnh viễn bởi extension.
+Push authority là branch-scoped: extension chỉ cho phép ĐÚNG một form:
+
+```text
+git push -u origin HEAD:refs/heads/agent/<TASK_ID>
+```
+
+Mọi form khác (remote khác, branch khác, `--all`/`--tags`/`--mirror`, xóa
+branch, lệnh nối chuỗi `&&`) đều bị chặn. Không force-push, merge hoặc
+deploy — bị chặn vĩnh viễn bởi extension (kể cả `-f`, `-uf`, `-fu`,
+`--force*`, refspec dấu `+`).
 
 Khi được commit và push:
 
@@ -96,7 +105,7 @@ test
 git diff review
 git commit
 git status --porcelain
-git push
+git push -u origin HEAD:refs/heads/agent/<TASK_ID>
 git rev-parse HEAD
 ```
 
