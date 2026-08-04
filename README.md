@@ -6,7 +6,7 @@ Paseo giữ lifecycle/workspace/control-plane truth; Pi extension giữ role
 invariant (prompt + tool policy); Lead skill giữ quy trình orchestration.
 
 Tham chiếu thiết kế đầy đủ:
-[`demonthorn-agent-orchestration-deep-dive.md`](../demonthorn-agent-orchestration-deep-dive.md).
+[`docs/demonthorn-agent-orchestration-deep-dive.md`](docs/demonthorn-agent-orchestration-deep-dive.md).
 
 ## Cấu trúc
 
