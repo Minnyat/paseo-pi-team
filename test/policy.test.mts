@@ -44,7 +44,9 @@ const v2WriteBrief = [
 }
 
 {
-	const brief = parseTaskBrief("PASEO_TEAM_TASK_V1\n\nMODE: write\n\nOBJECTIVE: x");
+	const brief = parseTaskBrief(
+		"PASEO_TEAM_TASK_V1\n\nMODE: write\n\nOBJECTIVE: x",
+	);
 	assert.ok(brief, "V1 brief parses");
 	assert.equal(brief.version, 1);
 	assert.equal(brief.mode, "write");
@@ -52,15 +54,29 @@ const v2WriteBrief = [
 }
 
 // Header must be the first non-empty line.
-assert.equal(parseTaskBrief("MODE: write\nmore content"), null, "no header → null");
+assert.equal(
+	parseTaskBrief("MODE: write\nmore content"),
+	null,
+	"no header → null",
+);
 assert.equal(parseTaskBrief("X PASEO_TEAM_TASK_V2\nMODE: write"), null);
-assert.equal(parseTaskBrief("PASEO_TEAM_TASK_V3\nMODE: write"), null, "unknown version");
-assert.equal(parseTaskBrief("PASEO_TEAM_TASK_V\nMODE: write"), null, "truncated header");
+assert.equal(
+	parseTaskBrief("PASEO_TEAM_TASK_V3\nMODE: write"),
+	null,
+	"unknown version",
+);
+assert.equal(
+	parseTaskBrief("PASEO_TEAM_TASK_V\nMODE: write"),
+	null,
+	"truncated header",
+);
 assert.equal(parseTaskBrief("random prompt"), null);
 
 // Valid header with missing MODE → brief parsed, mode null, malformed noted.
 {
-	const brief = parseTaskBrief("PASEO_TEAM_TASK_V2\n\nTASK_ID: T-9\nOBJECTIVE: x");
+	const brief = parseTaskBrief(
+		"PASEO_TEAM_TASK_V2\n\nTASK_ID: T-9\nOBJECTIVE: x",
+	);
 	assert.ok(brief);
 	assert.equal(brief.mode, null);
 	assert.ok(brief.malformed.some((m) => m.includes("missing MODE")));
@@ -84,10 +100,7 @@ assert.equal(parseTaskBrief("random prompt"), null);
 }
 
 // MODE is case-insensitive; other content after header is fine.
-assert.equal(
-	parseTaskBrief("PASEO_TEAM_TASK_V1\nMODE: Write")?.mode,
-	"write",
-);
+assert.equal(parseTaskBrief("PASEO_TEAM_TASK_V1\nMODE: Write")?.mode, "write");
 
 // --- parsePeerMode (legacy, strict-brief based) -------------------------------
 
@@ -96,9 +109,17 @@ assert.equal(
 	"write",
 );
 assert.equal(parsePeerMode("PASEO_TEAM_TASK_V2\nMODE: read-only"), "read-only");
-assert.equal(parsePeerMode("MODE: write\nmore content"), null, "no header → null");
+assert.equal(
+	parsePeerMode("MODE: write\nmore content"),
+	null,
+	"no header → null",
+);
 assert.equal(parsePeerMode("no mode here"), null);
-assert.equal(parsePeerMode("X MODE: write"), null, "MODE must be line-anchored");
+assert.equal(
+	parsePeerMode("X MODE: write"),
+	null,
+	"MODE must be line-anchored",
+);
 
 // --- resolvePeerMode (fail-closed) --------------------------------------------
 
@@ -122,7 +143,9 @@ assert.equal(
 
 {
 	// V1 / no brief: edit follows mode; commit/push denied.
-	const auth = peerGitAuthority(parseTaskBrief("PASEO_TEAM_TASK_V1\nMODE: write"));
+	const auth = peerGitAuthority(
+		parseTaskBrief("PASEO_TEAM_TASK_V1\nMODE: write"),
+	);
 	assert.deepEqual(auth, {
 		edit: true,
 		commit: false,
@@ -145,45 +168,55 @@ assert.equal(
 }
 {
 	// V2 explicit allow wins over mode default; explicit deny wins over mode.
-	const allow = peerGitAuthority(parseTaskBrief(
-		"PASEO_TEAM_TASK_V2\nMODE: write\nCOMMIT_AUTHORITY: allowed\nPUSH_TASK_BRANCH_AUTHORITY: allowed",
-	));
+	const allow = peerGitAuthority(
+		parseTaskBrief(
+			"PASEO_TEAM_TASK_V2\nMODE: write\nCOMMIT_AUTHORITY: allowed\nPUSH_TASK_BRANCH_AUTHORITY: allowed",
+		),
+	);
 	assert.equal(allow.commit, true);
 	assert.equal(allow.pushTaskBranch, true);
 	assert.equal(allow.forcePush, false, "force-push never allowed");
 	assert.equal(allow.merge, false, "merge never allowed");
 
-	const denyEdit = peerGitAuthority(parseTaskBrief(
-		"PASEO_TEAM_TASK_V2\nMODE: write\nEDIT_AUTHORITY: denied",
-	));
+	const denyEdit = peerGitAuthority(
+		parseTaskBrief("PASEO_TEAM_TASK_V2\nMODE: write\nEDIT_AUTHORITY: denied"),
+	);
 	assert.equal(denyEdit.edit, false, "explicit deny overrides MODE: write");
 }
 {
 	// A brief claiming force-push/merge is still denied.
-	const auth = peerGitAuthority(parseTaskBrief(
-		"PASEO_TEAM_TASK_V2\nMODE: write\nFORCE_PUSH_AUTHORITY: allowed\nMERGE_AUTHORITY: allowed",
-	));
+	const auth = peerGitAuthority(
+		parseTaskBrief(
+			"PASEO_TEAM_TASK_V2\nMODE: write\nFORCE_PUSH_AUTHORITY: allowed\nMERGE_AUTHORITY: allowed",
+		),
+	);
 	assert.equal(auth.forcePush, false);
 	assert.equal(auth.merge, false);
 }
 
 // --- gitAuthorityBlockReason ---------------------------------------------------
 
-const fullAuth = peerGitAuthority(parseTaskBrief(
-	"PASEO_TEAM_TASK_V2\nMODE: write\nCOMMIT_AUTHORITY: allowed\nPUSH_TASK_BRANCH_AUTHORITY: allowed",
-));
+const fullAuth = peerGitAuthority(
+	parseTaskBrief(
+		"PASEO_TEAM_TASK_V2\nMODE: write\nCOMMIT_AUTHORITY: allowed\nPUSH_TASK_BRANCH_AUTHORITY: allowed",
+	),
+);
 const noAuth = peerGitAuthority(null);
 
 assert.equal(gitAuthorityBlockReason("npm test", fullAuth), null);
 assert.equal(gitAuthorityBlockReason("git commit -m x", fullAuth), null);
-assert.equal(gitAuthorityBlockReason("git push origin task/t-1", fullAuth), null);
+assert.equal(
+	gitAuthorityBlockReason("git push origin task/t-1", fullAuth),
+	null,
+);
 assert.match(
 	gitAuthorityBlockReason("git push -f origin task/t-1", fullAuth) ?? "",
 	/FORCE_PUSH/,
 	"force-push blocked even with push authority",
 );
 assert.match(
-	gitAuthorityBlockReason("git push --force-with-lease origin b", fullAuth) ?? "",
+	gitAuthorityBlockReason("git push --force-with-lease origin b", fullAuth) ??
+		"",
 	/FORCE_PUSH/,
 );
 assert.match(
@@ -214,23 +247,35 @@ assert.match(
 // --- classifyMcpInput -----------------------------------------------------------
 
 assert.deepEqual(classifyMcpInput({ connect: "paseo" }), { kind: "meta" });
-assert.deepEqual(classifyMcpInput({ search: "create_agent" }), { kind: "meta" });
-assert.deepEqual(classifyMcpInput({ describe: "list_agents" }), { kind: "meta" });
+assert.deepEqual(classifyMcpInput({ search: "create_agent" }), {
+	kind: "meta",
+});
+assert.deepEqual(classifyMcpInput({ describe: "list_agents" }), {
+	kind: "meta",
+});
 assert.deepEqual(classifyMcpInput({ instructions: "x" }), { kind: "meta" });
 assert.deepEqual(classifyMcpInput({ server: "paseo" }), { kind: "meta" });
 assert.deepEqual(classifyMcpInput({}), { kind: "meta" }, "status call");
 assert.deepEqual(classifyMcpInput({ action: "ui-messages" }), { kind: "meta" });
-assert.deepEqual(
-	classifyMcpInput({ tool: "list_agents", args: {} }),
-	{ kind: "target", target: "list_agents" },
+assert.deepEqual(classifyMcpInput({ tool: "list_agents", args: {} }), {
+	kind: "target",
+	target: "list_agents",
+});
+assert.deepEqual(classifyMcpInput({ tool: "paseo_create_agent" }), {
+	kind: "target",
+	target: "paseo_create_agent",
+});
+assert.equal(
+	classifyMcpInput({ tool: 123 }).kind,
+	"unknown",
+	"non-string tool",
 );
-assert.deepEqual(
-	classifyMcpInput({ tool: "paseo_create_agent" }),
-	{ kind: "target", target: "paseo_create_agent" },
-);
-assert.equal(classifyMcpInput({ tool: 123 }).kind, "unknown", "non-string tool");
 assert.equal(classifyMcpInput({ tool: "" }).kind, "unknown", "empty tool");
-assert.equal(classifyMcpInput("list_agents").kind, "unknown", "non-object input");
+assert.equal(
+	classifyMcpInput("list_agents").kind,
+	"unknown",
+	"non-object input",
+);
 assert.equal(classifyMcpInput(null).kind, "unknown");
 assert.equal(classifyMcpInput({ action: "auth-start" }).kind, "unknown");
 assert.equal(
@@ -278,7 +323,10 @@ assert.equal(mcpBlockReason("supervisor", { search: "agents" }), null);
 assert.equal(mcpBlockReason("supervisor", {}), null);
 // Supervisor allowed targets pass (prefixed and bare).
 assert.equal(mcpBlockReason("supervisor", { tool: "list_agents" }), null);
-assert.equal(mcpBlockReason("supervisor", { tool: "paseo_get_agent_status" }), null);
+assert.equal(
+	mcpBlockReason("supervisor", { tool: "paseo_get_agent_status" }),
+	null,
+);
 // Supervisor blocked targets.
 assert.match(
 	mcpBlockReason("supervisor", { tool: "create_terminal" }) ?? "",
@@ -456,7 +504,9 @@ type StubEvent = {
 	toolName?: string;
 	input?: unknown;
 };
-type StubHandler = (event: StubEvent) => Promise<{ block?: boolean; reason?: string } | undefined>;
+type StubHandler = (
+	event: StubEvent,
+) => Promise<{ block?: boolean; reason?: string } | undefined>;
 type StubHandlers = Record<string, StubHandler[]>;
 
 interface PiStub {
@@ -467,16 +517,19 @@ interface PiStub {
 	registerCommand: () => void;
 }
 
-function makePiStub(toolNames: string[], sink: string[] = []): {
+function makePiStub(
+	toolNames: string[],
+	sink: string[] = [],
+): {
 	piStub: PiStub;
 	handlers: StubHandlers;
 } {
 	const handlers: StubHandlers = {};
-	const register: (handlers: StubHandlers, name: string, fn: StubHandler) => void = (
-		h,
-		name,
-		fn,
-	) => {
+	const register: (
+		handlers: StubHandlers,
+		name: string,
+		fn: StubHandler,
+	) => void = (h, name, fn) => {
 		(h[name] ??= []).push(fn);
 	};
 	const piStub: PiStub = {
@@ -492,9 +545,7 @@ function makePiStub(toolNames: string[], sink: string[] = []): {
 	return { piStub, handlers };
 }
 
-async function loadFreshExtension(tag: string): Promise<
-	(pi: PiStub) => void
-> {
+async function loadFreshExtension(tag: string): Promise<(pi: PiStub) => void> {
 	const specifier = `../extensions/paseo-team-policy.ts?${tag}`;
 	const mod: { default: (pi: PiStub) => void } = await import(specifier);
 	return mod.default;
@@ -534,7 +585,10 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 
 	// turn 2: follow-up prompt with no brief → read-only (no leak).
 	tools = await fire("Looks good, keep going.");
-	assert.ok(!tools.includes("write"), "missing brief → read-only, no mode leak");
+	assert.ok(
+		!tools.includes("write"),
+		"missing brief → read-only, no mode leak",
+	);
 
 	// turn 3: valid write again.
 	tools = await fire("PASEO_TEAM_TASK_V2\nMODE: write\nOBJECTIVE: y");
@@ -572,7 +626,10 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 		toolCall({ toolName: "bash", input: { command } });
 
 	// V1 brief (no authority fields) → commit/push blocked from bash.
-	await before({ prompt: "PASEO_TEAM_TASK_V1\nMODE: write", systemPrompt: "base" });
+	await before({
+		prompt: "PASEO_TEAM_TASK_V1\nMODE: write",
+		systemPrompt: "base",
+	});
 	assert.match(
 		(await bash("git commit -m x"))?.reason ?? "",
 		/COMMIT_AUTHORITY/,
@@ -609,7 +666,8 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 	// Correction via real Paseo send (peer receives prompt without header):
 	// mcp proxy always blocked for peers.
 	assert.match(
-		(await toolCall({ toolName: "mcp", input: { tool: "list_agents" } }))?.reason ?? "",
+		(await toolCall({ toolName: "mcp", input: { tool: "list_agents" } }))
+			?.reason ?? "",
 		/MCP proxy/,
 	);
 
@@ -645,7 +703,10 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 		/non-string|missing/,
 		"empty tool target → fail-closed",
 	);
-	assert.match(await reasonOf(mcp({ frobnicate: true })), /determinable target/);
+	assert.match(
+		await reasonOf(mcp({ frobnicate: true })),
+		/determinable target/,
+	);
 	assert.match(await reasonOf(mcp(null)), /not an object/);
 	assert.match(
 		(await toolCall({ toolName: "write", input: {} }))?.reason ?? "",

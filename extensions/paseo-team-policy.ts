@@ -217,7 +217,13 @@ export interface McpInputClassification {
  * connection, discovery, and adapter housekeeping. Anything else must carry
  * a determinable target (`tool: "<name>"`) to be allowed.
  */
-const MCP_META_KEYS = ["connect", "search", "describe", "instructions", "server"];
+const MCP_META_KEYS = [
+	"connect",
+	"search",
+	"describe",
+	"instructions",
+	"server",
+];
 const MCP_META_ACTIONS = new Set(["ui-messages"]);
 
 export function classifyMcpInput(input: unknown): McpInputClassification {
@@ -301,7 +307,10 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 const MCP_SCRIPT_DIRECT_CALL_RE =
 	/\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(|\btools\.call\(\s*["'`]([^"'`]+)["'`]/g;
 
-export function mcpScriptBlockReason(role: TeamRole, code: string): string | null {
+export function mcpScriptBlockReason(
+	role: TeamRole,
+	code: string,
+): string | null {
 	const allowed = mcpAllowedTargets(role);
 	for (const match of code.matchAll(MCP_SCRIPT_DIRECT_CALL_RE)) {
 		const name = match[1] ?? match[2] ?? "";
@@ -358,7 +367,11 @@ export function parseTaskBrief(prompt: string): ParsedTaskBrief | null {
 	for (const line of lines) {
 		const fieldMatch = line.match(BRIEF_FIELD_RE);
 		const key = fieldMatch?.[1];
-		if (key !== undefined && fieldMatch?.[2] !== undefined && !fields.has(key)) {
+		if (
+			key !== undefined &&
+			fieldMatch?.[2] !== undefined &&
+			!fields.has(key)
+		) {
 			fields.set(key, fieldMatch[2].trim());
 		}
 	}
@@ -383,7 +396,9 @@ export function parseTaskBrief(prompt: string): ParsedTaskBrief | null {
 			if (value !== undefined) {
 				const normalized = value.toLowerCase();
 				if (normalized !== "allowed" && normalized !== "denied") {
-					malformed.push(`invalid ${field} value "${value}" (treated as denied)`);
+					malformed.push(
+						`invalid ${field} value "${value}" (treated as denied)`,
+					);
 				}
 			}
 		}
@@ -420,12 +435,15 @@ function authorityField(
  * are denied unless the brief explicitly allows them; force-push, merge and
  * deploy are never allowed, even if a brief claims otherwise.
  */
-export function peerGitAuthority(brief: ParsedTaskBrief | null): PeerGitAuthority {
+export function peerGitAuthority(
+	brief: ParsedTaskBrief | null,
+): PeerGitAuthority {
 	const mode = resolvePeerMode(brief);
 	return {
 		edit: authorityField(brief, "EDIT_AUTHORITY") ?? mode === "write",
 		commit: authorityField(brief, "COMMIT_AUTHORITY") ?? false,
-		pushTaskBranch: authorityField(brief, "PUSH_TASK_BRANCH_AUTHORITY") ?? false,
+		pushTaskBranch:
+			authorityField(brief, "PUSH_TASK_BRANCH_AUTHORITY") ?? false,
 		forcePush: false,
 		merge: false,
 		deploy: false,
@@ -439,7 +457,8 @@ export function peerGitAuthority(brief: ParsedTaskBrief | null): PeerGitAuthorit
 
 const GIT_COMMIT_RE = /\bgit\b[^|;&]*\bcommit\b/i;
 const GIT_PUSH_RE = /\bgit\b[^|;&]*\bpush\b/i;
-const GIT_FORCE_PUSH_RE = /\bgit\b[^|;&]*\bpush\b[^|;&]*(?:--force(?:-with-lease)?\b|\s-f\b)/i;
+const GIT_FORCE_PUSH_RE =
+	/\bgit\b[^|;&]*\bpush\b[^|;&]*(?:--force(?:-with-lease)?\b|\s-f\b)/i;
 const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b/i;
 
 export function gitAuthorityBlockReason(
@@ -661,8 +680,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		if (r === "lead" && isToolCallEventType("mcp_script", event)) {
-			const code =
-				typeof event.input.code === "string" ? event.input.code : "";
+			const code = typeof event.input.code === "string" ? event.input.code : "";
 			const blockReason = mcpScriptBlockReason(r, code);
 			if (blockReason) {
 				return { block: true, reason: blockReason };
