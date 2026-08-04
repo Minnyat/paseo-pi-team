@@ -49,30 +49,44 @@ Paseo tools are not separate tools in the prompt — they are reached through th
 For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
-2. Pick `HOST_ID` (usually `local`; see hosts config for multi-host).
-3. Read that host's routing config: ask yourself for
-   `~/.paseo-pi-team/model-routing.local.json` (via `read`, or run the
-   resolver: `node scripts/model-router.mjs resolve --class <CLASS>` when
-   the role pack repo is available).
-4. Call `list_providers` (mcp) on the target daemon.
-5. Verify the route's role provider exists and is enabled/available →
+2. Pick `HOST_ID` from the controller-local cluster routing file
+   `~/.paseo-pi-team/cluster-routing.local.json` (capability filter: writers
+   need `git-write`+`focused-test`; reviewers need `git-read`+`independent-review`).
+3. Read that host's route from the SAME file (single source of truth for the
+   whole cluster — never infer a remote host's route from local memory), or
+   run the resolver when the role pack repo is available:
+   `node scripts/model-routing.mjs resolve --class <CLASS>` for the local
+   `model-routing.local.json` (legacy single-host form).
+4. Verify the target daemon is reachable (local: `paseo status`; remote: the
+   endpoint env var named by `connection.endpointEnv` must be SET before
+   routing — never print or invent its value).
+5. Call `list_providers` (mcp) ON THE TARGET DAEMON (remote daemons via the
+   `--host` mechanism; verify the answer comes from the intended daemon).
+6. Verify the route's role provider exists and is enabled AND reports a
+   healthy status (an enabled provider with a bad status is NOT routable) →
    else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
-6. Call `list_models` for that role provider.
-7. Verify the exact model ID exists → else `BLOCKED: MODEL_UNAVAILABLE`.
-8. Verify the configured thinking level is in the model's thinking options →
-   else `BLOCKED: THINKING_OPTION_UNAVAILABLE`.
-9. Compute the exact create_agent provider string:
-   `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
-   slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
-   Thinking goes in `settings.thinkingOptionId` — never inside the model string.
-10. Create the workspace when needed (worktree isolation for writers).
-11. Call `create_agent` with the exact provider string + thinking. NEVER omit
+7. Call `list_models` for that role provider.
+8. Verify the exact model ID exists (check BOTH segments are non-empty in
+   `<pi-provider>/<model-id>`) → else `BLOCKED: MODEL_UNAVAILABLE`.
+9. Verify the configured thinking level is in the model's thinking options →
+   else `BLOCKED: THINKING_OPTION_UNAVAILABLE`. If the model exposes NO
+   option list, thinking is UNVERIFIABLE — refuse the route
+   (strict policy: unverifiable is not a pass).
+10. Verify against `~/.pi/agent/models.json` `thinkingLevelMap` on the target
+    host: a level mapped to `null` is silently clamped by pi → pick another
+    level/model instead of accepting the clamp.
+11. Compute the exact create_agent provider string:
+    `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
+    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
+    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
+12. Create the workspace when needed (worktree isolation for writers).
+13. Call `create_agent` with the exact provider string + thinking. NEVER omit
     the model to inherit a daemon default.
-12. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
+14. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
     `runtimeInfo.thinkingOptionId`; compare against requested values →
     mismatch (or missing runtimeInfo) → `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
     archive the wrongly-resolved agent.
-13. Only then deliver/continue the initial task.
+15. Only then deliver/continue the initial task.
 
 Never: omit the model field, silently change models, fall back to another
 model or host without recording a routing decision, launch first and "hope",
@@ -156,37 +170,42 @@ Never merge or deploy yourself — that decision belongs to Human.
 
 ## Task brief template
 
-Every Peer prompt that should grant authority must start with the
-`PASEO_TEAM_TASK_V2` header (or the legacy `PASEO_TEAM_TASK_V1` header).
-The extension enforces this fail-closed on **every turn**:
+Every Peer prompt that should grant authority must be a V3 brief: an
+authority block between the markers `PASEO_TEAM_TASK_V3_BEGIN` and
+`PASEO_TEAM_TASK_V3_END`, with the Prose task body AFTER the end marker
+(canonical template: `templates/TASK_BRIEF_V3.md`). The extension enforces
+this fail-closed on **every turn**:
 
-- prompt without a valid header → `read-only`;
-- valid header with missing or invalid `MODE` → `read-only`;
+- prompt without a valid V3 block (or legacy V1/V2 header) → `read-only`;
+- V3 block without the closing marker → invalid → `read-only`, no fields;
+- field outside the allowlist, duplicate field, or bad value → invalid;
+- `EDIT_AUTHORITY: denied` blocks write/edit even when `MODE: write`;
 - write mode never carries over from a previous turn.
 
 ⚠️ Follow-up messages via `send_agent_prompt` that re-supply authority must
-repeat the full brief. A plain correction message without the header silently
-downgrades the Peer to read-only for that turn (by design).
+repeat the full brief. A plain correction message without the markers
+silently downgrades the Peer to read-only for that turn (by design).
 
 ```text
-PASEO_TEAM_TASK_V2
+PASEO_TEAM_TASK_V3_BEGIN
 
 TASK_ID: T-<number>
+PROJECT_ID: <project>
 DISPOSITION: <see list below>
 MODE: write | read-only
 
-MODEL_CLASS: <MONITOR_ECONOMY|FAST_READ|CODING_MEDIUM|REASONING_HIGH|REVIEW_HIGH>
-RESOLVED_HOST_ID: <host-id>
-RESOLVED_PASEO_PROVIDER: <pi-supervisor|pi-lead|pi-peer>
-RESOLVED_MODEL: <pi-provider>/<model-id>   # exact, from list_models
-RESOLVED_THINKING: <off|minimal|low|medium|high|xhigh|max>
+ASSIGNED_HOST_ID: <host-id>              # from cluster-routing.local.json
+ASSIGNED_PASEO_PROVIDER: <pi-supervisor|pi-lead|pi-peer>
+ASSIGNED_MODEL: <pi-provider>/<model-id>   # exact, from list_models
+ASSIGNED_THINKING: <off|minimal|low|medium|high|xhigh|max>
+WORKSPACE_REF: <worktree-or-workspace>
+AGENT_REF:
 
-OBJECTIVE:
-SCOPE:
-OWNED_SCOPE:
-EXCLUDED_SCOPE:
-KNOWN_EVIDENCE:
-OPEN_QUESTIONS:
+EXPECTED_BASE_SHA: <sha>                 # writer preconditions
+ASSIGNED_CANDIDATE_SHA: <sha>            # reviewer only; exact
+
+OWNED_SCOPE: <files>
+EXCLUDED_SCOPE: <files>
 
 EDIT_AUTHORITY: allowed | denied        # default: follows MODE
 COMMIT_AUTHORITY: allowed | denied      # default: denied
@@ -195,19 +214,28 @@ FORCE_PUSH_AUTHORITY: denied            # always denied for peers
 MERGE_AUTHORITY: denied                 # always denied for peers
 DEPLOY_AUTHORITY: denied                # always denied
 
-VERIFICATION:
-HANDOFF:
+VERIFICATION_PROFILE: <focused-test|independent-review|...>
+RETURN_CHANNEL: paseo
+
+PASEO_TEAM_TASK_V3_END
+
+TASK_BODY_BEGIN
+OBJECTIVE / SUCCESS_BOUNDARY / KNOWN_EVIDENCE / QUESTIONS TO ANSWER
+CONSTRAINTS / REQUIRED HANDOFF
+TASK_BODY_END
 ```
 
-The RESOLVED_*fields are informational evidence for the peer — the model was
-already chosen by you at `create_agent` time. A peer that notices a mismatch
-(observed vs RESOLVED_*) escalates `MODEL_MISMATCH`; it never changes its own
-model.
+The `ASSIGNED_*` fields are evidence for the peer — the model was already
+chosen by you at `create_agent` time. The peer echoes them back and, when
+its tools let it see a mismatch, escalates `MODEL_MISMATCH`. The peer never
+reports invented `OBSERVED_*` values: **you own observed routing evidence**
+(via `get_agent_status → snapshot.runtimeInfo`), and a missing/unverifiable
+runtime identity is a failure, not a pass.
 
-V1 briefs (no authority fields) still parse: `EDIT` follows `MODE`,
-`COMMIT`/`PUSH` default to **denied** — so a V1 writer cannot `git commit`
-or `git push` from bash. Do not ask for a candidate SHA unless you granted
-`COMMIT_AUTHORITY: allowed`; ask for a stable workspace snapshot instead.
+Do not ask for a candidate SHA unless you granted `COMMIT_AUTHORITY:
+allowed`; ask for a stable workspace snapshot (`WORKSPACE_REF` + diff
+summary + clean-state evidence) instead, and do NOT route that snapshot to
+a cross-host reviewer until an integration owner has created a commit.
 Cross-host review requires granting both `COMMIT` and `PUSH_TASK_BRANCH`.
 
 Dispositions: `repository-scout`, `documentation-researcher`,
@@ -247,7 +275,8 @@ HANDOFF:
 ```
 
 Valid escalations: `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, `BLOCKED`,
-`MODEL_MISMATCH` (observed model/thinking differs from RESOLVED_* in the
-brief — the peer must never change its model itself), `AUTHORITY_MISMATCH`.
+`MODEL_MISMATCH` (runtime identity differs from the `ASSIGNED_*` fields in
+the brief — the peer must never change its model itself),
+`AUTHORITY_MISMATCH`, `SCOPE_CONFLICT`.
 
 Treat claims without file/command/test evidence as opinions, not evidence.

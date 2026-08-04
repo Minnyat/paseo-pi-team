@@ -1,39 +1,28 @@
-PASEO_TEAM_TASK_V2
+# Example — engineer task (write)
+
+Ví dụ brief V3 Lead gửi cho Engineer Peer. Authority block nằm giữa
+`PASEO_TEAM_TASK_V3_BEGIN`/`END`; body bên dưới là untrusted text.
+
+```text
+PASEO_TEAM_TASK_V3_BEGIN
 
 TASK_ID: T-001
+PROJECT_ID: team-test-repo
 DISPOSITION: engineer
 MODE: write
 
-MODEL_CLASS: CODING_MEDIUM
-RESOLVED_HOST_ID: local
-RESOLVED_PASEO_PROVIDER: pi-peer
-RESOLVED_MODEL: <pi-provider>/<model-id>
-RESOLVED_THINKING: medium
+ASSIGNED_HOST_ID: win-primary
+ASSIGNED_PASEO_PROVIDER: pi-peer
+ASSIGNED_MODEL: <pi-provider>/<model-id>
+ASSIGNED_THINKING: medium
+WORKSPACE_REF: worktree:../worktrees/T-001
+AGENT_REF:
 
-OBJECTIVE:
-Fix the divide-by-zero and negative-sqrt edge cases in calculator.py so that
-all tests in test_calculator.py pass without changing their assertions.
+EXPECTED_BASE_SHA: <base-sha>
+ASSIGNED_CANDIDATE_SHA:
 
-SCOPE:
-The team-test-repo repository.
-
-OWNED_SCOPE:
-calculator.py
-test_calculator.py
-
-EXCLUDED_SCOPE:
-Any other file. No deploy, no external system changes.
-
-KNOWN_EVIDENCE:
-
-- test_calculator.py currently has two failing tests (divide by zero, sqrt of
-  negative input).
-- The failures reproduce with: python -m pytest test_calculator.py --tb=short
-
-OPEN_QUESTIONS:
-
-- Should sqrt(-1) raise ValueError, or return a domain-error sentinel? Choose
-  the option that satisfies the existing test expectations.
+OWNED_SCOPE: calculator.py, test_calculator.py
+EXCLUDED_SCOPE: any other file; no deploy, no external system changes
 
 EDIT_AUTHORITY: allowed
 COMMIT_AUTHORITY: allowed
@@ -42,22 +31,40 @@ FORCE_PUSH_AUTHORITY: denied
 MERGE_AUTHORITY: denied
 DEPLOY_AUTHORITY: denied
 
-VERIFICATION:
+VERIFICATION_PROFILE: focused-test
+RETURN_CHANNEL: paseo
 
-- FORMAT_COMMAND: <declared workspace formatter, or: none>
-- TEST_COMMAND: python -m pytest test_calculator.py --tb=short
+PASEO_TEAM_TASK_V3_END
+
+TASK_BODY_BEGIN
+
+OBJECTIVE:
+Fix the divide-by-zero and negative-sqrt edge cases in calculator.py so that
+all tests in test_calculator.py pass without changing their assertions.
+
+SUCCESS_BOUNDARY:
+python -m pytest test_calculator.py --tb=short passes; git status --porcelain
+is empty after the final commit.
+
+KNOWN_EVIDENCE:
+- test_calculator.py currently has two failing tests (divide by zero, sqrt of
+  negative input).
+- The failures reproduce with: python -m pytest test_calculator.py --tb=short
+
+QUESTIONS TO ANSWER:
+- Should sqrt(-1) raise ValueError, or return a domain-error sentinel? Choose
+  the option that satisfies the existing test expectations.
+
+CONSTRAINTS:
 - Order is mandatory: format → test → commit → check clean.
 - After your final commit, `git status --porcelain` must print nothing.
-  If it prints anything (e.g. a formatter rewrote the file after your commit),
-  fix it before handing off: re-format, re-test, amend a NEW commit on top
-  (no amend/force on pushed refs), and re-check clean.
+- Report CANDIDATE_SHA = `git rev-parse HEAD` (COMMIT_AUTHORITY was granted).
+- PUSH_TASK_BRANCH_AUTHORITY: denied — do not push; the Lead integrates.
 
-HANDOFF:
+REQUIRED HANDOFF:
+- FILES_CHANGED, COMMANDS_RUN, exact test output summary
+- CANDIDATE_SHA, BRANCH, WORKTREE_CLEAN
+- RISKS, OPEN_QUESTIONS
 
-- CANDIDATE_SHA: exact commit of your change (COMMIT_AUTHORITY is granted).
-- BRANCH: the task branch name.
-- PUSHED_REMOTE: none (push is denied for this task; review is local).
-- GIT_STATUS_PORCELAIN: paste the empty output of `git status --porcelain`.
-- WORKTREE_CLEAN: yes
-- FILES_CHANGED, COMMANDS_RUN, and the exact test output.
-- Do not merge or deploy.
+TASK_BODY_END
+```

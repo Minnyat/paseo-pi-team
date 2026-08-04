@@ -161,6 +161,31 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 	}
 }
 
+/**
+ * Effective peer policy for the CURRENT turn. `MODE: write` grants write/edit
+ * tools only when the brief also grants edit authority: an explicit
+ * `EDIT_AUTHORITY: denied` (or a fail-closed V3 brief) strips write/edit
+ * even on a write-mode turn.
+ */
+export function policyWithAuthority(
+	role: TeamRole,
+	peerMode: PeerMode,
+	brief: ParsedTaskBrief | null,
+): Policy {
+	const policy = policyFor(role, peerMode);
+	if (
+		role === "peer" &&
+		peerMode === "write" &&
+		!peerGitAuthority(brief).edit
+	) {
+		return {
+			allow: policy.allow.filter((t) => t !== "write" && t !== "edit"),
+			deny: [...new Set([...policy.deny, "write", "edit"])],
+		};
+	}
+	return policy;
+}
+
 export function denyReason(
 	role: TeamRole,
 	peerMode: PeerMode,
@@ -305,7 +330,7 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
  * role allowlist. Not a security boundary.
  */
 const MCP_SCRIPT_DIRECT_CALL_RE =
-	/\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(|\btools\.call\(\s*["'`]([^"'`]+)["'`]/g;
+	/\btools\.call\(\s*["'`]([^"'`]+)["'`]|\btools\[["'`]([^"'`]+)["'`]\]\s*\(|\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
 export function mcpScriptBlockReason(
 	role: TeamRole,
@@ -313,7 +338,10 @@ export function mcpScriptBlockReason(
 ): string | null {
 	const allowed = mcpAllowedTargets(role);
 	for (const match of code.matchAll(MCP_SCRIPT_DIRECT_CALL_RE)) {
-		const name = match[1] ?? match[2] ?? "";
+		// Group order mirrors the pattern: tools.call(...), tools[...],
+		// tools.<name>(...). tools.call must be tried first — otherwise the
+		// dotted branch swallows it as the name "call" and skips the target.
+		const name = match[1] ?? match[2] ?? match[3] ?? "";
 		if (["call", "describe", "search", "emit"].includes(name)) continue;
 		if (!matchesPaseoToolName(name, allowed)) {
 			return `Tool "${name}" referenced in mcp_script is not in the ${role} MCP allowlist.`;
@@ -323,10 +351,10 @@ export function mcpScriptBlockReason(
 }
 
 // ---------------------------------------------------------------------------
-// Strict task brief (PASEO_TEAM_TASK_V1 | V2)
+// Strict task brief (PASEO_TEAM_TASK_V1 | V2 legacy header | V3 marker block)
 // ---------------------------------------------------------------------------
 
-export type BriefVersion = 1 | 2;
+export type BriefVersion = 1 | 2 | 3;
 
 export interface ParsedTaskBrief {
 	version: BriefVersion;
@@ -339,6 +367,8 @@ export interface ParsedTaskBrief {
 }
 
 const BRIEF_HEADER_RE = /^PASEO_TEAM_TASK_V([12])$/;
+const V3_BEGIN = "PASEO_TEAM_TASK_V3_BEGIN";
+const V3_END = "PASEO_TEAM_TASK_V3_END";
 const BRIEF_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
 const AUTHORITY_FIELDS = [
 	"EDIT_AUTHORITY",
@@ -350,6 +380,123 @@ const AUTHORITY_FIELDS = [
 ] as const;
 
 /**
+ * V3 field allowlist. Anything outside this set makes the whole brief
+ * fail-closed (read-only, all authorities denied) — unknown structure is
+ * treated as hostile input, not as free text to ignore.
+ */
+const V3_ALLOWED_FIELDS = new Set([
+	"TASK_ID",
+	"PROJECT_ID",
+	"DISPOSITION",
+	"MODE",
+	"ASSIGNED_HOST_ID",
+	"ASSIGNED_PASEO_PROVIDER",
+	"ASSIGNED_MODEL",
+	"ASSIGNED_THINKING",
+	"WORKSPACE_REF",
+	"AGENT_REF",
+	"EXPECTED_BASE_SHA",
+	"ASSIGNED_CANDIDATE_SHA",
+	"OWNED_SCOPE",
+	"EXCLUDED_SCOPE",
+	"VERIFICATION_PROFILE",
+	"RETURN_CHANNEL",
+	...AUTHORITY_FIELDS,
+]);
+
+/**
+ * Parse a V3 marker-block brief. The block starts at the exact first
+ * non-empty line `PASEO_TEAM_TASK_V3_BEGIN` and ends at the first line that
+ * trims to `PASEO_TEAM_TASK_V3_END`. Only lines *before* the end marker are
+ * field-bearing; the task body after it is untrusted text and can never
+ * grant authority.
+ *
+ * Fail-closed rules (any hit → mode null, fields dropped):
+ *   - begin marker without end marker;
+ *   - unparseable line inside the block;
+ *   - field outside the allowlist;
+ *   - duplicate field (any field — cheaply catches injected overrides;
+ *     duplicate *authority* fields are the classic injection vector);
+ *   - missing/invalid MODE or malformed authority values.
+ */
+function parseV3Brief(lines: string[]): ParsedTaskBrief {
+	const malformed: string[] = [];
+	const fields = new Map<string, string>();
+	let begin = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if ((lines[i]?.trim() ?? "").length > 0) {
+			begin = i;
+			break;
+		}
+	}
+	let end = -1;
+	for (let i = begin + 1; i < lines.length; i++) {
+		if ((lines[i] ?? "").trim() === V3_END) {
+			end = i;
+			break;
+		}
+	}
+	if (end < 0) {
+		malformed.push("V3 brief has no closing PASEO_TEAM_TASK_V3_END marker");
+	} else {
+		for (let i = begin + 1; i < end; i++) {
+			const line = (lines[i] ?? "").trim();
+			if (line.length === 0) continue;
+			const match = line.match(BRIEF_FIELD_RE);
+			if (!match || match[1] === undefined || match[2] === undefined) {
+				malformed.push(`unparseable line in V3 brief: "${line}"`);
+				continue;
+			}
+			const key = match[1];
+			if (!V3_ALLOWED_FIELDS.has(key)) {
+				malformed.push(`unknown V3 brief field "${key}"`);
+				continue;
+			}
+			if (fields.has(key)) {
+				malformed.push(
+					AUTHORITY_FIELDS.includes(key as never)
+						? `duplicate authority field "${key}"`
+						: `duplicate field "${key}"`,
+				);
+				continue;
+			}
+			fields.set(key, match[2].trim());
+		}
+	}
+
+	const failClosed = (): ParsedTaskBrief => ({
+		version: 3,
+		mode: null,
+		malformed,
+		fields: new Map(),
+	});
+
+	let mode: PeerMode | null = null;
+	const rawMode = fields.get("MODE");
+	if (rawMode === undefined) {
+		malformed.push("missing MODE field");
+	} else {
+		const normalized = rawMode.toLowerCase();
+		if (normalized === "write" || normalized === "read-only") {
+			mode = normalized;
+		} else {
+			malformed.push(`invalid MODE value "${rawMode}"`);
+		}
+	}
+	for (const field of AUTHORITY_FIELDS) {
+		const value = fields.get(field);
+		if (value !== undefined) {
+			const normalized = value.toLowerCase();
+			if (normalized !== "allowed" && normalized !== "denied") {
+				malformed.push(`invalid ${field} value "${value}"`);
+			}
+		}
+	}
+	if (malformed.length > 0) return failClosed();
+	return { version: 3, mode, malformed, fields };
+}
+
+/**
  * Parse a task brief. Returns null when the prompt does not start with a
  * recognized header — callers must treat that as an unbriefed (read-only)
  * turn. A recognized header with a missing/invalid MODE yields
@@ -359,6 +506,7 @@ export function parseTaskBrief(prompt: string): ParsedTaskBrief | null {
 	const lines = prompt.split(/\r?\n/);
 	const firstNonEmpty = lines.map((l) => l.trim()).find((l) => l.length > 0);
 	if (!firstNonEmpty) return null;
+	if (firstNonEmpty === V3_BEGIN) return parseV3Brief(lines);
 	const headerMatch = firstNonEmpty.match(BRIEF_HEADER_RE);
 	if (!headerMatch || !headerMatch[1]) return null;
 	const version: BriefVersion = headerMatch[1] === "2" ? 2 : 1;
@@ -546,9 +694,13 @@ function extraTools(): string[] {
 		.filter(Boolean);
 }
 
+function currentPolicy(r: TeamRole): Policy {
+	return policyWithAuthority(r, currentPeerMode(), currentBrief);
+}
+
 function applyPolicy(pi: ExtensionAPI, r: TeamRole): Policy {
 	const registered = new Set(pi.getAllTools().map((t) => t.name));
-	const policy = policyFor(r, currentPeerMode());
+	const policy = currentPolicy(r);
 	const allowed = [...new Set([...policy.allow, ...extraTools()])].filter(
 		(name) => registered.has(name),
 	);
@@ -582,7 +734,7 @@ function registerDebugCommands(pi: ExtensionAPI, r: TeamRole | undefined) {
 							: ""
 					}`
 				: "brief=none";
-			const p = policyFor(r, currentPeerMode());
+			const p = currentPolicy(r);
 			ctx.ui.notify(
 				`role=${r} peerMode=${currentPeerMode()} ${briefInfo}\n${describePolicy(p)}`,
 				"info",
@@ -628,7 +780,7 @@ export default function (pi: ExtensionAPI) {
 	const r: TeamRole = activeRole;
 
 	console.log(
-		`[paseo-team] role=${r} peerMode=${currentPeerMode()} policy=${describePolicy(policyFor(r, currentPeerMode()))}`,
+		`[paseo-team] role=${r} peerMode=${currentPeerMode()} policy=${describePolicy(currentPolicy(r))}`,
 	);
 
 	pi.on("session_start", () => {
@@ -657,8 +809,19 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event) => {
 		const peerMode = currentPeerMode();
-		const policy = policyFor(r, peerMode);
+		const policy = currentPolicy(r);
 		if (policy.deny.includes(event.toolName)) {
+			if (
+				r === "peer" &&
+				peerMode === "write" &&
+				(event.toolName === "write" || event.toolName === "edit")
+			) {
+				return {
+					block: true,
+					reason:
+						"EDIT_AUTHORITY is denied for this task even though MODE is write. Report AUTHORITY_MISMATCH to the Lead.",
+				};
+			}
 			return {
 				block: true,
 				reason: denyReason(r, peerMode, event.toolName),
@@ -679,7 +842,10 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
-		if (r === "lead" && isToolCallEventType("mcp_script", event)) {
+		if (
+			(r === "lead" || r === "supervisor") &&
+			isToolCallEventType("mcp_script", event)
+		) {
 			const code = typeof event.input.code === "string" ? event.input.code : "";
 			const blockReason = mcpScriptBlockReason(r, code);
 			if (blockReason) {

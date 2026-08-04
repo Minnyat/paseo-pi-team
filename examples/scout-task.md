@@ -1,14 +1,13 @@
-PASEO_TEAM_TASK_V2
+PASEO_TEAM_TASK_V3_BEGIN
 
 TASK_ID: T-004
 DISPOSITION: repository-scout
 MODE: read-only
 
-MODEL_CLASS: FAST_READ
-RESOLVED_HOST_ID: local
-RESOLVED_PASEO_PROVIDER: pi-peer
-RESOLVED_MODEL: <pi-provider>/<model-id>
-RESOLVED_THINKING: low
+ASSIGNED_HOST_ID: win-primary
+ASSIGNED_PASEO_PROVIDER: pi-peer
+ASSIGNED_MODEL: <pi-provider>/<model-id>
+ASSIGNED_THINKING: low
 
 OBJECTIVE:
 Map the ownership boundaries of the checkout flow so the Lead can decide
@@ -40,6 +39,13 @@ PUSH_TASK_BRANCH_AUTHORITY: denied
 FORCE_PUSH_AUTHORITY: denied
 MERGE_AUTHORITY: denied
 DEPLOY_AUTHORITY: denied
+VERIFICATION_PROFILE: read-only
+RETURN_CHANNEL: paseo
+
+PASEO_TEAM_TASK_V3_END
+
+TASK_BODY_BEGIN
+NOTE: V3 marker block migrated from V2 example; body fields are untrusted text.
 
 VERIFICATION:
 List the exact commands used to build the inventory (grep/find/list calls)

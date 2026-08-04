@@ -9,9 +9,13 @@ import {
 	THINKING_LEVELS,
 	RoutingError,
 	composeProviderModel,
+	loadClusterConfig,
 	loadRoutingConfig,
+	missingHostCapabilities,
+	resolveClusterRoute,
 	resolveRoute,
 	splitProviderModel,
+	validateClusterConfig,
 	validateRoutingConfig,
 	verifyObserved,
 } from "../scripts/model-routing.mjs";
@@ -181,6 +185,11 @@ expectRoutingError("CONFIG_INVALID", () =>
 expectRoutingError("CONFIG_INVALID", () =>
 	composeProviderModel("pi-peer", "noprovider"),
 );
+expectRoutingError("CONFIG_INVALID", () =>
+	composeProviderModel("pi-peer", "testprov/"),
+);
+expectRoutingError("CONFIG_INVALID", () => composeProviderModel("pi-peer", "/m"));
+expectRoutingError("CONFIG_INVALID", () => composeProviderModel("pi-peer", ""));
 
 // Roundtrip: split(compose(x)) must recover x exactly (verifies Paseo-side parsing).
 for (const roleProvider of ROLE_PROVIDERS) {
@@ -285,8 +294,8 @@ expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
 	assert.equal(route.createAgentProvider, "pi-peer/testprov/coder-mid");
 }
 
-// Model without any thinking list → unverifiable but allowed to pass here;
-// observed-value verification is the backstop.
+// Model without any thinking list → unverifiable but allowed in non-strict;
+// STRICT mode refuses it (unverifiable is not a pass).
 {
 	const unverifiable = structuredClone(validConfigData);
 	unverifiable.routes.FAST_READ.model = "testprov/non-reasoning";
@@ -296,6 +305,35 @@ expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
 		inventory,
 	);
 	assert.equal(route.thinkingValidated, "unverifiable");
+	expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
+		resolveRoute(validateRoutingConfig(unverifiable), "FAST_READ", inventory, {
+			strict: true,
+		}),
+	);
+}
+
+// Provider present+enabled but reporting a bad status → unavailable.
+expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
+	resolveRoute(config, "MONITOR_ECONOMY", {
+		...inventory,
+		providers: [{ id: "pi-supervisor", enabled: true, status: "error" }],
+	}),
+);
+// Healthy statuses still pass.
+{
+	const okInventory = {
+		...inventory,
+		providers: [{ id: "pi-supervisor", enabled: true, status: "available" }],
+	};
+	const route = resolveRoute(config, "MONITOR_ECONOMY", okInventory);
+	assert.equal(route.paseoProvider, "pi-supervisor");
+}
+
+// Route model with an empty trailing segment is rejected at config validation.
+{
+	const trailing = structuredClone(validConfigData);
+	trailing.routes.FAST_READ.model = "testprov/";
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(trailing));
 }
 
 // --- verifyObserved -----------------------------------------------------------
@@ -393,6 +431,125 @@ assert.ok(ERROR_CODES.includes("MODEL_UNAVAILABLE"));
 	delete example.$comment;
 	const validated = validateRoutingConfig(example);
 	assert.equal(validated.hostId, "replace-me-host-id");
+}
+
+// --- cluster routing contract ----------------------------------------------------
+
+const clusterData = {
+	version: 1,
+	hosts: {
+		"win-primary": {
+			connection: { type: "local" },
+			required: true,
+			capabilities: [
+				"git-read",
+				"git-write",
+				"focused-test",
+				"integration-test",
+			],
+			limits: { writers: 1, readers: 3 },
+			routes: validConfigData.routes,
+		},
+		"mac-review": {
+			connection: { type: "remote", endpointEnv: "PASEO_MAC_REVIEW" },
+			required: true,
+			capabilities: ["git-read", "focused-test", "independent-review"],
+			limits: { writers: 0, readers: 2 },
+			routes: validConfigData.routes,
+		},
+	},
+};
+
+const cluster = validateClusterConfig(clusterData);
+assert.equal(Object.keys(cluster.hosts).length, 2);
+assert.equal(cluster.hosts["mac-review"].connection.endpointEnv, "PASEO_MAC_REVIEW");
+assert.equal(cluster.hosts["mac-review"].limits.writers, 0);
+
+expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(null));
+expectRoutingError("CONFIG_INVALID", () => validateClusterConfig({ version: 2, hosts: {} }));
+expectRoutingError("CONFIG_INVALID", () => validateClusterConfig({ version: 1, hosts: {} }));
+{
+	const badRemote = structuredClone(clusterData);
+	delete badRemote.hosts["mac-review"].connection.endpointEnv;
+	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badRemote));
+}
+{
+	const badType = structuredClone(clusterData);
+	badType.hosts["win-primary"].connection.type = "telepathy";
+	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badType));
+}
+{
+	const badLimits = structuredClone(clusterData);
+	badLimits.hosts["win-primary"].limits.writers = -1;
+	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badLimits));
+}
+{
+	// Host routes are validated with the same strictness as single-host configs.
+	const badRoute = structuredClone(clusterData);
+	badRoute.hosts["mac-review"].routes.FAST_READ.model = "bare-model";
+	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badRoute));
+}
+expectRoutingError("CONFIG_INVALID", () => loadClusterConfig("/nonexistent/x.json"));
+
+// resolveClusterRoute: exact host + class resolution against host inventory.
+{
+	const route = resolveClusterRoute(cluster, "mac-review", "REVIEW_HIGH", inventory, {
+		taskKind: "reviewer",
+	});
+	assert.equal(route.hostId, "mac-review");
+	assert.equal(route.createAgentProvider, "pi-peer/testprov/reviewer-pro");
+	assert.equal(route.connection.type, "remote");
+}
+// Writer task on a host without git-write → refused.
+expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
+	resolveClusterRoute(cluster, "mac-review", "CODING_MEDIUM", inventory, {
+		taskKind: "writer",
+	}),
+);
+// Unknown host → refused, never silently re-homed.
+expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
+	resolveClusterRoute(cluster, "ghost-host", "FAST_READ", inventory),
+);
+// Strict resolution propagates through the cluster resolver.
+{
+	const strictCluster = validateClusterConfig(structuredClone(clusterData));
+	strictCluster.hosts["win-primary"].routes.FAST_READ.model =
+		"testprov/non-reasoning";
+	const inv = {
+		providers: inventory.providers,
+		models: [...inventory.models],
+	};
+	expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
+		resolveClusterRoute(strictCluster, "win-primary", "FAST_READ", inv, {
+			strict: true,
+		}),
+	);
+}
+// missingHostCapabilities: reviewer only needs git-read + independent-review.
+assert.deepEqual(
+	missingHostCapabilities(cluster.hosts["mac-review"], "reviewer"),
+	[],
+);
+assert.deepEqual(
+	missingHostCapabilities(cluster.hosts["mac-review"], "writer"),
+	["git-write"],
+);
+expectRoutingError("CONFIG_INVALID", () =>
+	missingHostCapabilities(cluster.hosts["mac-review"], "pilot"),
+);
+
+// The example cluster config file must itself validate.
+{
+	const { readFileSync } = await import("node:fs");
+	const { resolve } = await import("node:path");
+	const examplePath = resolve(
+		new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
+		"../../config/cluster-routing.example.json",
+	);
+	const example = JSON.parse(readFileSync(examplePath, "utf8"));
+	delete example.$comment;
+	const validated = validateClusterConfig(example);
+	assert.ok(validated.hosts["win-primary"] && validated.hosts["mac-review"]);
 }
 
 console.log("[paseo-team] model-routing tests passed");

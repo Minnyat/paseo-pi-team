@@ -1,6 +1,16 @@
 # Multi-host (N host) — routing và vận hành
 
 Thiết kế N-host của role pack. Không có tên máy nào được hard-code trong
+> **UPDATE (V3 contract)**: chuẩn mới là file controller-local duy nhất
+> `~/.paseo-pi-team/cluster-routing.local.json` (schema: `config/cluster-routing.example.json`,
+> validator: `scripts/model-routing.mjs#validateClusterConfig`). Mỗi host có
+> `connection` (local/remote + `endpointEnv` trỏ TÊN env var), `required`,
+> `capabilities`, `limits` và `routes` riêng trong CÙNG một file — Lead resolve
+> route bằng `resolveClusterRoute(cluster, hostId, MODEL_CLASS, inventory)` và
+> preflight gate bằng `node scripts/preflight.mjs --strict --host-id <id>`.
+> `hosts.local.json` bên dưới là dạng legacy, giữ để tham khảo.
+
+
 core logic; mọi host là một entry trong config host-local.
 
 ## Tài nguyên thiết kế

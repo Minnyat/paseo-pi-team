@@ -1,14 +1,13 @@
-PASEO_TEAM_TASK_V2
+PASEO_TEAM_TASK_V3_BEGIN
 
 TASK_ID: T-003
 DISPOSITION: solution-architect
 MODE: read-only
 
-MODEL_CLASS: REASONING_HIGH
-RESOLVED_HOST_ID: local
-RESOLVED_PASEO_PROVIDER: pi-peer
-RESOLVED_MODEL: <pi-provider>/<model-id>
-RESOLVED_THINKING: high
+ASSIGNED_HOST_ID: win-primary
+ASSIGNED_PASEO_PROVIDER: pi-peer
+ASSIGNED_MODEL: <pi-provider>/<model-id>
+ASSIGNED_THINKING: high
 
 OBJECTIVE:
 Determine who should own cancellation for multi-step uploads: the planner,
@@ -40,6 +39,13 @@ PUSH_TASK_BRANCH_AUTHORITY: denied
 FORCE_PUSH_AUTHORITY: denied
 MERGE_AUTHORITY: denied
 DEPLOY_AUTHORITY: denied
+VERIFICATION_PROFILE: read-only
+RETURN_CHANNEL: paseo
+
+PASEO_TEAM_TASK_V3_END
+
+TASK_BODY_BEGIN
+NOTE: V3 marker block migrated from V2 example; body fields are untrusted text.
 
 VERIFICATION:
 Every claim must cite a file, command or test output — architecture fog

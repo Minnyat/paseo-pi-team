@@ -16,7 +16,11 @@ paseo-pi-team/
 ├── config/
 │   ├── paseo.providers.example.json   # 3 profile Pi: supervisor / lead / peer
 │   ├── model-routing.example.json     # template route MODEL_CLASS → model (copy per host)
-│   └── hosts.example.json             # template host registry N-host (copy per cụm)
+│   ├── cluster-routing.example.json   # template contract controller-local N-host
+│   └── hosts.example.json             # template host registry N-host (legacy)
+├── templates/
+│   ├── TASK_BRIEF_V3.md               # canonical V3 task brief + parser rules
+│   └── WORKSPACE_PROTOCOL.example.md  # .orchestration/WORKSPACE_PROTOCOL.md cho repo đích
 ├── prompts/
 │   ├── supervisor.md               # Governance Supervisor
 │   ├── lead.md                     # Project Lead (orchestration owner)
@@ -27,15 +31,15 @@ paseo-pi-team/
 │   └── paseo-team-lead/
 │       └── SKILL.md                # workflow orchestration + routing cycle của Lead
 ├── examples/
-│   ├── engineer-task.md            # brief PASEO_TEAM_TASK_V2 (engineer, write)
+│   ├── engineer-task.md            # brief PASEO_TEAM_TASK_V3 (engineer, write)
 │   ├── reviewer-task.md            # brief reviewer độc lập (read-only)
 │   ├── architect-task.md           # brief solution-architect (read-only)
 │   ├── scout-task.md               # brief repository-scout (read-only)
 │   └── supervisor-observation.md   # khuôn observation
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installer
-│   ├── model-routing.mjs           # stateless resolver (+ validate/resolve CLI)
-│   └── preflight.mjs               # host readiness check (--json)
+│   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
+│   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
 ├── test/
 │   ├── policy.test.mts             # policy + lifecycle regression
 │   └── model-routing.test.mjs      # resolver regression
@@ -119,13 +123,17 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
    `~/.paseo-pi-team/model-routing.local.json`, điền model THẬT của host lấy từ
    `paseo provider models pi-peer --json` (5 lớp: `MONITOR_ECONOMY`, `FAST_READ`,
    `CODING_MEDIUM`, `REASONING_HIGH`, `REVIEW_HIGH`).
-3. N-host: copy `config/hosts.example.json` → `~/.paseo-pi-team/hosts.local.json`;
-   endpoint remote chỉ tham chiếu qua **tên env var**. Xem
-   [`docs/multi-host.md`](docs/multi-host.md).
+3. Cross-host: copy `config/cluster-routing.example.json` →
+   `~/.paseo-pi-team/cluster-routing.local.json` trên CONTROLLER — một file duy
+   nhất mô tả connection/required/capabilities/limits/routes của mọi host;
+   endpoint remote chỉ tham chiếu qua **tên env var**, không bao giờ chứa value.
+   Xem [`docs/multi-host.md`](docs/multi-host.md). (`config/hosts.example.json`
+   là host registry legacy; cluster file là chuẩn mới.)
 4. Lead truyền exact model vào mọi `create_agent` dạng
    `pi-peer/<pi-provider>/<model-id>` + `settings.thinkingOptionId`, rồi đối
    chiếu `get_agent_status` runtimeInfo — lệch thì
-   `BLOCKED: MODEL_RESOLUTION_MISMATCH`, không fallback.
+   `BLOCKED: MODEL_RESOLUTION_MISMATCH`, không fallback. Lead (không phải Peer)
+   sở hữu observed routing evidence.
 
 ### Compatibility matrix (đã verify 2026-08-04)
 
@@ -141,12 +149,18 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
 ```bash
 node scripts/preflight.mjs            # human-readable
 node scripts/preflight.mjs --json     # machine-readable, exit 1 khi có check fail
+node scripts/preflight.mjs --strict --host-id <host-id>
+                                      # cross-host gate: missing cluster config,
+                                      # missing required remote endpoint env,
+                                      # unverifiable thinking → FAIL (không warn-as-pass)
 ```
 
 Kiểm: node/git/paseo/pi + version pin, daemon, adapter (pin), extension,
-role prompts, 3 role providers, routing config, từng route so với inventory
-thật, `thinkingLevelMap` per-model của pi (level `null` = bị clamp — cảnh báo),
-hosts config + endpoint env, trạng thái repo. Không in secret.
+role prompts, 3 role providers, routing config (single-host + cluster
+contract), từng route so với inventory thật, provider status, model segment
+rỗng, `thinkingLevelMap` per-model của pi (level `null` = bị clamp),
+endpoint env, trạng thái repo (writer host phải sạch trong strict mode).
+Không in secret.
 
 ## Debug commands
 

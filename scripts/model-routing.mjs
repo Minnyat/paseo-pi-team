@@ -74,6 +74,18 @@ export function defaultRoutingConfigPath() {
 	return join(defaultRoutingDir(), "model-routing.local.json");
 }
 
+export function defaultClusterRoutingPath() {
+	return join(defaultRoutingDir(), "cluster-routing.local.json");
+}
+
+// Required capabilities per task kind — used by cluster validation and by
+// preflight's strict checks. Drafted once here so hosts cannot silently
+// accept tasks they cannot perform.
+export const HOST_CAPABILITIES = Object.freeze({
+	writer: ["git-write", "focused-test"],
+	reviewer: ["git-read", "independent-review"],
+});
+
 // ---------------------------------------------------------------------------
 // Config validation
 // ---------------------------------------------------------------------------
@@ -128,6 +140,12 @@ export function validateRoutingConfig(data) {
 		if (!trimmedModel.includes("/")) {
 			throw fail(
 				`route ${modelClass}: model "${trimmedModel}" must be in <pi-provider>/<model-id> form`,
+				{ modelClass, model: trimmedModel },
+			);
+		}
+		if (trimmedModel.endsWith("/")) {
+			throw fail(
+				`route ${modelClass}: model "${trimmedModel}" has an empty trailing segment`,
 				{ modelClass, model: trimmedModel },
 			);
 		}
@@ -187,6 +205,204 @@ export function loadRoutingConfig(path = defaultRoutingConfigPath()) {
 }
 
 // ---------------------------------------------------------------------------
+// Cluster routing contract (controller-local)
+// ---------------------------------------------------------------------------
+//
+// ~/.paseo-pi-team/cluster-routing.local.json is the SINGLE controller-local
+// route file: one object describing every host in the cluster, each with its
+// own connection info, capabilities, concurrency limits and per-class routes.
+// It never holds endpoint VALUES (env-var names only) and is never committed.
+
+/**
+ * Validate a cluster routing config object.
+ * @returns {{version: 1, hosts: Record<string, {connection: {type: string, endpointEnv?: string},
+ *            required: boolean, capabilities: string[], limits: {writers: number, readers: number},
+ *            routes: Record<string, {paseoProvider: string, model: string, thinking: string}>}>}}
+ * @throws {RoutingError} CONFIG_INVALID
+ */
+export function validateClusterConfig(data) {
+	const fail = (message, details = {}) =>
+		new RoutingError("CONFIG_INVALID", message, details);
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		throw fail("cluster routing config must be a JSON object");
+	}
+	if (data.version !== 1) {
+		throw fail("cluster routing config version must be 1", {
+			version: data.version,
+		});
+	}
+	if (typeof data.hosts !== "object" || data.hosts === null) {
+		throw fail("cluster routing config requires a hosts object");
+	}
+	if (Object.keys(data.hosts).length === 0) {
+		throw fail("cluster routing config hosts must not be empty");
+	}
+	const hosts = {};
+	for (const [hostId, raw] of Object.entries(data.hosts)) {
+		const failHost = (message, details = {}) =>
+			fail(`host "${hostId}": ${message}`, { hostId, ...details });
+		if (typeof hostId !== "string" || hostId.trim() === "") {
+			throw fail("host id must be a non-empty string");
+		}
+		if (typeof raw !== "object" || raw === null) {
+			throw failHost("host entry must be an object");
+		}
+		// connection
+		const connection = raw.connection;
+		if (typeof connection !== "object" || connection === null) {
+			throw failHost("connection must be an object");
+		}
+		if (connection.type !== "local" && connection.type !== "remote") {
+			throw failHost(
+				`connection.type "${connection.type}" must be "local" or "remote"`,
+			);
+		}
+		const validatedConnection = { type: connection.type };
+		if (connection.type === "remote") {
+			if (
+				typeof connection.endpointEnv !== "string" ||
+				connection.endpointEnv.trim() === ""
+			) {
+				throw failHost(
+					"remote connection requires a non-empty endpointEnv (env-var NAME only — never a value)",
+				);
+			}
+			validatedConnection.endpointEnv = connection.endpointEnv.trim();
+		}
+		// required
+		const required = raw.required === true;
+		// capabilities
+		if (!Array.isArray(raw.capabilities)) {
+			throw failHost("capabilities must be an array of strings");
+		}
+		const capabilities = raw.capabilities.map((c) => {
+			if (typeof c !== "string" || c.trim() === "") {
+				throw failHost("capabilities entries must be non-empty strings");
+			}
+			return c.trim();
+		});
+		// limits
+		const limits = raw.limits ?? {};
+		const writers = limits.writers ?? 0;
+		const readers = limits.readers ?? 0;
+		for (const [key, value] of [
+			["writers", writers],
+			["readers", readers],
+		]) {
+			if (!Number.isInteger(value) || value < 0) {
+				throw failHost(`limits.${key} must be a non-negative integer`);
+			}
+		}
+		// routes: reuse the single-host validator for correctness parity.
+		const validated = validateRoutingConfig({
+			version: 1,
+			hostId,
+			routes: raw.routes ?? {},
+		});
+		hosts[hostId] = {
+			connection: validatedConnection,
+			required,
+			capabilities,
+			limits: { writers, readers },
+			routes: validated.routes,
+		};
+	}
+	return { version: 1, hosts };
+}
+
+/**
+ * Load + validate the controller-local cluster routing config from disk.
+ * @throws {RoutingError} CONFIG_INVALID on missing/invalid file
+ */
+export function loadClusterConfig(path = defaultClusterRoutingPath()) {
+	let raw;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch (error) {
+		throw new RoutingError(
+			"CONFIG_INVALID",
+			`cannot read cluster routing config at ${path}`,
+			{ path, cause: String(error?.message ?? error) },
+		);
+	}
+	let data;
+	try {
+		data = JSON.parse(raw);
+	} catch (error) {
+		throw new RoutingError(
+			"CONFIG_INVALID",
+			`cluster routing config at ${path} is not valid JSON`,
+			{ path, cause: String(error?.message ?? error) },
+		);
+	}
+	return validateClusterConfig(data);
+}
+
+/**
+ * Capability contract check for ONE task kind on ONE host. Returns the list
+ * of missing capabilities (empty array = host can take the task kind).
+ */
+export function missingHostCapabilities(host, taskKind) {
+	const required = HOST_CAPABILITIES[taskKind];
+	if (!required) {
+		throw new RoutingError("CONFIG_INVALID", `unknown task kind "${taskKind}"`, {
+			taskKind,
+		});
+	}
+	return required.filter((cap) => !host.capabilities.includes(cap));
+}
+
+/**
+ * Resolve a route for (hostId, MODEL_CLASS) from a validated cluster config
+ * against THAT host's inventory. The caller is responsible for fetching the
+ * remote daemon's list_providers/list_models before calling this.
+ *
+ * @param {object} cluster validated cluster config
+ * @param {string} hostId
+ * @param {string} modelClass
+ * @param {object} inventory host inventory {providers, models}
+ * @param {{strict?: boolean, taskKind?: "writer"|"reviewer"}} [options]
+ * @throws {RoutingError} HOST_ROUTE_UNAVAILABLE | CONFIG_INVALID | delegate errors
+ */
+export function resolveClusterRoute(
+	cluster,
+	hostId,
+	modelClass,
+	inventory,
+	options = {},
+) {
+	const host = cluster.hosts[hostId];
+	if (!host) {
+		throw new RoutingError(
+			"HOST_ROUTE_UNAVAILABLE",
+			`cluster routing config has no host "${hostId}"`,
+			{ hostId },
+		);
+	}
+	if (options.taskKind) {
+		const missing = missingHostCapabilities(host, options.taskKind);
+		if (missing.length > 0) {
+			throw new RoutingError(
+				"HOST_ROUTE_UNAVAILABLE",
+				`host "${hostId}" lacks capabilities for ${options.taskKind}: ${missing.join(", ")}`,
+				{ hostId, taskKind: options.taskKind, missing },
+			);
+		}
+	}
+	const resolved = resolveRoute(
+		{ hostId, routes: host.routes },
+		modelClass,
+		inventory,
+		{ strict: options.strict === true },
+	);
+	return {
+		hostId,
+		connection: host.connection,
+		...resolved,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Composition — mirrors Paseo resolveRequiredProviderModel (split FIRST "/")
 // ---------------------------------------------------------------------------
 
@@ -225,10 +441,13 @@ export function composeProviderModel(paseoProvider, model) {
 		);
 	}
 	const trimmed = String(model).trim();
-	if (trimmed === "" || !trimmed.includes("/")) {
+	// Model segments must be non-empty on BOTH sides of every slash chain;
+	// splitProviderModel rejects "<pi-provider>/" and "/<model-id>" forms.
+	splitProviderModel(trimmed);
+	if (trimmed.endsWith("/")) {
 		throw new RoutingError(
 			"CONFIG_INVALID",
-			`model "${model}" must be in <pi-provider>/<model-id> form`,
+			`model "${model}" has an empty trailing segment`,
 			{ model },
 		);
 	}
@@ -258,6 +477,11 @@ function normalizeModelEntry(entry) {
 	return { id: id.trim(), thinkingOptionIds };
 }
 
+/** Provider status strings we accept as "available". Anything else present
+ * in the inventory (e.g. "unavailable", "error", "unauthenticated") means
+ * the provider is up but NOT usable — strict validation must not pass it. */
+const PROVIDER_OK_STATUSES = new Set(["available", "ok", "enabled", "active"]);
+
 function normalizeProviderEntry(entry) {
 	if (typeof entry !== "object" || entry === null) return null;
 	const id = entry.id ?? entry.provider;
@@ -270,7 +494,9 @@ function normalizeProviderEntry(entry) {
 			: typeof entry.enabled === "string"
 				? entry.enabled.toLowerCase() === "enabled"
 				: true;
-	return { id: id.trim(), enabled };
+	const status =
+		typeof entry.status === "string" ? entry.status.toLowerCase() : null;
+	return { id: id.trim(), enabled, status };
 }
 
 /**
@@ -280,12 +506,16 @@ function normalizeProviderEntry(entry) {
  * @param {string} modelClass one of MODEL_CLASSES
  * @param {object} inventory { providers: [...], models: [...] } as returned by
  *   list_providers / list_models (Paseo MCP or CLI --json shapes)
+ * @param {{strict?: boolean}} [options] strict mode treats thinking
+ *   "unverifiable" as a failure (no warn-as-pass) and requires provider
+ *   status to be explicitly healthy when a status field is present.
  * @returns {{paseoProvider: string, model: string, thinking: string,
  *            createAgentProvider: string, thinkingValidated: "exact"|"unverifiable"}}
  * @throws {RoutingError} ROLE_PROVIDER_UNAVAILABLE | MODEL_UNAVAILABLE |
  *   THINKING_OPTION_UNAVAILABLE | HOST_ROUTE_UNAVAILABLE
  */
-export function resolveRoute(config, modelClass, inventory) {
+export function resolveRoute(config, modelClass, inventory, options = {}) {
+	const strict = options.strict === true;
 	if (!MODEL_CLASSES.includes(modelClass)) {
 		throw new RoutingError(
 			"HOST_ROUTE_UNAVAILABLE",
@@ -313,6 +543,17 @@ export function resolveRoute(config, modelClass, inventory) {
 			{ paseoProvider: route.paseoProvider, modelClass },
 		);
 	}
+	if (provider.status !== null && !PROVIDER_OK_STATUSES.has(provider.status)) {
+		throw new RoutingError(
+			"ROLE_PROVIDER_UNAVAILABLE",
+			`role provider "${route.paseoProvider}" reports status "${provider.status}" (expected one of: ${[...PROVIDER_OK_STATUSES].join(", ")})`,
+			{
+				paseoProvider: route.paseoProvider,
+				modelClass,
+				status: provider.status,
+			},
+		);
+	}
 
 	const models = (inventory?.models ?? [])
 		.map(normalizeModelEntry)
@@ -328,6 +569,13 @@ export function resolveRoute(config, modelClass, inventory) {
 
 	let thinkingValidated = "exact";
 	if (modelEntry.thinkingOptionIds === null) {
+		if (strict) {
+			throw new RoutingError(
+				"THINKING_OPTION_UNAVAILABLE",
+				`model "${route.model}" exposes no thinking option list — thinking "${route.thinking}" is UNVERIFIABLE (strict mode: unverifiable is not a pass)`,
+				{ model: route.model, thinking: route.thinking, modelClass },
+			);
+		}
 		// Non-reasoning models may carry no option list; only the default is safe.
 		thinkingValidated = "unverifiable";
 	} else if (!modelEntry.thinkingOptionIds.includes(route.thinking)) {

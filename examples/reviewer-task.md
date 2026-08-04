@@ -1,40 +1,25 @@
-PASEO_TEAM_TASK_V2
+# Example — independent reviewer task (read-only)
+
+```text
+PASEO_TEAM_TASK_V3_BEGIN
 
 TASK_ID: T-002
+PROJECT_ID: team-test-repo
 DISPOSITION: independent-reviewer
 MODE: read-only
 
-MODEL_CLASS: REVIEW_HIGH
-RESOLVED_HOST_ID: local
-RESOLVED_PASEO_PROVIDER: pi-peer
-RESOLVED_MODEL: <pi-provider>/<model-id>
-RESOLVED_THINKING: high
+ASSIGNED_HOST_ID: mac-review
+ASSIGNED_PASEO_PROVIDER: pi-peer
+ASSIGNED_MODEL: <pi-provider>/<model-id>
+ASSIGNED_THINKING: high
+WORKSPACE_REF: worktree:../reviews/T-001-<short-sha>
+AGENT_REF:
 
-OBJECTIVE:
-Independently review the candidate from T-001 (engineer task). Falsify the
-claim "all tests pass and the change is safe" — do not assume it is true.
-Report findings with evidence; do not fix anything yourself.
+EXPECTED_BASE_SHA:
+ASSIGNED_CANDIDATE_SHA: <candidate-sha>
 
-SCOPE:
-The team-test-repo repository, candidate commit <CANDIDATE_SHA>.
-
-OWNED_SCOPE:
-None — read-only review. No file may be modified.
-
-EXCLUDED_SCOPE:
-All files. You have no write authority.
-
-KNOWN_EVIDENCE:
-
-- Assigned candidate SHA: <CANDIDATE_SHA> (fill from Lead).
-- The engineer reported: all tests pass; two edge cases fixed;
-  WORKTREE_CLEAN: yes.
-
-OPEN_QUESTIONS:
-
-- Is the fix consistent with the test expectations?
-- Does the change introduce regressions outside the two edge cases?
-- Are there failure modes the tests do not cover (input types, precision, etc.)?
+OWNED_SCOPE: none — read-only review; no file may be modified
+EXCLUDED_SCOPE: all files
 
 EDIT_AUTHORITY: denied
 COMMIT_AUTHORITY: denied
@@ -43,19 +28,46 @@ FORCE_PUSH_AUTHORITY: denied
 MERGE_AUTHORITY: denied
 DEPLOY_AUTHORITY: denied
 
-VERIFICATION:
+VERIFICATION_PROFILE: independent-review
+RETURN_CHANNEL: paseo
 
-- Work in a fresh checkout of the assigned SHA — not the engineer's tree.
-- Verify `git rev-parse HEAD` equals the assigned SHA.
+PASEO_TEAM_TASK_V3_END
+
+TASK_BODY_BEGIN
+
+OBJECTIVE:
+Independently review the candidate from T-001 (engineer task). Falsify the
+claim "all tests pass and the change is safe" — do not assume it is true.
+Report findings with evidence; do not fix anything yourself.
+
+SUCCESS_BOUNDARY:
+A verdict over the EXACT assigned SHA, from a fresh detached worktree, with
+the commands you ran as evidence.
+
+KNOWN_EVIDENCE:
+- The engineer reported: all tests pass; two edge cases fixed;
+  WORKTREE_CLEAN: yes.
+
+QUESTIONS TO ANSWER:
+- Is the fix consistent with the test expectations?
+- Does the change introduce regressions outside the two edge cases?
+- Are there failure modes the tests do not cover (input types, precision)?
+
+CONSTRAINTS:
+- Work in a fresh checkout of the assigned SHA — not the engineer's tree:
+  git fetch origin agent/T-001
+  git worktree add --detach ../reviews/T-001-<short-sha> <candidate-sha>
+- Verify `git rev-parse HEAD` equals ASSIGNED_CANDIDATE_SHA.
+  Review on any other SHA must return VERDICT: REFUSE.
 - Verify `git status --porcelain` prints nothing (clean worktree).
-  A dirty tree makes the candidate UNSTABLE: refuse the review, even if the
-  SHA matches. Do not normalise away whitespace-only changes by default.
-- Run: python -m pytest test_calculator.py --tb=short
-- Report the observed SHA explicitly in your verdict.
-- If the observed SHA differs from the assigned SHA, refuse the review.
+- Do NOT normalize or fix the candidate to make tests pass.
 
-HANDOFF:
+REQUIRED HANDOFF:
+- ASSIGNED_SHA, OBSERVED_SHA, WORKTREE_CLEAN
+- COMMANDS_RUN
+- FINDINGS_BY_SEVERITY
+- VERDICT: ACCEPT | ACCEPT_WITH_RISK | REJECT | REFUSE
+- REVIEW_LIMITATIONS
 
-- OBSERVED_SHA, GIT_STATUS_PORCELAIN (paste output), WORKTREE_CLEAN: yes|no
-- Return a verdict (APPROVE / REQUEST_CHANGES / REFUSED) with findings tied
-  to files and commands. Do not edit any file. Do not merge or deploy.
+TASK_BODY_END
+```
