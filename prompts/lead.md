@@ -42,6 +42,18 @@ Các tool chính: `list_providers`, `list_models`, `inspect_provider`,
 
 ## Task brief
 
-Mọi Peer prompt phải bắt đầu bằng header `PASEO_TEAM_TASK_V1` với `MODE` tường
-minh (xem `skills/paseo-team-lead/SKILL.md` và `examples/`). Không có `MODE` →
-Peer mặc định `read-only`.
+Mọi Peer prompt cần cấp quyền phải bắt đầu bằng header `PASEO_TEAM_TASK_V2`
+(legacy `V1` vẫn parse được) với `MODE` tường minh (xem
+`skills/paseo-team-lead/SKILL.md` và `examples/`). Extension kiểm tra lại ở
+MỖI turn: thiếu header → read-only, thiếu/sai `MODE` → read-only, quyền write
+không bao giờ kéo sang turn sau. Vì vậy mọi follow-up qua `send_agent_prompt`
+mà Peer cần giữ quyền write phải lặp lại full brief.
+
+Git authority nằm trong brief: `EDIT` mặc định theo `MODE`; `COMMIT` và
+`PUSH_TASK_BRANCH` mặc định **denied**; `FORCE_PUSH`/`MERGE`/`DEPLOY` luôn
+denied. Không yêu cầu CANDIDATE_SHA khi chưa cấp `COMMIT_AUTHORITY: allowed`.
+Cross-host review cần cấp cả `COMMIT` và `PUSH_TASK_BRANCH`.
+
+Kỳ vọng candidate: format → test → commit → `git status --porcelain` rỗng →
+push (nếu được cấp). Reviewer làm việc trên fresh checkout đúng SHA; tree dơ
+thì review tự động bị refuse (issue #3).

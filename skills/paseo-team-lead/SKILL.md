@@ -73,12 +73,21 @@ Use `send_agent_prompt` only for:
 
 After implementation:
 
-1. Obtain the exact candidate SHA.
+1. Obtain the exact candidate SHA **and** confirmation the worktree is clean.
+   The Engineer's handoff must include `git status --porcelain` output, the
+   last format/test run, `CANDIDATE_SHA`, `BRANCH`, `PUSHED_REMOTE`, and
+   `WORKTREE_CLEAN: yes`. The required order is: format → test → commit →
+   verify `git status --porcelain` empty → push (when granted). A dirty
+   candidate is automatically refused by the independent reviewer (issue #3)
+   and must be corrected in the same Engineer session before review.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
-   `DISPOSITION: independent-reviewer`).
+   `DISPOSITION: independent-reviewer`) in a **fresh workspace** checked out
+   at the exact candidate SHA — not the engineer's own working tree.
 3. Require assigned and observed SHA in its report.
-4. Do not accept review of a different SHA.
-5. Return findings to the original Engineer.
+4. Do not accept review of a different SHA. Do not instruct the reviewer to
+   skip whitespace-only dirty-state checks by default (issue #3).
+5. Return findings to the original Engineer (as a full brief, so write
+   authority is re-granted for the correction turn).
 
 ## Completion
 
@@ -95,12 +104,20 @@ Never merge or deploy yourself — that decision belongs to Human.
 
 ## Task brief template
 
-Every Peer prompt must start with the `PASEO_TEAM_TASK_V1` header. `MODE` is
-mandatory in practice; when missing the Peer extension defaults to
-`read-only` (fail-closed).
+Every Peer prompt that should grant authority must start with the
+`PASEO_TEAM_TASK_V2` header (or the legacy `PASEO_TEAM_TASK_V1` header).
+The extension enforces this fail-closed on **every turn**:
+
+- prompt without a valid header → `read-only`;
+- valid header with missing or invalid `MODE` → `read-only`;
+- write mode never carries over from a previous turn.
+
+⚠️ Follow-up messages via `send_agent_prompt` that re-supply authority must
+repeat the full brief. A plain correction message without the header silently
+downgrades the Peer to read-only for that turn (by design).
 
 ```text
-PASEO_TEAM_TASK_V1
+PASEO_TEAM_TASK_V2
 
 TASK_ID: T-<number>
 DISPOSITION: <see list below>
@@ -112,9 +129,23 @@ OWNED_SCOPE:
 EXCLUDED_SCOPE:
 KNOWN_EVIDENCE:
 OPEN_QUESTIONS:
+
+EDIT_AUTHORITY: allowed | denied        # default: follows MODE
+COMMIT_AUTHORITY: allowed | denied      # default: denied
+PUSH_TASK_BRANCH_AUTHORITY: allowed | denied  # default: denied
+FORCE_PUSH_AUTHORITY: denied            # always denied for peers
+MERGE_AUTHORITY: denied                 # always denied for peers
+DEPLOY_AUTHORITY: denied                # always denied
+
 VERIFICATION:
 HANDOFF:
 ```
+
+V1 briefs (no authority fields) still parse: `EDIT` follows `MODE`,
+`COMMIT`/`PUSH` default to **denied** — so a V1 writer cannot `git commit`
+or `git push` from bash. Do not ask for a candidate SHA unless you granted
+`COMMIT_AUTHORITY: allowed`; ask for a stable workspace snapshot instead.
+Cross-host review requires granting both `COMMIT` and `PUSH_TASK_BRANCH`.
 
 Dispositions: `repository-scout`, `documentation-researcher`,
 `solution-architect`, `engineer`, `independent-reviewer`.

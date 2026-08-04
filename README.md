@@ -38,11 +38,15 @@ paseo-pi-team/
 | Profile | `PASEO_PI_ROLE` | Tool policy (mặc định, chỉnh sau khi chạy `/team-tools`) |
 |---|---|---|
 | `pi-supervisor` | `supervisor` | `read` + `mcp` (chỉ gọi monitoring qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt`). Không `write`/`edit`, không tạo agent/workspace. |
-| `pi-lead` | `lead` | Pi `read`/`write`/`edit`/`bash` + `mcp`/`mcp_script` + toàn bộ Paseo orchestration tools. |
+| `pi-lead` | `lead` | Mặc định tối thiểu: Pi `read`/`bash` + `mcp`/`mcp_script` + Paseo `discovery`/`workspace`/`monitoring`/`orchestration`/`permissions` (qua proxy, target guard fail-closed). `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1` (ghi trong WORKSPACE_PROTOCOL của repo nếu Lead được tự implement tiny task). |
 | `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Không bao giờ có `mcp` hoặc Paseo orchestration tools. |
 
 Policy là **allowlist thuần** (`setActiveTools`), cộng lớp backstop chặn trong
-`song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối.
+`song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối. Mọi authority
+được tính lại từ brief của **turn hiện tại**: thiếu header `PASEO_TEAM_TASK_V1|V2`
+hoặc thiếu/sai `MODE` → Peer read-only; `git commit`/`git push` qua bash của
+Peer bị chặn trừ khi brief cấp `*_AUTHORITY: allowed`; force-push/merge của
+Peer luôn bị chặn.
 
 ## Cài đặt
 

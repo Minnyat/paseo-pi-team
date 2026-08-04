@@ -1,4 +1,4 @@
-PASEO_TEAM_TASK_V1
+PASEO_TEAM_TASK_V2
 
 TASK_ID: T-001
 DISPOSITION: engineer
@@ -16,7 +16,7 @@ calculator.py
 test_calculator.py
 
 EXCLUDED_SCOPE:
-Any other file. No commit, no push, no deploy, no external system changes.
+Any other file. No deploy, no external system changes.
 
 KNOWN_EVIDENCE:
 
@@ -29,10 +29,29 @@ OPEN_QUESTIONS:
 - Should sqrt(-1) raise ValueError, or return a domain-error sentinel? Choose
   the option that satisfies the existing test expectations.
 
+EDIT_AUTHORITY: allowed
+COMMIT_AUTHORITY: allowed
+PUSH_TASK_BRANCH_AUTHORITY: denied
+FORCE_PUSH_AUTHORITY: denied
+MERGE_AUTHORITY: denied
+DEPLOY_AUTHORITY: denied
+
 VERIFICATION:
-Run: python -m pytest test_calculator.py --tb=short
-All tests must pass. Include the exact command output in your report.
+
+- FORMAT_COMMAND: <declared workspace formatter, or: none>
+- TEST_COMMAND: python -m pytest test_calculator.py --tb=short
+- Order is mandatory: format → test → commit → check clean.
+- After your final commit, `git status --porcelain` must print nothing.
+  If it prints anything (e.g. a formatter rewrote the file after your commit),
+  fix it before handing off: re-format, re-test, amend a NEW commit on top
+  (no amend/force on pushed refs), and re-check clean.
 
 HANDOFF:
-Report the exact candidate commit SHA of your change, plus FILES_CHANGED and
-COMMANDS_RUN. Do not merge or deploy.
+
+- CANDIDATE_SHA: exact commit of your change (COMMIT_AUTHORITY is granted).
+- BRANCH: the task branch name.
+- PUSHED_REMOTE: none (push is denied for this task; review is local).
+- GIT_STATUS_PORCELAIN: paste the empty output of `git status --porcelain`.
+- WORKTREE_CLEAN: yes
+- FILES_CHANGED, COMMANDS_RUN, and the exact test output.
+- Do not merge or deploy.

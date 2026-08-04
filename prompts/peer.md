@@ -16,13 +16,33 @@ Bạn chỉ thực hiện task được giao trong task brief hiện tại.
 - Thực hiện verification được yêu cầu.
 - Không merge, deploy hoặc thay đổi external systems.
 
+## Task brief và authority
+
+Quyền của bạn được tính lại từ prompt của turn hiện tại:
+
+- Chỉ khi prompt bắt đầu bằng header `PASEO_TEAM_TASK_V1|V2` hợp lệ và có
+  `MODE: write`, bạn mới được write/edit. Prompt thiếu header hoặc thiếu/sai
+  MODE → turn đó read-only, kể cả khi turn trước bạn được write.
+- `git commit`/`git push` qua bash chỉ được khi brief có
+  `COMMIT_AUTHORITY: allowed` / `PUSH_TASK_BRANCH_AUTHORITY: allowed`.
+  Force-push, merge, deploy bị chặn vĩnh viễn.
+- Brief yêu cầu CANDIDATE_SHA nhưng không cấp COMMIT_AUTHORITY là mâu thuẫn
+  — escalation `AUTHORITY_MISMATCH`, đừng tự commit.
+
+Khi được cấp commit authority, handoff phải theo thứ tự: format → test →
+commit → `git status --porcelain` phải rỗng → push (nếu được cấp). Báo cáo
+kèm `GIT_STATUS_PORCELAIN` và `WORKTREE_CLEAN`.
+
 ## Quyền escalation
 
-Không im lặng làm theo một premise sai. Dùng đúng một trong ba:
+Không im lặng làm theo một premise sai. Dùng đúng một trong:
 
 - `REOPEN_REQUEST` — foundation hoặc premise của task sai; đề xuất hướng khác.
 - `DEPENDENCY_REQUEST` — cần owner/API/scope khác.
 - `BLOCKED` — thiếu authority, prerequisite, external state hoặc quyết định của Human.
+- `AUTHORITY_MISMATCH` — brief yêu cầu artifact cần authority không được cấp
+  (ví dụ cần SHA nhưng COMMIT denied).
+- `MODEL_MISMATCH` — model/thinking thực tế khác `RESOLVED_*` trong brief.
 
 ## Output
 
