@@ -513,9 +513,7 @@ function listModelsRemote(endpointValue, roleProvider) {
 
 function runRemotePreflight(hostId, host, endpointValue) {
 	// 1. daemon reachable?
-	const reach = remoteExec(
-		["paseo", "ls", "--host", endpointValue, "--json"],
-	);
+	const reach = remoteExec(["paseo", "ls", "--host", endpointValue, "--json"]);
 	if (!reach.ok) {
 		fail(
 			`cluster-remote:${hostId}`,
@@ -526,9 +524,14 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	pass(`cluster-remote:${hostId}`, "remote daemon reachable (offer accepted)");
 
 	// 2. role providers present + enabled + healthy on the remote daemon.
-	const ls = remoteExec(
-		["paseo", "provider", "ls", "--host", endpointValue, "--json"],
-	);
+	const ls = remoteExec([
+		"paseo",
+		"provider",
+		"ls",
+		"--host",
+		endpointValue,
+		"--json",
+	]);
 	const remoteProviders = new Map();
 	if (ls.ok) {
 		try {
@@ -536,11 +539,17 @@ function runRemotePreflight(hostId, host, endpointValue) {
 				remoteProviders.set(p.provider ?? p.id, p);
 			}
 		} catch {
-			fail(`cluster-remote:${hostId}:providers`, "provider ls --json unparseable");
+			fail(
+				`cluster-remote:${hostId}:providers`,
+				"provider ls --json unparseable",
+			);
 			return;
 		}
 	} else {
-		fail(`cluster-remote:${hostId}:providers`, "could not list remote providers");
+		fail(
+			`cluster-remote:${hostId}:providers`,
+			"could not list remote providers",
+		);
 		return;
 	}
 	const neededProviders = new Set(
