@@ -170,7 +170,7 @@ const v3WriteBrief = [
 	assert.ok(brief);
 	assert.equal(brief.mode, null);
 	assert.equal(brief.fields.size, 0);
-	assert.ok(brief.malformed.some((m) => m.includes('EVIL_FIELD')));
+	assert.ok(brief.malformed.some((m) => m.includes("EVIL_FIELD")));
 }
 
 // Duplicate authority field → invalid (classic injection vector).
@@ -537,8 +537,7 @@ assert.equal(
 	"bracket-access direct call of an allowed target passes",
 );
 assert.match(
-	mcpScriptBlockReason("lead", 'await tools["paseo_create_terminal"]();') ??
-		"",
+	mcpScriptBlockReason("lead", 'await tools["paseo_create_terminal"]();') ?? "",
 	/allowlist/,
 	"bracket-access direct call of a blocked target is caught",
 );

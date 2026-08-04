@@ -188,7 +188,9 @@ expectRoutingError("CONFIG_INVALID", () =>
 expectRoutingError("CONFIG_INVALID", () =>
 	composeProviderModel("pi-peer", "testprov/"),
 );
-expectRoutingError("CONFIG_INVALID", () => composeProviderModel("pi-peer", "/m"));
+expectRoutingError("CONFIG_INVALID", () =>
+	composeProviderModel("pi-peer", "/m"),
+);
 expectRoutingError("CONFIG_INVALID", () => composeProviderModel("pi-peer", ""));
 
 // Roundtrip: split(compose(x)) must recover x exactly (verifies Paseo-side parsing).
@@ -462,12 +464,19 @@ const clusterData = {
 
 const cluster = validateClusterConfig(clusterData);
 assert.equal(Object.keys(cluster.hosts).length, 2);
-assert.equal(cluster.hosts["mac-review"].connection.endpointEnv, "PASEO_MAC_REVIEW");
+assert.equal(
+	cluster.hosts["mac-review"].connection.endpointEnv,
+	"PASEO_MAC_REVIEW",
+);
 assert.equal(cluster.hosts["mac-review"].limits.writers, 0);
 
 expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(null));
-expectRoutingError("CONFIG_INVALID", () => validateClusterConfig({ version: 2, hosts: {} }));
-expectRoutingError("CONFIG_INVALID", () => validateClusterConfig({ version: 1, hosts: {} }));
+expectRoutingError("CONFIG_INVALID", () =>
+	validateClusterConfig({ version: 2, hosts: {} }),
+);
+expectRoutingError("CONFIG_INVALID", () =>
+	validateClusterConfig({ version: 1, hosts: {} }),
+);
 {
 	const badRemote = structuredClone(clusterData);
 	delete badRemote.hosts["mac-review"].connection.endpointEnv;
@@ -489,13 +498,21 @@ expectRoutingError("CONFIG_INVALID", () => validateClusterConfig({ version: 1, h
 	badRoute.hosts["mac-review"].routes.FAST_READ.model = "bare-model";
 	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badRoute));
 }
-expectRoutingError("CONFIG_INVALID", () => loadClusterConfig("/nonexistent/x.json"));
+expectRoutingError("CONFIG_INVALID", () =>
+	loadClusterConfig("/nonexistent/x.json"),
+);
 
 // resolveClusterRoute: exact host + class resolution against host inventory.
 {
-	const route = resolveClusterRoute(cluster, "mac-review", "REVIEW_HIGH", inventory, {
-		taskKind: "reviewer",
-	});
+	const route = resolveClusterRoute(
+		cluster,
+		"mac-review",
+		"REVIEW_HIGH",
+		inventory,
+		{
+			taskKind: "reviewer",
+		},
+	);
 	assert.equal(route.hostId, "mac-review");
 	assert.equal(route.createAgentProvider, "pi-peer/testprov/reviewer-pro");
 	assert.equal(route.connection.type, "remote");

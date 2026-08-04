@@ -289,7 +289,7 @@ let routing = null;
 if (!existsSync(routesPath)) {
 	if (routesExplicit) {
 		fail("routing-config", `${routesPath} (explicit --routes) does not exist`);
-} else {
+	} else {
 		strictCheck(
 			"routing-config",
 			`${routesPath} missing (copy config/model-routing.example.json and edit). Routing checks skipped.`,
@@ -424,6 +424,190 @@ if (existsSync(hostsPath)) {
 	);
 }
 
+// --- live remote preflight helpers ---------------------------------------------
+
+/** Character whitelist for a remote endpoint value: a paseo offer URL or a
+ * tcp:// target. Anything with whitespace, quotes or shell metacharacters
+ * outside this set is refused (never inferred, never passed to a shell). */
+const ENDPOINT_VALUE_RE = /^[A-Za-z0-9!#$%()*+,\-./:=?@_~]+$/;
+
+function isSafeEndpointValue(value) {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 4096 &&
+		ENDPOINT_VALUE_RE.test(value) &&
+		(value.startsWith("tcp://") ||
+			value.startsWith("https://") ||
+			/^[A-Za-z0-9.-]+:\d+$/.test(value))
+	);
+}
+
+/** Quote one argv element for cmd.exe when NEEDS_SHELL joins the command. */
+function cmdQuote(value) {
+	if (!ENDPOINT_VALUE_RE.test(value)) {
+		throw new Error(`refusing to pass unsafe argv value to shell`);
+	}
+	return `"${value}"`;
+}
+/** Run a paseo CLI command. On Windows (.cmd shims) every argv element is
+ * quoted through cmdQuote; endpoint values carry secrets so they ONLY ever
+ * travel inside argv — they are logged nowhere. */
+function remoteExec(argv, timeoutMs = 60000) {
+	if (NEEDS_SHELL) {
+		return tryExecRaw(
+			[argv[0], ...argv.slice(1).map(cmdQuote)].join(" "),
+			timeoutMs,
+		);
+	}
+	return tryExec(argv[0], argv.slice(1), timeoutMs);
+}
+
+function tryExecRaw(commandString, timeoutMs) {
+	try {
+		const stdout = execSync(commandString, {
+			timeout: timeoutMs,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+			env: process.env,
+		});
+		return { ok: true, stdout };
+	} catch (error) {
+		return {
+			ok: false,
+			stdout: error?.stdout ? String(error.stdout) : "",
+			error: String(error?.message ?? error),
+		};
+	}
+}
+
+const remoteModelsCache = new Map();
+function listModelsRemote(endpointValue, roleProvider) {
+	if (remoteModelsCache.has(roleProvider)) {
+		return remoteModelsCache.get(roleProvider);
+	}
+	const res = remoteExec(
+		[
+			"paseo",
+			"provider",
+			"models",
+			roleProvider,
+			"--host",
+			endpointValue,
+			"--json",
+		],
+		120000,
+	);
+	let models = null;
+	if (res.ok) {
+		try {
+			const parsed = JSON.parse(res.stdout);
+			models = Array.isArray(parsed) ? parsed : (parsed?.models ?? null);
+		} catch {
+			models = null;
+		}
+	}
+	remoteModelsCache.set(roleProvider, models);
+	return models;
+}
+
+function runRemotePreflight(hostId, host, endpointValue) {
+	// 1. daemon reachable?
+	const reach = remoteExec(
+		["paseo", "ls", "--host", endpointValue, "--json"],
+	);
+	if (!reach.ok) {
+		fail(
+			`cluster-remote:${hostId}`,
+			`remote daemon unreachable via ${host.connection.endpointEnv}: ${String(reach.error).slice(0, 120)}`,
+		);
+		return;
+	}
+	pass(`cluster-remote:${hostId}`, "remote daemon reachable (offer accepted)");
+
+	// 2. role providers present + enabled + healthy on the remote daemon.
+	const ls = remoteExec(
+		["paseo", "provider", "ls", "--host", endpointValue, "--json"],
+	);
+	const remoteProviders = new Map();
+	if (ls.ok) {
+		try {
+			for (const p of JSON.parse(ls.stdout)) {
+				remoteProviders.set(p.provider ?? p.id, p);
+			}
+		} catch {
+			fail(`cluster-remote:${hostId}:providers`, "provider ls --json unparseable");
+			return;
+		}
+	} else {
+		fail(`cluster-remote:${hostId}:providers`, "could not list remote providers");
+		return;
+	}
+	const neededProviders = new Set(
+		Object.values(host.routes).map((r) => r.paseoProvider),
+	);
+	for (const roleProvider of neededProviders) {
+		const entry = remoteProviders.get(roleProvider);
+		const status = String(entry?.status ?? "").toLowerCase();
+		const enabled =
+			String(entry?.enabled ?? "").toLowerCase() === "enabled" ||
+			entry?.enabled === true;
+		if (!entry) {
+			fail(
+				`cluster-remote:${hostId}:provider:${roleProvider}`,
+				"role provider NOT registered on remote daemon",
+			);
+		} else if (!enabled || status !== "available") {
+			fail(
+				`cluster-remote:${hostId}:provider:${roleProvider}`,
+				`status="${entry.status}" enabled=${entry.enabled} (need enabled + available)`,
+			);
+		} else {
+			pass(
+				`cluster-remote:${hostId}:provider:${roleProvider}`,
+				"enabled + available",
+			);
+		}
+	}
+
+	// 3. Route resolution against the REMOTE inventory.
+	const inventoryProviders = [...remoteProviders.values()].map((p) => ({
+		id: p.provider ?? p.id,
+		enabled:
+			String(p.enabled).toLowerCase() === "enabled" || p.enabled === true,
+		status: typeof p.status === "string" ? p.status : undefined,
+	}));
+	for (const modelClass of MODEL_CLASSES) {
+		const route = host.routes[modelClass];
+		const models = listModelsRemote(endpointValue, route.paseoProvider);
+		if (models === null) {
+			strictCheck(
+				`cluster-remote:${hostId}:route:${modelClass}`,
+				`could not list models for ${route.paseoProvider} on remote`,
+			);
+			continue;
+		}
+		try {
+			const resolved = resolveClusterRoute(
+				cluster,
+				hostId,
+				modelClass,
+				{ providers: inventoryProviders, models },
+				{ strict: wantStrict },
+			);
+			pass(
+				`cluster-remote:${hostId}:route:${modelClass}`,
+				resolved.createAgentProvider,
+			);
+		} catch (error) {
+			fail(
+				`cluster-remote:${hostId}:route:${modelClass}`,
+				error instanceof RoutingError ? error.message : String(error),
+			);
+		}
+	}
+}
+
 // --- cluster routing contract (controller-local) ------------------------------
 
 // In strict mode the cluster contract file is REQUIRED (missing → exit 1).
@@ -484,7 +668,10 @@ if (cluster) {
 
 	// Resolve the route for the host this preflight was asked to verify.
 	const verifyHostId =
-		hostIdArg ?? (Object.keys(cluster.hosts).length === 1 ? Object.keys(cluster.hosts)[0] : undefined);
+		hostIdArg ??
+		(Object.keys(cluster.hosts).length === 1
+			? Object.keys(cluster.hosts)[0]
+			: undefined);
 	if (!hostIdArg && verifyHostId === undefined && wantStrict) {
 		fail(
 			"cluster-host-select",
@@ -514,7 +701,8 @@ if (cluster) {
 					providers: [...providersById.values()].map((p) => ({
 						id: p.provider ?? p.id,
 						enabled:
-							String(p.enabled).toLowerCase() === "enabled" || p.enabled === true,
+							String(p.enabled).toLowerCase() === "enabled" ||
+							p.enabled === true,
 						status: typeof p.status === "string" ? p.status : undefined,
 					})),
 					models,
@@ -539,12 +727,30 @@ if (cluster) {
 				}
 			}
 		} else if (host.connection.type === "remote") {
-			// Remote host: controller cannot introspect its daemon from here;
-			// the route file + endpoint env are the contract surface.
-			pass(
-				`cluster-host:${verifyHostId}`,
-				"remote host — route file + endpoint env validated; daemon checks run by remote preflight",
-			);
+			// Remote host: if the endpoint env is set AND the value passes a
+			// strict shape check, perform a LIVE remote preflight via the Paseo
+			// CLI (the offer URL / tcp endpoint is accepted as --host). The
+			// endpoint value is never logged.
+			const envName = host.connection.endpointEnv;
+			const envValue = envName ? process.env[envName] : undefined;
+			if (!envValue) {
+				strictCheck(
+					`cluster-remote:${verifyHostId}`,
+					`endpoint env ${envName ?? "<missing>"} NOT set — live remote preflight skipped`,
+				);
+			} else if (!isSafeEndpointValue(envValue)) {
+				fail(
+					`cluster-remote:${verifyHostId}`,
+					`endpoint env ${envName} has an unexpected shape (expected paseo offer URL or tcp:// target) — refusing to use it`,
+				);
+			} else if (skipModels) {
+				warn(
+					`cluster-remote:${verifyHostId}`,
+					"endpoint set but --skip-models active — remote inventory checks skipped",
+				);
+			} else {
+				runRemotePreflight(verifyHostId, host, envValue);
+			}
 		} else if (!daemonUp) {
 			strictCheck(
 				`cluster-host:${verifyHostId}`,

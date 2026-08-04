@@ -345,9 +345,13 @@ export function loadClusterConfig(path = defaultClusterRoutingPath()) {
 export function missingHostCapabilities(host, taskKind) {
 	const required = HOST_CAPABILITIES[taskKind];
 	if (!required) {
-		throw new RoutingError("CONFIG_INVALID", `unknown task kind "${taskKind}"`, {
-			taskKind,
-		});
+		throw new RoutingError(
+			"CONFIG_INVALID",
+			`unknown task kind "${taskKind}"`,
+			{
+				taskKind,
+			},
+		);
 	}
 	return required.filter((cap) => !host.capabilities.includes(cap));
 }
