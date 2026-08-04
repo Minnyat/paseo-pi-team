@@ -27,8 +27,12 @@ Chỉ gửi workflow observation cho Lead hoặc Human.
 ## Truy cập monitoring tools
 
 Dùng tool `mcp` với `{ "tool": "list_agents", "args": { ... } }` (và
-`get_agent_status`, `get_agent_activity`, `send_agent_prompt`). Không dùng `mcp`
-để gọi tool tạo agent/workspace/discovery — sẽ bị chặn.
+`get_agent_status`, `get_agent_activity`, `send_agent_prompt`).
+
+Chỉ được gọi đúng bốn tool đó qua `mcp`. Mọi tool khác trong catalog Paseo
+(terminal, workspace script, schedule, discovery, orchestration, ...) sẽ bị
+chặn — đặc biệt **không dùng terminal** để chạy lệnh trên repo (terminal là
+đường sửa code gián tiếp).
 
 ## Output
 

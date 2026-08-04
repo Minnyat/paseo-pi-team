@@ -73,14 +73,17 @@ const PI_WRITE = ["read", "write", "edit", "bash"];
 /** pi-mcp-adapter proxy tools — Paseo tools are reached through the `mcp` tool. */
 const MCP_TOOLS = ["mcp", "mcp_script"];
 
-/** Paseo tools the supervisor may never use (send_agent_prompt IS allowed). */
-const SUPERVISOR_FORBIDDEN_MCP_TARGETS: string[] = [
-	...PASEO_TOOLS.discovery,
-	...PASEO_TOOLS.workspace,
-	"create_agent",
-	"update_agent",
-	"cancel_agent",
-	"archive_agent",
+/**
+ * Paseo tools the supervisor may call through the MCP proxy. Fail-closed:
+ * anything else in the catalog (terminals, workspace scripts, schedules,
+ * discovery, orchestration, ...) is blocked. send_agent_prompt is allowed so
+ * the supervisor can deliver observations to the Lead.
+ */
+const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
+	"list_agents",
+	"get_agent_status",
+	"get_agent_activity",
+	"send_agent_prompt",
 ];
 
 /**
@@ -113,7 +116,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 		case "supervisor":
 			return {
 				allow: ["read", "mcp", ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
-				deny: ["write", "edit", ...SUPERVISOR_FORBIDDEN_MCP_TARGETS],
+				deny: ["write", "edit", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
 			return peerMode === "write"
@@ -175,8 +178,8 @@ export function callsPaseoCli(command: string): boolean {
 // supervisors must be checked on the *target* name, not the outer tool.
 // ---------------------------------------------------------------------------
 
-export function isSupervisorForbiddenMcpTarget(toolName: string): boolean {
-	return matchesPaseoToolName(toolName, SUPERVISOR_FORBIDDEN_MCP_TARGETS);
+export function isSupervisorAllowedMcpTarget(toolName: string): boolean {
+	return matchesPaseoToolName(toolName, SUPERVISOR_ALLOWED_MCP_TARGETS);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,16 +349,16 @@ export default function (pi: ExtensionAPI) {
 						"Peer cannot use the MCP proxy (it would expose Paseo orchestration tools). Report a DEPENDENCY_REQUEST to the Lead instead.",
 				};
 			}
-			if (role === "supervisor") {
-				const target =
-					typeof event.input.tool === "string" ? event.input.tool : undefined;
-				if (target && isSupervisorForbiddenMcpTarget(target)) {
-					return {
-						block: true,
-						reason: `Supervisor cannot call "${target}" through MCP. Send an observation to the Lead instead.`,
-					};
-				}
+		if (role === "supervisor") {
+			const target =
+				typeof event.input.tool === "string" ? event.input.tool : undefined;
+			if (target && !isSupervisorAllowedMcpTarget(target)) {
+				return {
+					block: true,
+					reason: `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt). "${target}" is blocked — send an observation to the Lead instead.`,
+				};
 			}
+		}
 		}
 		if (role === "peer" && isToolCallEventType("bash", event)) {
 			const command = event.input.command ?? "";

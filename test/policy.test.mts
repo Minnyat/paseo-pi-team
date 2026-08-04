@@ -6,7 +6,7 @@ import {
 	ALL_PASEO_TOOLS,
 	callsPaseoCli,
 	denyReason,
-	isSupervisorForbiddenMcpTarget,
+	isSupervisorAllowedMcpTarget,
 	parsePeerMode,
 	policyFor,
 } from "../extensions/paseo-team-policy.ts";
@@ -100,23 +100,20 @@ assert.match(
 assert.match(denyReason("peer", "read-only", "mcp"), /MCP proxy/);
 assert.match(denyReason("peer", "write", "mcp_script"), /MCP proxy/);
 
-// --- isSupervisorForbiddenMcpTarget ----------------------------------------
+// --- isSupervisorAllowedMcpTarget -------------------------------------------
 
-assert.equal(isSupervisorForbiddenMcpTarget("create_agent"), true);
-assert.equal(isSupervisorForbiddenMcpTarget("paseo_create_agent"), true, "prefixed form");
-assert.equal(isSupervisorForbiddenMcpTarget("server:create_workspace"), true, "colon form");
-assert.equal(isSupervisorForbiddenMcpTarget("create_workspace"), true);
-assert.equal(isSupervisorForbiddenMcpTarget("list_providers"), true);
-assert.equal(isSupervisorForbiddenMcpTarget("paseo_list_providers"), true);
-assert.equal(isSupervisorForbiddenMcpTarget("update_agent"), true);
-assert.equal(isSupervisorForbiddenMcpTarget("list_agents"), false);
-assert.equal(isSupervisorForbiddenMcpTarget("paseo_list_agents"), false, "monitoring allowed");
-assert.equal(isSupervisorForbiddenMcpTarget("get_agent_status"), false);
-assert.equal(
-	isSupervisorForbiddenMcpTarget("send_agent_prompt"),
-	false,
-	"supervisor may send prompts",
-);
+assert.equal(isSupervisorAllowedMcpTarget("list_agents"), true);
+assert.equal(isSupervisorAllowedMcpTarget("paseo_list_agents"), true);
+assert.equal(isSupervisorAllowedMcpTarget("get_agent_status"), true);
+assert.equal(isSupervisorAllowedMcpTarget("send_agent_prompt"), true);
+assert.equal(isSupervisorAllowedMcpTarget("create_agent"), false);
+assert.equal(isSupervisorAllowedMcpTarget("paseo_create_agent"), false, "prefixed form");
+assert.equal(isSupervisorAllowedMcpTarget("create_terminal"), false, "no terminal access");
+assert.equal(isSupervisorAllowedMcpTarget("paseo_create_terminal"), false);
+assert.equal(isSupervisorAllowedMcpTarget("start_workspace_script"), false);
+assert.equal(isSupervisorAllowedMcpTarget("create_schedule"), false);
+assert.equal(isSupervisorAllowedMcpTarget("list_providers"), false, "no discovery");
+assert.equal(isSupervisorAllowedMcpTarget("unknown_tool"), false, "fail-closed on unknown");
 
 // --- callsPaseoCli ----------------------------------------------------------
 
