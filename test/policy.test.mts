@@ -446,8 +446,11 @@ assert.match(
 	"amend always blocked (SHA chain must advance by new commits)",
 );
 assert.match(
-	gitAuthorityBlockReason("git commit && git commit --amend", fullAuth, "T-101") ??
-		"",
+	gitAuthorityBlockReason(
+		"git commit && git commit --amend",
+		fullAuth,
+		"T-101",
+	) ?? "",
 	/amend/,
 	"amend blocked even in chained command",
 );
@@ -643,7 +646,7 @@ for (const [code, why] of [
 	['await tools.call("paseo_" + "create_terminal");', "concatenation"],
 	["await tools.call(`paseo_${mode}_agent`);", "template with expression"],
 	["await tools[target]();", "computed key"],
-	["const a=[\"x\"]; await tools[a[0]]();", "indexed key"],
+	['const a=["x"]; await tools[a[0]]();', "indexed key"],
 	['await tools["call"](blockedTool);', "call alias with variable"],
 	["await tools['call'](target);", "single-quoted call alias"],
 ] as const) {

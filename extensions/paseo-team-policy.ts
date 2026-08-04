@@ -342,8 +342,8 @@ const MCP_SCRIPT_DIRECT_CALL_RE =
 
 /**
  * Dynamic dispatch forms we can never resolve statically:
- *   tools.call(<non-literal>)     — tools.call(target)              
- *   tools["call"](<non-literal>)  — tools["call"](target)           
+ *   tools.call(<non-literal>)     — tools.call(target)
+ *   tools["call"](<non-literal>)  — tools["call"](target)
  *   tools[<non-literal>](         — tools[target]() / tools[i + 1]()
  * `tools.call("literal")`/`tools["call"]("literal")` are matched by
  * MCP_SCRIPT_DIRECT_CALL_RE above, so the dynamic regexes only fire on
