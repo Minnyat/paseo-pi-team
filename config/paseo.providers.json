@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "daemon": {
+    "mcp": {
+      "enabled": true,
+      "injectIntoAgents": true
+    }
+  },
+  "agents": {
+    "providers": {
+      "pi-supervisor": {
+        "extends": "pi",
+        "label": "Pi Supervisor",
+        "env": {
+          "PASEO_PI_ROLE": "supervisor"
+        }
+      },
+      "pi-lead": {
+        "extends": "pi",
+        "label": "Pi Lead",
+        "env": {
+          "PASEO_PI_ROLE": "lead"
+        }
+      },
+      "pi-peer": {
+        "extends": "pi",
+        "label": "Pi Peer",
+        "env": {
+          "PASEO_PI_ROLE": "peer"
+        }
+      }
+    }
+  }
+}
