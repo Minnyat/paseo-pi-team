@@ -12,10 +12,12 @@ import {
 	loadClusterConfig,
 	loadRoutingConfig,
 	missingHostCapabilities,
+	modelsCacheKey,
 	resolveClusterRoute,
 	resolveRoute,
 	splitProviderModel,
 	validateClusterConfig,
+	validateRemoteEndpoint,
 	validateRoutingConfig,
 	verifyObserved,
 } from "../scripts/model-routing.mjs";
@@ -493,6 +495,31 @@ expectRoutingError("CONFIG_INVALID", () =>
 	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badLimits));
 }
 {
+	// `required` must be an explicit boolean — a string "true" previously
+	// silently downgraded a required host to optional.
+	const badRequired = structuredClone(clusterData);
+	badRequired.hosts["mac-review"].required = "true";
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateClusterConfig(badRequired),
+	);
+	const missingRequired = structuredClone(clusterData);
+	delete missingRequired.hosts["mac-review"].required;
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateClusterConfig(missingRequired),
+	);
+}
+{
+	// `limits` must be a real object when present — never silently defaulted.
+	const badLimitsType = structuredClone(clusterData);
+	badLimitsType.hosts["win-primary"].limits = "plenty";
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateClusterConfig(badLimitsType),
+	);
+	const nullLimits = structuredClone(clusterData);
+	nullLimits.hosts["win-primary"].limits = null;
+	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(nullLimits));
+}
+{
 	// Host routes are validated with the same strictness as single-host configs.
 	const badRoute = structuredClone(clusterData);
 	badRoute.hosts["mac-review"].routes.FAST_READ.model = "bare-model";
@@ -568,5 +595,66 @@ expectRoutingError("CONFIG_INVALID", () =>
 	const validated = validateClusterConfig(example);
 	assert.ok(validated.hosts["win-primary"] && validated.hosts["mac-review"]);
 }
+// --- validateRemoteEndpoint (parse-based, multi-form) ----------------------------
+
+// Documented forms must be accepted.
+assert.equal(validateRemoteEndpoint("192.168.1.20:6767"), true, "host:port");
+assert.equal(
+	validateRemoteEndpoint("mac-mini.local:6767"),
+	true,
+	"hostname:port",
+);
+assert.equal(
+	validateRemoteEndpoint(
+		"tcp://192.168.1.20:6767?ssl=true&password=abc123%40x",
+	),
+	true,
+	"tcp URI with query params (incl. &) — the documented pairing form",
+);
+assert.equal(
+	validateRemoteEndpoint("https://app.paseo.sh/#offer=abc_DEF-123.456~789+"),
+	true,
+	"pairing offer URL",
+);
+assert.equal(validateRemoteEndpoint("https://relay.example.com/ws"), true);
+
+// Rejected shapes.
+for (const [value, why] of [
+	["", "empty"],
+	["tcp://only-host", "tcp URI without port"],
+	["tcp://:6767", "tcp URI without host"],
+	["https://", "https without host"],
+	["https://app.paseo.sh/#offer=", "empty offer token"],
+	["tcp://a b:6767", "whitespace"],
+	['tcp://a:6767?"quoted"', "quote characters"],
+	["tcp://a:6767;rm -rf /", "semicolon"],
+	["tcp://a:6767$(id)", "command substitution"],
+	["tcp://a:6767`id`", "backtick"],
+	["not-an-endpoint", "bare word"],
+	[123, "non-string"],
+	[null, "null"],
+]) {
+	assert.equal(validateRemoteEndpoint(value), false, `rejected: ${why}`);
+}
+// Overlong values rejected.
+assert.equal(validateRemoteEndpoint(`tcp://a:6767?${"x".repeat(5000)}`), false);
+
+// --- modelsCacheKey (per-host isolation) -----------------------------------------
+
+assert.notEqual(
+	modelsCacheKey("mac-review", "pi-peer"),
+	modelsCacheKey("linux-runner", "pi-peer"),
+	"same role provider on two remote hosts must NOT share a cache entry",
+);
+assert.notEqual(
+	modelsCacheKey("mac-review", "pi-peer"),
+	modelsCacheKey("mac-review", "pi-lead"),
+	"different providers on the same host stay distinct",
+);
+assert.equal(
+	modelsCacheKey("mac-review", "pi-peer"),
+	modelsCacheKey("mac-review", "pi-peer"),
+	"deterministic for identical scope+provider",
+);
 
 console.log("[paseo-team] model-routing tests passed");

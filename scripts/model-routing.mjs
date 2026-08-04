@@ -270,7 +270,13 @@ export function validateClusterConfig(data) {
 			validatedConnection.endpointEnv = connection.endpointEnv.trim();
 		}
 		// required
-		const required = raw.required === true;
+		if (typeof raw.required !== "boolean") {
+			throw failHost(
+				`required must be an explicit boolean (got ${JSON.stringify(raw.required)}) — a mistyped value silently downgrades a required host to optional`,
+				{ required: raw.required },
+			);
+		}
+		const required = raw.required;
 		// capabilities
 		if (!Array.isArray(raw.capabilities)) {
 			throw failHost("capabilities must be an array of strings");
@@ -282,6 +288,14 @@ export function validateClusterConfig(data) {
 			return c.trim();
 		});
 		// limits
+		if (
+			raw.limits !== undefined &&
+			(typeof raw.limits !== "object" || raw.limits === null)
+		) {
+			throw failHost("limits must be an object when present", {
+				limits: raw.limits,
+			});
+		}
 		const limits = raw.limits ?? {};
 		const writers = limits.writers ?? 0;
 		const readers = limits.readers ?? 0;
@@ -601,6 +615,59 @@ export function resolveRoute(config, modelClass, inventory, options = {}) {
 		createAgentProvider: composeProviderModel(route.paseoProvider, route.model),
 		thinkingValidated,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Shared remote-endpoint helpers (used by preflight.mjs live remote checks)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse-based validation for a Paseo remote endpoint value. Character
+ * whitelists were too blunt (they rejected the documented
+ * `tcp://host:6767?ssl=true&password=...` form because of the `&`), so we
+ * validate structurally per supported scheme:
+ *   - pairing offer URL:  https://app.paseo.sh/#offer=<token>
+ *   - tcp URI:            tcp://host:port[?query...]   (query params allowed)
+ *   - any https:// URL with a hostname
+ *   - bare host:port      (e.g. "192.168.1.20:6767")
+ * Whitespace, quotes and shell metacharacters are always refused — the value
+ * travels inside a quoted argv on Windows and must never break out of it.
+ */
+export function validateRemoteEndpoint(value) {
+	if (typeof value !== "string" || value.length === 0 || value.length > 4096) {
+		return false;
+	}
+	if (/[\s"'`;<>|\\$`{}()[\]]/.test(value)) return false;
+	if (value.startsWith("https://app.paseo.sh/#offer=")) {
+		return /^https:\/\/app\.paseo\.sh\/#offer=[A-Za-z0-9._~+/-]+$/.test(value);
+	}
+	if (value.startsWith("tcp://")) {
+		let url;
+		try {
+			url = new URL(value);
+		} catch {
+			return false;
+		}
+		return Boolean(url.hostname) && Boolean(url.port);
+	}
+	if (value.startsWith("https://")) {
+		try {
+			return Boolean(new URL(value).hostname);
+		} catch {
+			return false;
+		}
+	}
+	return /^[A-Za-z0-9.-]+:\d+$/.test(value);
+}
+
+/**
+ * Cache key for a per-daemon model inventory lookup. `scope` is the host
+ * identity (host id or endpoint) — caching by role-provider name ALONE
+ * silently mixes inventories between distinct daemons that happen to run
+ * the same role provider (e.g. two remote hosts both serving "pi-peer").
+ */
+export function modelsCacheKey(scope, provider) {
+	return `${scope}\0${provider}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -27,8 +27,10 @@ import {
 	loadClusterConfig,
 	loadRoutingConfig,
 	missingHostCapabilities,
+	modelsCacheKey,
 	resolveClusterRoute,
 	resolveRoute,
+	validateRemoteEndpoint,
 	MODEL_CLASSES,
 } from "./model-routing.mjs";
 
@@ -426,26 +428,19 @@ if (existsSync(hostsPath)) {
 
 // --- live remote preflight helpers ---------------------------------------------
 
-/** Character whitelist for a remote endpoint value: a paseo offer URL or a
- * tcp:// target. Anything with whitespace, quotes or shell metacharacters
- * outside this set is refused (never inferred, never passed to a shell). */
-const ENDPOINT_VALUE_RE = /^[A-Za-z0-9!#$%()*+,\-./:=?@_~]+$/;
+/** Structural endpoint validation lives in model-routing.mjs so it can be
+ * unit-tested: parse-based per scheme (offer URL / tcp:// with query params /
+ * host:port), never a raw character whitelist. */
+const isSafeEndpointValue = validateRemoteEndpoint;
 
-function isSafeEndpointValue(value) {
-	return (
-		typeof value === "string" &&
-		value.length > 0 &&
-		value.length <= 4096 &&
-		ENDPOINT_VALUE_RE.test(value) &&
-		(value.startsWith("tcp://") ||
-			value.startsWith("https://") ||
-			/^[A-Za-z0-9.-]+:\d+$/.test(value))
-	);
-}
+/** Chars that can never appear in ANY argv element we quote for cmd.exe
+ * (static literals are short ascii; endpoint values already passed the
+ * stricter isSafeEndpointValue check). */
+const UNSAFE_ARGV_RE = /[\s"'`<>|()[\]{}\\]/;
 
 /** Quote one argv element for cmd.exe when NEEDS_SHELL joins the command. */
 function cmdQuote(value) {
-	if (!ENDPOINT_VALUE_RE.test(value)) {
+	if (UNSAFE_ARGV_RE.test(value)) {
 		throw new Error(`refusing to pass unsafe argv value to shell`);
 	}
 	return `"${value}"`;
@@ -482,9 +477,17 @@ function tryExecRaw(commandString, timeoutMs) {
 }
 
 const remoteModelsCache = new Map();
-function listModelsRemote(endpointValue, roleProvider) {
-	if (remoteModelsCache.has(roleProvider)) {
-		return remoteModelsCache.get(roleProvider);
+/**
+ * Model inventory is per-DAEMON. The cache key must therefore carry the
+ * host identity, never the role-provider name alone — two remote hosts
+ * serving the same "pi-peer" provider do NOT share an inventory, and a
+ * mixed cache would let a preflight pass on a model that only exists on
+ * the other host.
+ */
+function listModelsRemote(hostId, endpointValue, roleProvider) {
+	const key = modelsCacheKey(hostId, roleProvider);
+	if (remoteModelsCache.has(key)) {
+		return remoteModelsCache.get(key);
 	}
 	const res = remoteExec(
 		[
@@ -507,7 +510,7 @@ function listModelsRemote(endpointValue, roleProvider) {
 			models = null;
 		}
 	}
-	remoteModelsCache.set(roleProvider, models);
+	remoteModelsCache.set(key, models);
 	return models;
 }
 
@@ -588,7 +591,7 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	}));
 	for (const modelClass of MODEL_CLASSES) {
 		const route = host.routes[modelClass];
-		const models = listModelsRemote(endpointValue, route.paseoProvider);
+		const models = listModelsRemote(hostId, endpointValue, route.paseoProvider);
 		if (models === null) {
 			strictCheck(
 				`cluster-remote:${hostId}:route:${modelClass}`,
