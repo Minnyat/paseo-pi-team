@@ -1,0 +1,6 @@
+# Dev-only, machine-specific paths (points at global pi install)
+tsconfig.json
+
+node_modules/
+*.log
+.DS_Store
