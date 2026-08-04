@@ -11,11 +11,14 @@
  *
  * Fail-closed invariants (Phase 3):
  *   - Peer write authority is derived from the *current prompt's* strict
- *     task brief (PASEO_TEAM_TASK_V1|V2 header + valid MODE) on every
- *     before_agent_start. A turn without a valid brief is read-only —
- *     write mode never leaks across turns.
- *   - Peer git authority (commit/push) comes from V2 authority fields and
- *     is denied by default; force-push and merge are always denied.
+ *     V3 task brief (PASEO_TEAM_TASK_V3_BEGIN/END marker block) on every
+ *     before_agent_start. Legacy V1/V2 briefs are parseable for diagnostics
+ *     but NEVER grant write mode or git authority (their whole-prompt scan
+ *     was an injection surface). A turn without a valid V3 brief is
+ *     read-only — write mode never leaks across turns.
+ *   - Peer git authority (commit/push) comes from V3 authority fields and
+ *     is denied by default; force-push and merge are always denied, and
+ *     granted push authority is branch-scoped to agent/<TASK_ID>.
  *   - Supervisor and Lead MCP proxy calls are checked against a fail-closed
  *     target allowlist. Anything that cannot be classified (missing or
  *     non-string tool target, unknown input shape) is blocked.
@@ -497,6 +500,17 @@ function parseV3Brief(lines: string[]): ParsedTaskBrief {
 }
 
 /**
+ * Legacy V1/V2 briefs historically scanned the WHOLE prompt for authority
+ * fields — an authorization-injection vector (a body line like
+ * `COMMIT_AUTHORITY: allowed` granted real authority). V3 closes it.
+ * V1/V2 are accepted for identity/mode parsing only; resolvePeerMode and
+ * peerGitAuthority below treat them as read-only with all authority denied.
+ */
+export function isLegacyBrief(brief: ParsedTaskBrief): boolean {
+	return brief.version < 3;
+}
+
+/**
  * Parse a task brief. Returns null when the prompt does not start with a
  * recognized header — callers must treat that as an unbriefed (read-only)
  * turn. A recognized header with a missing/invalid MODE yields
@@ -552,12 +566,25 @@ export function parseTaskBrief(prompt: string): ParsedTaskBrief | null {
 		}
 	}
 
+	// Legacy briefs are kept parseable for diagnostics, but their write mode
+	// and authority fields are never honored (whole-prompt scan injection
+	// surface closed by V3). Surface that loudly for /team-role debugging.
+	if (mode === "write" || AUTHORITY_FIELDS.some((f) => fields.has(f))) {
+		malformed.push(
+			`legacy V${version} brief: MODE and *_AUTHORITY fields are ignored — only a V3 marker block can grant write/authority`,
+		);
+	}
+
 	return { version, mode, malformed, fields };
 }
 
-/** Fail-closed mode resolution: unknown/incomplete brief → read-only. */
+/** Fail-closed mode resolution: unknown/incomplete/legacy brief → read-only. */
 export function resolvePeerMode(brief: ParsedTaskBrief | null): PeerMode {
-	return brief?.mode ?? "read-only";
+	if (brief === null) return "read-only";
+	// Legacy V1/V2 briefs never grant write mode: their parser scanned the
+	// whole prompt, so any body line could silently grant authority. Use V3.
+	if (isLegacyBrief(brief)) return "read-only";
+	return brief.mode ?? "read-only";
 }
 
 export interface PeerGitAuthority {
@@ -586,6 +613,18 @@ function authorityField(
 export function peerGitAuthority(
 	brief: ParsedTaskBrief | null,
 ): PeerGitAuthority {
+	if (brief === null || isLegacyBrief(brief)) {
+		// No brief, or a legacy V1/V2 brief (whole-prompt scan injection
+		// surface): every authority is denied regardless of claimed fields.
+		return {
+			edit: false,
+			commit: false,
+			pushTaskBranch: false,
+			forcePush: false,
+			merge: false,
+			deploy: false,
+		};
+	}
 	const mode = resolvePeerMode(brief);
 	return {
 		edit: authorityField(brief, "EDIT_AUTHORITY") ?? mode === "write",
@@ -605,19 +644,59 @@ export function peerGitAuthority(
 
 const GIT_COMMIT_RE = /\bgit\b[^|;&]*\bcommit\b/i;
 const GIT_PUSH_RE = /\bgit\b[^|;&]*\bpush\b/i;
-const GIT_FORCE_PUSH_RE =
-	/\bgit\b[^|;&]*\bpush\b[^|;&]*(?:--force(?:-with-lease)?\b|\s-f\b)/i;
+
+/**
+ * Force-push detection over every `git push` segment of a command. Catches
+ * the forms a flag-order/heuristic regex misses: `--force[:=...] variants`,
+ * combined short flags (`-f`, `-uf`, `-fu`, ...) and forced refspecs
+ * (`+HEAD:refs/...`, `+main`). Chained commands are split first so a
+ * `git fetch && git push --force` chain cannot hide the flag.
+ */
+function detectForcePush(command: string): boolean {
+	for (const segment of command.split(/[|;&]+/)) {
+		if (!GIT_PUSH_RE.test(segment)) continue;
+		if (/--force(?:-with-lease)?\b/i.test(segment)) return true;
+		if (/(?:^|\s)-[a-z]*f[a-z]*(?:\s|$)/i.test(segment)) return true;
+		if (/(?:^|\s)\+/i.test(segment)) return true; // forced refspec +src[:dst]
+	}
+	return false;
+}
+
+/**
+ * The ONLY push form a peer may run when PUSH_TASK_BRANCH_AUTHORITY is
+ * granted: upload HEAD to its own task branch on origin. Branch name must
+ * be exactly agent/<TASK_ID> from the current brief — pushing any other
+ * branch (main, a teammate's branch), other remotes, --all/--tags/--mirror
+ * or deletions is structurally impossible in this form.
+ */
+const EXACT_PUSH_RE =
+	/^\s*git\s+push\s+-u\s+origin\s+HEAD:refs\/heads\/([A-Za-z0-9][A-Za-z0-9._/-]*)\s*$/;
+
+export function expectedTaskBranch(taskId: string | undefined): string | null {
+	const id = taskId?.trim();
+	if (!id || /\s/.test(id)) return null;
+	return `agent/${id}`;
+}
+
 const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b/i;
 
 export function gitAuthorityBlockReason(
 	command: string,
 	authority: PeerGitAuthority,
+	taskId?: string,
 ): string | null {
-	if (GIT_FORCE_PUSH_RE.test(command)) {
-		return "FORCE_PUSH_AUTHORITY is always denied for Peers. Ask the Lead to update the brief — peers never force-push.";
+	if (detectForcePush(command)) {
+		return "FORCE_PUSH_AUTHORITY is always denied for Peers (including -f/-uf/-fu, --force*= and +refspec forms). Ask the Lead to update the brief — peers never force-push.";
 	}
-	if (GIT_PUSH_RE.test(command) && !authority.pushTaskBranch) {
-		return "PUSH_TASK_BRANCH_AUTHORITY is denied for this task. Report AUTHORITY_MISMATCH to the Lead.";
+	if (GIT_PUSH_RE.test(command)) {
+		if (!authority.pushTaskBranch) {
+			return "PUSH_TASK_BRANCH_AUTHORITY is denied for this task. Report AUTHORITY_MISMATCH to the Lead.";
+		}
+		const expected = expectedTaskBranch(taskId);
+		const match = command.match(EXACT_PUSH_RE);
+		if (expected === null || !match || match[1] !== expected) {
+			return `Push authority is branch-scoped: only "git push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" is allowed. Other branches/remotes, --all, --tags, --mirror, deletions and chained commands are blocked. Push first, run other commands separately.`;
+		}
 	}
 	if (GIT_COMMIT_RE.test(command) && !authority.commit) {
 		return "COMMIT_AUTHORITY is denied for this task. Report AUTHORITY_MISMATCH to the Lead (or hand off a stable workspace snapshot instead of a SHA).";
@@ -864,6 +943,7 @@ export default function (pi: ExtensionAPI) {
 			const gitBlockReason = gitAuthorityBlockReason(
 				command,
 				peerGitAuthority(currentBrief),
+				currentBrief?.fields.get("TASK_ID"),
 			);
 			if (gitBlockReason) {
 				return { block: true, reason: gitBlockReason };
