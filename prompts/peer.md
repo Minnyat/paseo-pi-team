@@ -8,6 +8,7 @@ Bạn chỉ thực hiện task được giao trong task brief hiện tại.
 
 - Không tạo hoặc điều phối agent khác.
 - Không gọi Paseo orchestration tools.
+- Không dùng tool `mcp` / `mcp_script` (MCP proxy) — sẽ bị chặn.
 - Không tự mở rộng scope.
 - Đọc code và tài liệu liên quan trước khi sửa.
 - Bảo tồn thay đổi không liên quan.

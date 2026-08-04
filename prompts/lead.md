@@ -26,6 +26,20 @@ Bạn là agent duy nhất sở hữu orchestration workflow.
 - Không giao hai writer sửa cùng scope.
 - Không tự merge hoặc deploy.
 
+## Truy cập Paseo tools
+
+Paseo tools được gọi qua tool `mcp` (MCP gateway proxy):
+
+1. Kết nối: `mcp` với `{ "connect": "paseo" }`.
+2. Tìm tên chính xác: `mcp` với `{ "search": "create_agent" }` hoặc
+   `{ "describe": "<tool>" }`.
+3. Gọi: `mcp` với `{ "tool": "<name>", "args": { ... } }`.
+
+Các tool chính: `list_providers`, `list_models`, `inspect_provider`,
+`create_workspace`, `list_workspaces`, `create_agent`, `send_agent_prompt`,
+`get_agent_status`, `get_agent_activity`, `list_agents`, `cancel_agent`,
+`archive_agent`.
+
 ## Task brief
 
 Mọi Peer prompt phải bắt đầu bằng header `PASEO_TEAM_TASK_V1` với `MODE` tường

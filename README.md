@@ -37,9 +37,9 @@ paseo-pi-team/
 
 | Profile | `PASEO_PI_ROLE` | Tool policy (mặc định, chỉnh sau khi chạy `/team-tools`) |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read` + Paseo monitoring (`list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt`). Không `write`/`edit`, không tạo agent/workspace. |
-| `pi-lead` | `lead` | Pi `read`/`write`/`edit`/`bash` + toàn bộ Paseo orchestration tools. |
-| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Không bao giờ có Paseo orchestration tools. |
+| `pi-supervisor` | `supervisor` | `read` + `mcp` (chỉ gọi monitoring qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt`). Không `write`/`edit`, không tạo agent/workspace. |
+| `pi-lead` | `lead` | Pi `read`/`write`/`edit`/`bash` + `mcp`/`mcp_script` + toàn bộ Paseo orchestration tools. |
+| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Không bao giờ có `mcp` hoặc Paseo orchestration tools. |
 
 Policy là **allowlist thuần** (`setActiveTools`), cộng lớp backstop chặn trong
 `song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối.
@@ -59,6 +59,20 @@ Script copy:
 - `extensions/paseo-team-policy.ts` → `~/.pi/agent/extensions/`
 - `prompts/*.md` → `~/.pi/agent/extensions/prompts/`
 - `skills/paseo-team-lead/` → `~/.pi/agent/skills/`
+
+### Bắt buộc: pi-mcp-adapter
+
+Paseo tools tới pi agent qua MCP; pi không có MCP built-in, nên cần cài adapter:
+
+```bash
+pi install npm:pi-mcp-adapter
+```
+
+Khi đó Paseo tự detect adapter và truyền `--mcp-config` khi launch agent. Paseo
+MCP server lifecycle mặc định là `lazy`, nên tools được gọi qua **tool `mcp`
+(proxy)**: `{ "connect": "paseo" }` → `{ "search": ... }` / `{ "describe": ... }`
+→ `{ "tool": "<name>", "args": { ... } }`. Policy của role pack đã cho
+Lead/Supervisor dùng `mcp` và chặn Peer dùng nó.
 
 > Nếu máy từng chạy thí nghiệm cũ có `paseo-role-bootstrap.ts` trong
 > `~/.pi/agent/extensions/`, hãy xóa hoặc đổi tên thành `.disabled` — nó đã bị

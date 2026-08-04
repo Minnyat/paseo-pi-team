@@ -34,10 +34,20 @@ Synthesize evidence. Record:
 - verification;
 - unresolved risks.
 
+## Accessing Paseo tools
+
+Paseo tools are not separate tools in the prompt — they are reached through the
+`mcp` proxy tool (pi-mcp-adapter):
+
+1. `mcp` with `{ "connect": "paseo" }` to connect the Paseo MCP server.
+2. `mcp` with `{ "search": "create_agent" }` or `{ "describe": "<tool>" }`
+   to discover the exact tool name.
+3. `mcp` with `{ "tool": "<name>", "args": { ... } }` to invoke.
+
 ## Implementation
 
-1. Call `list_providers`.
-2. Call `list_models`.
+1. Use `mcp` to call `list_providers`.
+2. Use `mcp` to call `list_models`.
 3. Select an explicit provider, model and thinking level.
 4. Create a worktree-isolated workspace (`create_workspace` with
    `isolation: "worktree"`).
@@ -48,7 +58,7 @@ Never guess model or workspace IDs — inspect them first.
 
 ## Monitoring
 
-Use `get_agent_status` and `get_agent_activity`.
+Use `mcp` to call `get_agent_status` and `get_agent_activity`.
 
 Do not repeatedly interrupt a healthy worker.
 
