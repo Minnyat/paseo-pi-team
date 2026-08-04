@@ -22,11 +22,13 @@ jobs:
           node-version: ${{ matrix.node }}
       # The extension imports isToolCallEventType (a runtime value, not just
       # types) from pi-coding-agent, so the policy tests need it present.
+      # Everything is pinned to exact versions — no-latest so a fresh upstream
+      # release cannot change CI behavior for unchanged source.
       - name: install dev type deps
         shell: bash
         run: |
-          npm install --no-save \
-            @earendil-works/pi-coding-agent@0.83.0 @types/node
+          npm install --no-save --no-audit --no-fund \
+            @earendil-works/pi-coding-agent@0.83.0 @types/node@22.19.19
       - name: policy tests
         run: node test/policy.test.mts
       - name: model-routing tests
@@ -49,8 +51,10 @@ jobs:
         with:
           node-version: "24"
       - name: install dev type deps
+        shell: bash
         run: |
-          npm install --no-save \
-            @earendil-works/pi-coding-agent@0.83.0 @types/node typescript
+          npm install --no-save --no-audit --no-fund \
+            @earendil-works/pi-coding-agent@0.83.0 @types/node@22.19.19 \
+            typescript@6.0.3
       - name: typecheck extension
         run: npx tsc --noEmit -p tsconfig.ci.json

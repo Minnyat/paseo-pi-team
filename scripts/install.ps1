@@ -20,6 +20,8 @@ $skillsDir = Join-Path $PiHome "agent\skills"
 $skillDir  = Join-Path $skillsDir "paseo-team-lead"
 
 New-Item -ItemType Directory -Force -Path $extDir, $promptDir, $skillsDir | Out-Null
+# Routing configs live in ~/.paseo-pi-team (model-routing.local.json, cluster-routing.local.json).
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.paseo-pi-team" | Out-Null
 
 Copy-Item (Join-Path $RolePackRoot "extensions\paseo-team-policy.ts") (Join-Path $extDir "paseo-team-policy.ts") -Force
 Copy-Item (Join-Path $RolePackRoot "prompts\*.md") $promptDir -Force

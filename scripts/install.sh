@@ -19,6 +19,9 @@ SKILLS_DIR="$PI_HOME/agent/skills"
 SKILL_DIR="$SKILLS_DIR/paseo-team-lead"
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
+# Routing configs live here (model-routing.local.json, cluster-routing.local.json);
+# create it so the documented copy commands work out of the box.
+mkdir -p "$HOME/.paseo-pi-team"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
 cp -f "$ROLE_PACK_ROOT"/prompts/*.md "$PROMPT_DIR/"
