@@ -4,6 +4,12 @@ TASK_ID: T-001
 DISPOSITION: engineer
 MODE: write
 
+MODEL_CLASS: CODING_MEDIUM
+RESOLVED_HOST_ID: local
+RESOLVED_PASEO_PROVIDER: pi-peer
+RESOLVED_MODEL: <pi-provider>/<model-id>
+RESOLVED_THINKING: medium
+
 OBJECTIVE:
 Fix the divide-by-zero and negative-sqrt edge cases in calculator.py so that
 all tests in test_calculator.py pass without changing their assertions.

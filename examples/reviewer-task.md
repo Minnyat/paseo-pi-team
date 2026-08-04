@@ -4,6 +4,12 @@ TASK_ID: T-002
 DISPOSITION: independent-reviewer
 MODE: read-only
 
+MODEL_CLASS: REVIEW_HIGH
+RESOLVED_HOST_ID: local
+RESOLVED_PASEO_PROVIDER: pi-peer
+RESOLVED_MODEL: <pi-provider>/<model-id>
+RESOLVED_THINKING: high
+
 OBJECTIVE:
 Independently review the candidate from T-001 (engineer task). Falsify the
 claim "all tests pass and the change is safe" — do not assume it is true.
