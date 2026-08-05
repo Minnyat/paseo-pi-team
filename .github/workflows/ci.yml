@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this workflow only reads code — the GITHUB_TOKEN gets no
+# write scope, and checkouts never persist credentials into later steps.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: unit tests (${{ matrix.os }} / node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ["22.18", "24"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      # The extension imports isToolCallEventType (a runtime value, not just
+      # types) from pi-coding-agent, so the policy tests need it present.
+      # Everything is pinned to exact versions — no-latest so a fresh upstream
+      # release cannot change CI behavior for unchanged source.
+      - name: install dev type deps
+        shell: bash
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            @earendil-works/pi-coding-agent@0.83.0 @types/node@22.19.19
+      - name: policy tests
+        run: node test/policy.test.mts
+      - name: model-routing tests
+        run: node test/model-routing.test.mjs
+      - name: preflight + resolver syntax check
+        run: |
+          node --check scripts/preflight.mjs
+          node --check scripts/model-routing.mjs
+
+  # Live remote Paseo checks stay manual (they need two real hosts); this CI
+  # only gates the pure tests. Typecheck needs the pi-coding-agent package
+  # types, so it fetches the pinned dev deps on the fly.
+  typecheck:
+    name: tsc (extension)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        # v4.4.0
+        with:
+          node-version: "24"
+      - name: install dev type deps
+        shell: bash
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            @earendil-works/pi-coding-agent@0.83.0 @types/node@22.19.19 \
+            typescript@6.0.3
+      - name: typecheck extension
+        run: npx tsc --noEmit -p tsconfig.ci.json

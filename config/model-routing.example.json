@@ -1,0 +1,32 @@
+{
+  "$comment": "COPY → ~/.paseo-pi-team/model-routing.local.json on EACH host. Never commit the local copy: it holds host-specific model choices. Values below are placeholders — run 'paseo provider ls' and 'paseo provider models pi-peer --json' on the host, then fill in real IDs. 'model' is the exact Pi model id in '<pi-provider>/<model-id>' form (it may itself contain slashes, e.g. 'openrouter/vendor/model-name' — Paseo splits at the FIRST slash only). 'thinking' ∈ off|minimal|low|medium|high|xhigh|max and must be supported by the model (check model.thinkingOptions; for custom models in ~/.pi/agent/models.json, a thinkingLevelMap entry of null means that level is silently clamped by pi — treat it as unsupported).",
+  "version": 1,
+  "hostId": "replace-me-host-id",
+  "routes": {
+    "MONITOR_ECONOMY": {
+      "paseoProvider": "pi-supervisor",
+      "model": "<pi-provider>/<model-id>",
+      "thinking": "low"
+    },
+    "FAST_READ": {
+      "paseoProvider": "pi-peer",
+      "model": "<pi-provider>/<model-id>",
+      "thinking": "low"
+    },
+    "CODING_MEDIUM": {
+      "paseoProvider": "pi-peer",
+      "model": "<pi-provider>/<model-id>",
+      "thinking": "medium"
+    },
+    "REASONING_HIGH": {
+      "paseoProvider": "pi-peer",
+      "model": "<pi-provider>/<model-id>",
+      "thinking": "high"
+    },
+    "REVIEW_HIGH": {
+      "paseoProvider": "pi-peer",
+      "model": "<pi-provider>/<model-id>",
+      "thinking": "high"
+    }
+  }
+}

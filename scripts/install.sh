@@ -6,7 +6,7 @@
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
 #
-# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.json by hand.
+# Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.example.json by hand.
 
 set -euo pipefail
 
@@ -19,6 +19,9 @@ SKILLS_DIR="$PI_HOME/agent/skills"
 SKILL_DIR="$SKILLS_DIR/paseo-team-lead"
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
+# Routing configs live here (model-routing.local.json, cluster-routing.local.json);
+# create it so the documented copy commands work out of the box.
+mkdir -p "$HOME/.paseo-pi-team"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
 cp -f "$ROLE_PACK_ROOT"/prompts/*.md "$PROMPT_DIR/"
@@ -32,7 +35,15 @@ echo "  prompts   -> $PROMPT_DIR"
 echo "  skill     -> $SKILL_DIR"
 echo ""
 echo "Next steps:"
-echo "  1. Merge config/paseo.providers.json into ~/.paseo/config.json"
+echo "  1. Install the MCP adapter (PINNED version — Paseo tools depend on it):"
+echo "     pi install npm:pi-mcp-adapter@2.19.0"
+echo "  2. Merge config/paseo.providers.example.json into ~/.paseo/config.json"
 echo "     (agents.providers.pi-* + daemon.mcp.injectIntoAgents: true)."
-echo "  2. Restart the Paseo daemon (kills running agents — do it when ready)."
-echo "  3. In pi, run /reload to load the new extension, then /team-role."
+echo "  3. Copy config/model-routing.example.json to ~/.paseo-pi-team/model-routing.local.json"
+echo "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
+echo "     Cross-host controller: also copy config/cluster-routing.example.json to"
+echo "     ~/.paseo-pi-team/cluster-routing.local.json (endpoint values live in env)"
+echo "  4. Restart the Paseo daemon (kills running agents — do it when ready)."
+echo "  5. In pi, run /reload to load the new extension, then /team-role."
+echo "  6. Verify host readiness (repo-root independent):"
+echo "     node \"$ROLE_PACK_ROOT/scripts/preflight.mjs\""

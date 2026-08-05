@@ -1,0 +1,93 @@
+{
+  "$comment": "COPY → ~/.paseo-pi-team/cluster-routing.local.json on the CONTROLLER host. Never commit the local copy. This is the single controller-local route file: every host in the cluster is described here, each with its own connection, capabilities, concurrency limits and per-class routes. Endpoint VALUES (pairing offers / remote targets) live ONLY in environment variables referenced by NAME via 'endpointEnv' — never inside this file. Run 'paseo provider ls' and 'paseo provider models pi-peer --json' ON EACH HOST to fill real model ids ('<pi-provider>/<model-id>'; may contain slashes). 'thinking' ∈ off|minimal|low|medium|high|xhigh|max and must be supported by the model (for custom models in ~/.pi/agent/models.json, a thinkingLevelMap entry of null means the level is silently clamped by pi — treat it as unsupported).",
+  "version": 1,
+  "hosts": {
+    "win-primary": {
+      "connection": {
+        "type": "local"
+      },
+      "required": true,
+      "capabilities": [
+        "git-read",
+        "git-write",
+        "focused-test",
+        "docker",
+        "integration-test"
+      ],
+      "limits": {
+        "writers": 1,
+        "readers": 3
+      },
+      "routes": {
+        "MONITOR_ECONOMY": {
+          "paseoProvider": "pi-supervisor",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "low"
+        },
+        "FAST_READ": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "low"
+        },
+        "CODING_MEDIUM": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "medium"
+        },
+        "REASONING_HIGH": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "high"
+        },
+        "REVIEW_HIGH": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "high"
+        }
+      }
+    },
+    "mac-review": {
+      "connection": {
+        "type": "remote",
+        "endpointEnv": "PASEO_MAC_REVIEW"
+      },
+      "required": true,
+      "capabilities": [
+        "git-read",
+        "focused-test",
+        "independent-review"
+      ],
+      "limits": {
+        "writers": 0,
+        "readers": 2
+      },
+      "routes": {
+        "MONITOR_ECONOMY": {
+          "paseoProvider": "pi-supervisor",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "low"
+        },
+        "FAST_READ": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "low"
+        },
+        "CODING_MEDIUM": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "medium"
+        },
+        "REASONING_HIGH": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "high"
+        },
+        "REVIEW_HIGH": {
+          "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "high"
+        }
+      }
+    }
+  }
+}
