@@ -387,12 +387,17 @@ expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
 	const unverifiable = structuredClone(validConfigData);
 	unverifiable.routes.FAST_READ.model = "testprov/non-reasoning";
 	expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
-		resolveRoute(validateRoutingConfig(unverifiable), "FAST_READ", {
-			...inventory,
-			providers: buildProviderInventory([
-				{ provider: "pi-peer", status: "available", enabled: "Enabled" },
-			]),
-		}, { strict: true }),
+		resolveRoute(
+			validateRoutingConfig(unverifiable),
+			"FAST_READ",
+			{
+				...inventory,
+				providers: buildProviderInventory([
+					{ provider: "pi-peer", status: "available", enabled: "Enabled" },
+				]),
+			},
+			{ strict: true },
+		),
 	);
 }
 
