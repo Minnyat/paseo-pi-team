@@ -224,7 +224,13 @@ export function validateClusterConfig(data) {
 			version: data.version,
 		});
 	}
-	if (typeof data.hosts !== "object" || data.hosts === null) {
+	if (
+		typeof data.hosts !== "object" ||
+		data.hosts === null ||
+		Array.isArray(data.hosts)
+	) {
+		// An array is `typeof "object"` too — without this guard a hosts ARRAY
+		// silently iterated as phantom hosts "0", "1", ... instead of failing.
 		throw fail("cluster routing config requires a hosts object");
 	}
 	if (Object.keys(data.hosts).length === 0) {
@@ -517,6 +523,29 @@ function normalizeProviderEntry(entry) {
 	const status =
 		typeof entry.status === "string" ? entry.status.toLowerCase() : null;
 	return { id: id.trim(), enabled, status };
+}
+
+/**
+ * Build a resolver inventory-provider array from raw `paseo provider ls
+ * --json` entries (or MCP list_providers entries). Status MUST round-trip
+ * into the resolver — preflight once rebuilt this mapping inline and dropped
+ * the field, which let a provider reporting "error" still pass a strict
+ * preflight. Centralize the mapping so every caller (single-host routes,
+ * cluster-local routes, live remote preflight) carries status through.
+ *
+ * @param {unknown} entries raw provider-ls entries
+ * @returns {{id: string, enabled: boolean, status?: string}[]}
+ */
+export function buildProviderInventory(entries) {
+	if (!Array.isArray(entries)) return [];
+	return entries
+		.map(normalizeProviderEntry)
+		.filter(Boolean)
+		.map((p) => ({
+			id: p.id,
+			enabled: p.enabled,
+			...(p.status !== null ? { status: p.status } : {}),
+		}));
 }
 
 /**

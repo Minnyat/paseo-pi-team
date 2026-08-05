@@ -633,6 +633,29 @@ assert.match(
 	/allowlist/,
 	"supervisor mcp_script cannot create agents",
 );
+// Bracket call alias with a LITERAL target must be validated against the
+// allowlist — previously captured as the helper name "call" and skipped.
+assert.match(
+	mcpScriptBlockReason(
+		"lead",
+		'await tools["call"]("paseo_create_terminal", {});',
+	) ?? "",
+	/allowlist/,
+	'tools["call"]("literal") of a blocked target is caught',
+);
+assert.equal(
+	mcpScriptBlockReason("lead", 'await tools["call"]("paseo_list_agents", {});'),
+	null,
+	'tools["call"]("literal") of an allowed target passes',
+);
+assert.match(
+	mcpScriptBlockReason(
+		"supervisor",
+		'await tools["call"]("paseo_create_agent", {});',
+	) ?? "",
+	/allowlist/,
+	'supervisor tools["call"]("literal") cannot create agents',
+);
 // Literal template-string target (no expression) is still a static literal.
 assert.equal(
 	mcpScriptBlockReason("lead", "await tools.call(`paseo_list_agents`, {});"),

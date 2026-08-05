@@ -22,6 +22,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	RoutingError,
+	buildProviderInventory,
 	defaultClusterRoutingPath,
 	defaultRoutingDir,
 	loadClusterConfig,
@@ -256,7 +257,19 @@ if (daemonUp) {
 			) {
 				fail(`role-provider:${role}`, "registered but disabled");
 			} else {
-				pass(`role-provider:${role}`, String(entry.status ?? "ok"));
+				// A provider can be enabled AND unhealthy — printing the status
+				// next to a ✓ is a false pass. Reject the same statuses the
+				// route resolver rejects.
+				const status =
+					typeof entry.status === "string" ? entry.status.toLowerCase() : null;
+				if (status !== null && !PROVIDER_OK_STATUSES.has(status)) {
+					fail(
+						`role-provider:${role}`,
+						`status "${entry.status}" is unhealthy (expected: ${[...PROVIDER_OK_STATUSES].join("/")})`,
+					);
+				} else {
+					pass(`role-provider:${role}`, String(entry.status ?? "ok"));
+				}
 			}
 		}
 	} else {
@@ -337,16 +350,17 @@ if (routing && daemonUp && !skipModels) {
 			);
 			continue;
 		}
+		// buildProviderInventory keeps `status` intact and the resolver runs
+		// in strict mode when --strict was passed — an enabled-but-erroring
+		// provider or an unverifiable thinking list must NOT be a pass.
 		const inventory = {
-			providers: [...providersById.values()].map((p) => ({
-				id: p.provider ?? p.id,
-				enabled:
-					String(p.enabled).toLowerCase() === "enabled" || p.enabled === true,
-			})),
+			providers: buildProviderInventory([...providersById.values()]),
 			models,
 		};
 		try {
-			const resolved = resolveRoute(routing, modelClass, inventory);
+			const resolved = resolveRoute(routing, modelClass, inventory, {
+				strict: wantStrict,
+			});
 			// Per-model thinkingLevelMap guard (Paseo's list does not reflect it).
 			const { provider: piProvider, model: modelId } = (() => {
 				const i = resolved.model.indexOf("/");
@@ -585,12 +599,9 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	}
 
 	// 3. Route resolution against the REMOTE inventory.
-	const inventoryProviders = [...remoteProviders.values()].map((p) => ({
-		id: p.provider ?? p.id,
-		enabled:
-			String(p.enabled).toLowerCase() === "enabled" || p.enabled === true,
-		status: typeof p.status === "string" ? p.status : undefined,
-	}));
+	const inventoryProviders = buildProviderInventory([
+		...remoteProviders.values(),
+	]);
 	for (const modelClass of MODEL_CLASSES) {
 		const route = host.routes[modelClass];
 		const models = listModelsRemote(hostId, endpointValue, route.paseoProvider);
@@ -730,13 +741,7 @@ if (cluster) {
 					continue;
 				}
 				const inventory = {
-					providers: [...providersById.values()].map((p) => ({
-						id: p.provider ?? p.id,
-						enabled:
-							String(p.enabled).toLowerCase() === "enabled" ||
-							p.enabled === true,
-						status: typeof p.status === "string" ? p.status : undefined,
-					})),
+					providers: buildProviderInventory([...providersById.values()]),
 					models,
 				};
 				try {

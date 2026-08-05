@@ -332,13 +332,14 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 /**
  * mcp_script executes arbitrary JS that can call MCP tools directly, bypassing
  * the `mcp` guard. Heuristic backstop: scan for direct tool references
- * (`tools.<name>()`, `tools["<name>"]()` or `tools.call("<name>", ...)`) and
+ * (`tools.<name>()`, `tools["<name>"]()`, `tools.call("<name>", ...)` or
+ * `tools["call"]("<name>", ...)`) and
  * reject names outside the role allowlist. Any call whose target is NOT a
  * string literal (variable, concatenation, computed key) is unverifiable and
  * blocked — fail-closed, not fail-open. Not a security boundary.
  */
 const MCP_SCRIPT_DIRECT_CALL_RE =
-	/\btools\.call\(\s*["'`]([^"'`]+)["'`]|\btools\[["'`]([^"'`]+)["'`]\]\s*\(|\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	/\btools\s*\[\s*["'`]call["'`]\s*\]\s*\(\s*["'`]([^"'`]+)["'`]|\btools\.call\(\s*["'`]([^"'`]+)["'`]|\btools\[["'`]([^"'`]+)["'`]\]\s*\(|\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
 /**
  * Dynamic dispatch forms we can never resolve statically:
@@ -361,10 +362,12 @@ export function mcpScriptBlockReason(
 		return `mcp_script invokes an MCP tool through a non-literal target (variable, expression or computed key) — the ${role} allowlist cannot verify it, so the call is blocked fail-closed. Use a literal tool name: tools.call("<allowed_tool>", ...) or tools.<allowed_tool>().`;
 	}
 	for (const match of code.matchAll(MCP_SCRIPT_DIRECT_CALL_RE)) {
-		// Group order mirrors the pattern: tools.call(...), tools[...],
-		// tools.<name>(...). tools.call must be tried first — otherwise the
-		// dotted branch swallows it as the name "call" and skips the target.
-		const name = match[1] ?? match[2] ?? match[3] ?? "";
+		// Group order mirrors the pattern: tools["call"](literal), tools.call(...),
+		// tools[...], tools.<name>(...). The bracket-call-literal branch must be
+		// FIRST — otherwise the generic bracket branch captures the helper name
+		// "call", the helper skip-list then drops it, and the real literal
+		// target escapes allowlist validation entirely.
+		const name = match[1] ?? match[2] ?? match[3] ?? match[4] ?? "";
 		if (["call", "describe", "search", "emit"].includes(name)) continue;
 		if (!matchesPaseoToolName(name, allowed)) {
 			return `Tool "${name}" referenced in mcp_script is not in the ${role} MCP allowlist.`;

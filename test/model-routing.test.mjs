@@ -8,6 +8,7 @@ import {
 	ROLE_PROVIDERS,
 	THINKING_LEVELS,
 	RoutingError,
+	buildProviderInventory,
 	cmdPercentExpansionRisk,
 	composeProviderModel,
 	loadClusterConfig,
@@ -349,6 +350,52 @@ expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
 	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(leading));
 }
 
+// --- buildProviderInventory (preflight inventory mapping) --------------------
+
+{
+	// Raw `paseo provider ls --json` shapes must map into a resolver inventory
+	// WITHOUT dropping status — preflight once rebuilt this mapping inline and
+	// dropped the field, letting an enabled-but-erroring provider pass.
+	const raw = [
+		{ provider: "pi-lead", status: "available", enabled: "Enabled" },
+		{ provider: "pi-peer", status: "error", enabled: true },
+		{ id: "pi-supervisor", enabled: true }, // MCP shape: no status field
+		null,
+		{ enabled: true }, // no id → dropped
+	];
+	const inv = buildProviderInventory(raw);
+	assert.deepEqual(inv, [
+		{ id: "pi-lead", enabled: true, status: "available" },
+		{ id: "pi-peer", enabled: true, status: "error" },
+		{ id: "pi-supervisor", enabled: true },
+	]);
+	assert.deepEqual(buildProviderInventory(undefined), []);
+	assert.deepEqual(buildProviderInventory("nope"), []);
+
+	// The false-pass regression, end to end: enabled + status "error" must be
+	// REJECTED by the resolver, not silently passed.
+	expectRoutingError("ROLE_PROVIDER_UNAVAILABLE", () =>
+		resolveRoute(config, "CODING_MEDIUM", {
+			...inventory,
+			providers: buildProviderInventory([
+				{ provider: "pi-peer", status: "error", enabled: true },
+			]),
+		}),
+	);
+	// And in STRICT mode a model without a thinking option list fails even
+	// when the provider is healthy (unverifiable is not a pass).
+	const unverifiable = structuredClone(validConfigData);
+	unverifiable.routes.FAST_READ.model = "testprov/non-reasoning";
+	expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
+		resolveRoute(validateRoutingConfig(unverifiable), "FAST_READ", {
+			...inventory,
+			providers: buildProviderInventory([
+				{ provider: "pi-peer", status: "available", enabled: "Enabled" },
+			]),
+		}, { strict: true }),
+	);
+}
+
 // Provider with missing/mistyped `enabled` is UNVERIFIABLE → not usable
 // (fail-closed; a lone `{ id: "pi-peer" }` must not be routed to).
 for (const bad of [undefined, null, {}, "maybe", "disabled"]) {
@@ -513,6 +560,27 @@ expectRoutingError("CONFIG_INVALID", () =>
 	const badLimits = structuredClone(clusterData);
 	badLimits.hosts["win-primary"].limits.writers = -1;
 	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(badLimits));
+}
+{
+	// `hosts` must be a plain object — a non-empty ARRAY is also
+	// `typeof "object"` and previously slipped past the gate, iterating as
+	// phantom hosts "0", "1", ... instead of failing at the schema.
+	const arrayHosts = {
+		version: 1,
+		hosts: [
+			{
+				connection: { type: "local" },
+				required: true,
+				capabilities: [],
+				routes: {},
+			},
+		],
+	};
+	expectRoutingError("CONFIG_INVALID", () => validateClusterConfig(arrayHosts));
+	const emptyArrayHosts = { version: 1, hosts: [] };
+	expectRoutingError("CONFIG_INVALID", () =>
+		validateClusterConfig(emptyArrayHosts),
+	);
 }
 {
 	// `required` must be an explicit boolean — a string "true" previously
