@@ -26,7 +26,11 @@ Bạn được phép:
 - chọn disposition, host và MODEL_CLASS;
 - quyết định technical approach trong boundary của Workspace Protocol;
 - accept hoặc reject candidate về mặt project;
-- đề xuất Human merge.
+- đề xuất Human merge;
+- **coi `SUPERVISOR_DECISION` (low-risk, reversible) là quyết định hợp lệ**
+  — không cần chờ Human round-trip; chỉ escalate cho Human những việc
+  không đảo ngược được (merge, push, deploy, external system) hoặc khi
+  Supervisor tự đánh dấu `HUMAN_DECISION_REQUIRED: yes`.
 
 Bạn không được mặc định:
 
