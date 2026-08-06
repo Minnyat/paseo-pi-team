@@ -1,0 +1,859 @@
+// remote-paseo.test.mjs — regression tests for scripts/remote-paseo.mjs.
+// Run: node test/remote-paseo.test.mjs   (node >= 22)
+
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	REMOTE_ERROR_CODES,
+	RemoteError,
+	buildArgv,
+	parseAgentRef,
+	parseArgs,
+	parseDurationMs,
+	readPrompt,
+	resolveHost,
+	splitAgentRef,
+	validateFlags,
+	validateRunProvider,
+	validateThinking,
+} from "../scripts/remote-paseo.mjs";
+import { loadClusterConfig } from "../scripts/model-routing.mjs";
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const ROOT = join(import.meta.dirname, "..");
+const WRAPPER = join(ROOT, "scripts", "remote-paseo.mjs");
+const FAKE = join(ROOT, "test", "fixtures", "fake-paseo.mjs");
+
+const ENDPOINT = "https://app.paseo.sh/#offer=testtoken123";
+
+const CLUSTER = {
+	version: 1,
+	hosts: {
+		"win-primary": {
+			connection: { type: "local" },
+			required: true,
+			capabilities: ["git-read", "git-write", "focused-test"],
+			limits: { writers: 1, readers: 2 },
+			routes: {
+				MONITOR_ECONOMY: {
+					paseoProvider: "pi-supervisor",
+					model: "testprov/model-a",
+					thinking: "low",
+				},
+				FAST_READ: {
+					paseoProvider: "pi-peer",
+					model: "testprov/model-a",
+					thinking: "low",
+				},
+				CODING_MEDIUM: {
+					paseoProvider: "pi-peer",
+					model: "testprov/model-b",
+					thinking: "medium",
+				},
+				REASONING_HIGH: {
+					paseoProvider: "pi-peer",
+					model: "vendor/scoped/deep",
+					thinking: "high",
+				},
+				REVIEW_HIGH: {
+					paseoProvider: "pi-peer",
+					model: "testprov/model-c",
+					thinking: "high",
+				},
+			},
+		},
+		"mac-review": {
+			connection: { type: "remote", endpointEnv: "PASEO_TEST_ENDPOINT" },
+			required: true,
+			capabilities: ["git-read", "independent-review"],
+			limits: { writers: 0, readers: 2 },
+			routes: {
+				MONITOR_ECONOMY: {
+					paseoProvider: "pi-supervisor",
+					model: "testprov/model-a",
+					thinking: "low",
+				},
+				FAST_READ: {
+					paseoProvider: "pi-peer",
+					model: "testprov/model-a",
+					thinking: "low",
+				},
+				CODING_MEDIUM: {
+					paseoProvider: "pi-peer",
+					model: "testprov/model-b",
+					thinking: "medium",
+				},
+				REASONING_HIGH: {
+					paseoProvider: "pi-peer",
+					model: "vendor/scoped/deep",
+					thinking: "high",
+				},
+				REVIEW_HIGH: {
+					paseoProvider: "pi-peer",
+					model: "testprov/model-c",
+					thinking: "high",
+				},
+			},
+		},
+	},
+};
+
+const SAVED_ENV = { ...process.env };
+
+function makeHome() {
+	const home = mkdtempSync(join(tmpdir(), "paseo-remote-test-"));
+	writeFileSync(
+		join(home, "cluster-routing.local.json"),
+		JSON.stringify(CLUSTER, null, 2),
+	);
+	return home;
+}
+
+/** Run the wrapper as a child process with an isolated PASEO_TEAM_HOME. */
+function runWrapper(
+	args,
+	{ home, endpoint = ENDPOINT, omitEndpoint = false, extraEnv = {} } = {},
+) {
+	const h = home ?? makeHome();
+	const env = {
+		...SAVED_ENV,
+		PASEO_TEAM_HOME: h,
+		PASEO_TEAM_PASEO_EXEC: `node "${FAKE}"`,
+		// An explicit undefined endpoint would be swallowed by the default
+		// param, so omitting the endpoint is an explicit flag.
+		...(omitEndpoint ? {} : { PASEO_TEST_ENDPOINT: endpoint }),
+		...extraEnv,
+	};
+	const res = spawnSync(process.execPath, [WRAPPER, ...args], {
+		encoding: "utf8",
+		env,
+		timeout: 60000,
+	});
+	let json = null;
+	try {
+		json = JSON.parse(res.stdout);
+	} catch {
+		/* leave null */
+	}
+	return { code: res.status, stdout: res.stdout, stderr: res.stderr, json };
+}
+
+function expectRemoteError(code, fn) {
+	try {
+		fn();
+	} catch (error) {
+		assert.ok(
+			error instanceof RemoteError,
+			`expected RemoteError, got ${error}`,
+		);
+		assert.equal(
+			error.code,
+			code,
+			`expected code ${code}, got "${error.code}" (${error.message})`,
+		);
+		return error;
+	}
+	assert.fail(`expected RemoteError(${code}) but nothing was thrown`);
+}
+
+function withEndpoint(value) {
+	const prev = process.env.PASEO_TEST_ENDPOINT;
+	// Assigning undefined to process.env stores the STRING "undefined" — to
+	// simulate a missing var the key must be deleted.
+	if (value === undefined) delete process.env.PASEO_TEST_ENDPOINT;
+	else process.env.PASEO_TEST_ENDPOINT = value;
+	return () => {
+		if (prev === undefined) delete process.env.PASEO_TEST_ENDPOINT;
+		else process.env.PASEO_TEST_ENDPOINT = prev;
+	};
+}
+
+// ---------------------------------------------------------------------------
+// parseArgs
+// ---------------------------------------------------------------------------
+
+{
+	const t = "parseArgs: flags and camelCase";
+	const out = parseArgs([
+		"models",
+		"--host-id",
+		"mac-review",
+		"--provider",
+		"pi-peer",
+		"--json",
+	]);
+	assert.equal(out._[0], "models", t);
+	assert.equal(out.hostId, "mac-review", t);
+	assert.equal(out.provider, "pi-peer", t);
+	assert.equal(out.json, true, t);
+}
+
+{
+	const t = "parseArgs: boolean flags";
+	const out = parseArgs([
+		"run",
+		"--host-id",
+		"h",
+		"--provider",
+		"p",
+		"--thinking",
+		"low",
+		"--prompt",
+		"x",
+		"--dry-run",
+		"--no-wait",
+	]);
+	assert.equal(out.dryRun, true, t);
+	assert.equal(out.noWait, true, t);
+}
+
+{
+	const out = parseArgs(["models", "--worksapce", "x"]);
+	expectRemoteError("USAGE", () => validateFlags("models", out));
+}
+
+{
+	const out = parseArgs(["models", "--host-id"]);
+	expectRemoteError("USAGE", () => validateFlags("models", out));
+}
+
+{
+	const out = parseArgs(["models", "--host-id", "mac-review"]);
+	validateFlags("models", out);
+}
+
+{
+	const out = parseArgs([
+		"run",
+		"--host-id",
+		"h",
+		"--provider",
+		"p",
+		"--thinking",
+		"low",
+		"--prompt",
+		"x",
+		"--json",
+	]);
+	validateFlags("run", out);
+}
+
+// ---------------------------------------------------------------------------
+// resolveHost
+// ---------------------------------------------------------------------------
+
+{
+	expectRemoteError("HOST_NOT_FOUND", () =>
+		resolveHost(loadClusterConfigFromFixture(), "nope"),
+	);
+}
+
+{
+	expectRemoteError("LOCAL_HOST_UNSUPPORTED", () =>
+		resolveHost(loadClusterConfigFromFixture(), "win-primary"),
+	);
+}
+
+{
+	const restore = withEndpoint(undefined);
+	try {
+		expectRemoteError("ENDPOINT_ENV_MISSING", () =>
+			resolveHost(loadClusterConfigFromFixture(), "mac-review"),
+		);
+	} finally {
+		restore();
+	}
+}
+
+{
+	const restore = withEndpoint("not an endpoint value with spaces");
+	try {
+		expectRemoteError("ENDPOINT_UNSAFE", () =>
+			resolveHost(loadClusterConfigFromFixture(), "mac-review"),
+		);
+	} finally {
+		restore();
+	}
+}
+
+{
+	const t = "resolveHost: % expansion risk only on win32";
+	const restore = withEndpoint("tcp://host:6767?ssl=true&password=abc%def%");
+	try {
+		// linux/mac: the value is structurally valid → no error
+		const host = resolveHost(loadClusterConfigFromFixture(), "mac-review", {
+			platform: "darwin",
+		});
+		assert.equal(
+			host.endpoint,
+			"tcp://host:6767?ssl=true&password=abc%def%",
+			t,
+		);
+		// win32: refused
+		expectRemoteError("ENDPOINT_UNSAFE", () =>
+			resolveHost(loadClusterConfigFromFixture(), "mac-review", {
+				platform: "win32",
+			}),
+		);
+	} finally {
+		restore();
+	}
+}
+
+{
+	const t = "resolveHost: valid remote host returns endpoint internally";
+	const restore = withEndpoint(ENDPOINT);
+	try {
+		const host = resolveHost(loadClusterConfigFromFixture(), "mac-review");
+		assert.equal(host.hostId, "mac-review", t);
+		assert.equal(host.endpointEnv, "PASEO_TEST_ENDPOINT", t);
+		assert.equal(host.endpoint, ENDPOINT, t);
+	} finally {
+		restore();
+	}
+}
+
+function loadClusterConfigFromFixture() {
+	const home = makeHome();
+	return loadClusterConfig(join(home, "cluster-routing.local.json"));
+}
+
+// ---------------------------------------------------------------------------
+// splitAgentRef / parseAgentRef
+// ---------------------------------------------------------------------------
+
+{
+	const t = "splitAgentRef: splits at first slash";
+	assert.deepEqual(
+		splitAgentRef("mac-review/abc-123"),
+		{ hostId: "mac-review", agentId: "abc-123" },
+		t,
+	);
+	assert.deepEqual(splitAgentRef("h/a/b"), { hostId: "h", agentId: "a/b" }, t);
+}
+
+{
+	expectRemoteError("USAGE", () => splitAgentRef(""));
+	expectRemoteError("USAGE", () => splitAgentRef("no-slash"));
+	expectRemoteError("USAGE", () => splitAgentRef("/agent"));
+	expectRemoteError("USAGE", () => splitAgentRef("host/"));
+}
+
+{
+	const restore = withEndpoint(ENDPOINT);
+	try {
+		expectRemoteError("LOCAL_HOST_UNSUPPORTED", () =>
+			parseAgentRef("win-primary/abc", loadClusterConfigFromFixture()),
+		);
+	} finally {
+		restore();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// validateRunProvider / validateThinking / readPrompt
+// ---------------------------------------------------------------------------
+
+{
+	const t = "validateRunProvider: canonical form";
+	const out = validateRunProvider("pi-peer/openrouter/vendor/model-name");
+	assert.equal(out.provider, "pi-peer/openrouter/vendor/model-name", t);
+	assert.equal(out.roleProvider, "pi-peer", t);
+	assert.equal(out.model, "openrouter/vendor/model-name", t);
+}
+
+{
+	expectRemoteError("USAGE", () => validateRunProvider("pi-executive/x/y"));
+}
+
+{
+	expectRemoteError("USAGE", () => validateRunProvider("pi-peer"));
+	expectRemoteError("USAGE", () => validateRunProvider("pi-peer/testprov"));
+	expectRemoteError("USAGE", () => validateRunProvider("pi-peer//model"));
+}
+
+{
+	validateThinking("high");
+	expectRemoteError("USAGE", () => validateThinking("turbo"));
+	expectRemoteError("USAGE", () => validateThinking(undefined));
+}
+
+{
+	const t = "readPrompt: --prompt vs --brief";
+	assert.equal(readPrompt({ prompt: "do the thing" }), "do the thing", t);
+	assert.equal(readPrompt({ prompt: "  padded  " }), "padded", t);
+	expectRemoteError("USAGE", () => readPrompt({}));
+	expectRemoteError("USAGE", () => readPrompt({ prompt: "a", brief: "b" }));
+}
+
+// ---------------------------------------------------------------------------
+// buildArgv — exact paseo CLI argv per command (endpoint embedded)
+// ---------------------------------------------------------------------------
+
+const EP = "https://app.paseo.sh/#offer=tok";
+
+{
+	const t = "buildArgv: health";
+	assert.deepEqual(
+		buildArgv("health", {}, EP),
+		["ls", "--host", EP, "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: providers";
+	assert.deepEqual(
+		buildArgv("providers", {}, EP),
+		["provider", "ls", "--host", EP, "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: models";
+	assert.deepEqual(
+		buildArgv("models", { provider: "pi-peer" }, EP),
+		["provider", "models", "pi-peer", "--host", EP, "--json"],
+		t,
+	);
+	expectRemoteError("USAGE", () => buildArgv("models", {}, EP));
+}
+
+{
+	const t = "buildArgv: workspaces";
+	assert.deepEqual(
+		buildArgv("workspaces", {}, EP),
+		["workspace", "ls", "--host", EP, "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: workspace-create";
+	assert.deepEqual(
+		buildArgv(
+			"workspace-create",
+			{
+				path: "/Users/admin/repo",
+				isolation: "local",
+				title: "remote-repository",
+			},
+			EP,
+		),
+		[
+			"workspace",
+			"create",
+			"--host",
+			EP,
+			"--path",
+			"/Users/admin/repo",
+			"--isolation",
+			"local",
+			"--title",
+			"remote-repository",
+			"--json",
+		],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: agents";
+	assert.deepEqual(
+		buildArgv("agents", {}, EP),
+		["ls", "--host", EP, "-g", "--json"],
+		t,
+	);
+	assert.deepEqual(
+		buildArgv("agents", { all: true }, EP),
+		["ls", "-a", "--host", EP, "-g", "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: run defaults to background, prompt last";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "pi-peer/testprov/model-b",
+			thinking: "medium",
+			workspace: "wks-1",
+			title: "t",
+			prompt: "fix it now",
+		},
+		EP,
+	);
+	assert.deepEqual(
+		argv,
+		[
+			"run",
+			"--host",
+			EP,
+			"--provider",
+			"pi-peer/testprov/model-b",
+			"--thinking",
+			"medium",
+			"--workspace",
+			"wks-1",
+			"--title",
+			"t",
+			"-d",
+			"--json",
+			"fix it now",
+		],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: run --wait-timeout replaces -d";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "pi-peer/testprov/model-b",
+			thinking: "medium",
+			workspace: "wks-1",
+			prompt: "x",
+			waitTimeout: "2m",
+		},
+		EP,
+	);
+	assert.ok(argv.includes("--wait-timeout") && argv.includes("2m"), t);
+	assert.ok(!argv.includes("-d"), t);
+}
+
+{
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"run",
+			{ provider: "pi-peer/testprov/model-b", thinking: "medium", prompt: "x" },
+			EP,
+		),
+	);
+}
+
+{
+	expectRemoteError("USAGE", () =>
+		buildArgv("workspace-create", { isolation: "local" }, EP),
+	);
+}
+
+{
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"run",
+			{
+				provider: "pi-peer/testprov/model-b",
+				thinking: "medium",
+				workspace: "wks-1",
+				prompt: "x",
+				waitTimeout: "2m",
+				background: true,
+			},
+			EP,
+		),
+	);
+}
+
+{
+	const t = "buildArgv: status";
+	assert.deepEqual(
+		buildArgv("status", { agentRef: "mac-review/abc-123" }, EP),
+		["inspect", "abc-123", "--host", EP, "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: cancel → paseo stop";
+	assert.deepEqual(
+		buildArgv("cancel", { agentRef: "mac-review/abc-123" }, EP),
+		["stop", "abc-123", "--host", EP, "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: archive → paseo archive";
+	assert.deepEqual(
+		buildArgv("archive", { agentRef: "mac-review/abc-123" }, EP),
+		["archive", "abc-123", "--host", EP, "--json"],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: send defaults to --no-wait";
+	assert.deepEqual(
+		buildArgv(
+			"send",
+			{ agentRef: "mac-review/abc-123", prompt: "follow up" },
+			EP,
+		),
+		[
+			"send",
+			"abc-123",
+			"--host",
+			EP,
+			"--prompt",
+			"follow up",
+			"--no-wait",
+			"--json",
+		],
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: send --wait omits --no-wait; --prompt-file wins";
+	const home = makeHome();
+	const promptFile = join(home, "msg.txt");
+	writeFileSync(promptFile, "follow up text", "utf8");
+	assert.deepEqual(
+		buildArgv(
+			"send",
+			{ agentRef: "mac-review/abc-123", promptFile, wait: true },
+			EP,
+		),
+		["send", "abc-123", "--host", EP, "--prompt-file", promptFile, "--json"],
+		t,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end: wrapper subprocess against the fake CLI
+// ---------------------------------------------------------------------------
+
+{
+	const t = "e2e: models envelope carries hostId and remote data";
+	const r = runWrapper([
+		"models",
+		"--host-id",
+		"mac-review",
+		"--provider",
+		"pi-peer",
+	]);
+	assert.equal(r.code, 0, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.ok, true, t);
+	assert.equal(r.json.hostId, "mac-review", t);
+	assert.equal(r.json.endpointEnv, "PASEO_TEST_ENDPOINT", t);
+	assert.equal(r.json.endpointSet, true, t);
+	assert.deepEqual(
+		r.json.data,
+		{
+			argv: [
+				"provider",
+				"models",
+				"pi-peer",
+				"--host",
+				"<host-redacted>",
+				"--json",
+			],
+		},
+		t,
+	);
+}
+
+{
+	const t = "e2e: endpoint value never appears in wrapper output";
+	const r = runWrapper([
+		"models",
+		"--host-id",
+		"mac-review",
+		"--provider",
+		"pi-peer",
+	]);
+	assert.ok(!r.stdout.includes(ENDPOINT), `${t}: stdout leaked endpoint`);
+	assert.ok(!r.stderr.includes(ENDPOINT), `${t}: stderr leaked endpoint`);
+}
+
+{
+	const t = "e2e: run returns agentRef composite";
+	const r = runWrapper([
+		"run",
+		"--host-id",
+		"mac-review",
+		"--provider",
+		"pi-peer/testprov/model-b",
+		"--thinking",
+		"medium",
+		"--workspace",
+		"wks-1",
+		"--title",
+		"remote-job",
+		"--prompt",
+		"implement the feature",
+	]);
+	assert.equal(r.code, 0, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.ok, true, t);
+	assert.equal(
+		r.json.agentRef,
+		"mac-review/9f8e7d6c-0000-0000-0000-000000000000",
+		t,
+	);
+	const data = r.json.data;
+	assert.equal(data.agentId, "9f8e7d6c-0000-0000-0000-000000000000", t);
+	assert.equal(data.status, "running", t);
+}
+
+{
+	const t = "e2e: cancel/archive resolve host from agent-ref";
+	for (const cmd of ["cancel", "archive"]) {
+		const r = runWrapper([
+			cmd,
+			"--agent-ref",
+			"mac-review/9f8e7d6c-0000-0000-0000-000000000000",
+		]);
+		assert.equal(r.code, 0, `${t}:${cmd} (stderr: ${r.stderr})`);
+		assert.equal(r.json.ok, true, `${t}:${cmd}`);
+		assert.equal(r.json.hostId, "mac-review", `${t}:${cmd}`);
+	}
+}
+
+{
+	const t = "e2e: status via agent-ref resolves host from ref";
+	const r = runWrapper([
+		"status",
+		"--agent-ref",
+		"mac-review/9f8e7d6c-0000-0000-0000-000000000000",
+	]);
+	assert.equal(r.code, 0, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.ok, true, t);
+	assert.equal(r.json.hostId, "mac-review", t);
+	assert.equal(r.json.data.Model, "testprov/model-a", t);
+}
+
+{
+	const t = "e2e: missing endpoint env → exit 1, code ENDPOINT_ENV_MISSING";
+	const r = runWrapper(["health", "--host-id", "mac-review"], {
+		omitEndpoint: true,
+	});
+	assert.equal(r.code, 1, t);
+	assert.equal(r.json.ok, false, t);
+	assert.equal(r.json.code, "ENDPOINT_ENV_MISSING", t);
+	assert.ok(r.json.message.includes("PASEO_TEST_ENDPOINT"), t);
+}
+
+{
+	const t = "e2e: local host via wrapper → exit 1, LOCAL_HOST_UNSUPPORTED";
+	const r = runWrapper(["health", "--host-id", "win-primary"]);
+	assert.equal(r.code, 1, t);
+	assert.equal(r.json.code, "LOCAL_HOST_UNSUPPORTED", t);
+	assert.ok(r.json.message.toLowerCase().includes("mcp"), t);
+}
+
+{
+	const t = "e2e: unknown host → exit 1, HOST_NOT_FOUND";
+	const r = runWrapper(["health", "--host-id", "ghost"]);
+	assert.equal(r.code, 1, t);
+	assert.equal(r.json.code, "HOST_NOT_FOUND", t);
+}
+
+{
+	const t =
+		"e2e: CLI failure → exit 2, CLI_ERROR, endpoint redacted in error output";
+	// Drive the fake into its failure path: a brief file whose content is
+	// "--fail" lands as the paseo run positional argv, and the fake prints
+	// the endpoint value into ITS OWN stderr (simulating a leaky CLI). The
+	// wrapper must surface CLI_ERROR with the endpoint redacted.
+	const home = makeHome();
+	const brief = join(home, "fail-brief.txt");
+	writeFileSync(brief, "--fail\n", "utf8");
+	const r = runWrapper(
+		[
+			"run",
+			"--host-id",
+			"mac-review",
+			"--provider",
+			"pi-peer/testprov/model-b",
+			"--thinking",
+			"medium",
+			"--workspace",
+			"wks-1",
+			"--brief",
+			brief,
+		],
+		{ home },
+	);
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.ok, false, t);
+	assert.equal(r.json.code, "CLI_ERROR", t);
+	assert.ok(!r.stdout.includes(ENDPOINT), `${t}: endpoint leaked in error`);
+	assert.ok(r.stdout.includes("<endpoint-value-redacted>"), t);
+}
+
+{
+	const t = "e2e: dry-run redacts endpoint and never executes";
+	const r = runWrapper(["providers", "--host-id", "mac-review", "--dry-run"]);
+	assert.equal(r.code, 0, t);
+	assert.equal(r.json.dryRun, true, t);
+	assert.equal(r.json.ok, true, t);
+	assert.ok(!r.stdout.includes(ENDPOINT), t);
+	assert.deepEqual(
+		r.json.argv,
+		["provider", "ls", "--host", "<redacted:PASEO_TEST_ENDPOINT>", "--json"],
+		t,
+	);
+}
+
+{
+	const t = "e2e: invalid provider shape → exit 1 USAGE";
+	const r = runWrapper([
+		"run",
+		"--host-id",
+		"mac-review",
+		"--provider",
+		"pi-peer",
+		"--thinking",
+		"low",
+		"--prompt",
+		"x",
+	]);
+	assert.equal(r.code, 1, t);
+	assert.equal(r.json.code, "USAGE", t);
+}
+
+{
+	const t = "parseDurationMs: paseo duration strings";
+	assert.equal(parseDurationMs("500ms"), 500, t);
+	assert.equal(parseDurationMs("30s"), 30000, t);
+	assert.equal(parseDurationMs("2m"), 120000, t);
+	assert.equal(parseDurationMs("1h"), 3600000, t);
+	assert.equal(parseDurationMs("90"), 90000, t);
+	assert.equal(parseDurationMs("nonsense"), null, t);
+}
+
+{
+	const t = "e2e: help exits 0";
+	const r = runWrapper(["--help"]);
+	assert.equal(r.code, 0, t);
+	assert.ok(r.stdout.includes("remote-paseo.mjs"), t);
+}
+
+{
+	const t = "REMOTE_ERROR_CODES exports the documented set";
+	for (const code of [
+		"USAGE",
+		"CLUSTER_CONFIG_INVALID",
+		"HOST_NOT_FOUND",
+		"LOCAL_HOST_UNSUPPORTED",
+		"ENDPOINT_ENV_MISSING",
+		"ENDPOINT_UNSAFE",
+		"CLI_ERROR",
+		"PROMPT_TOO_LONG",
+	]) {
+		assert.ok(REMOTE_ERROR_CODES.includes(code), `${t}: missing ${code}`);
+	}
+}
+
+// ---------------------------------------------------------------------------
+
+console.log("remote-paseo.test.mjs: all tests passed");

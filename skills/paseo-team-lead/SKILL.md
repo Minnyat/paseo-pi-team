@@ -48,6 +48,11 @@ Paseo tools are not separate tools in the prompt — they are reached through th
    to discover the exact tool name.
 3. `mcp` with `{ "tool": "<name>", "args": { ... } }` to invoke.
 
+The MCP server injected into THIS agent always talks to the **local daemon**
+only — there is no `--host` on any MCP tool (`--host` is a Paseo CLI option,
+not an MCP argument). Remote daemons are driven through the Paseo CLI via
+`scripts/remote-paseo.mjs` (see REMOTE_CREATE_CYCLE below).
+
 ## Implementation — model routing cycle (mandatory)
 
 For EVERY `create_agent`, run this exact cycle. Do not skip steps.
@@ -61,40 +66,111 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    run the resolver when the role pack repo is available:
    `node scripts/model-routing.mjs resolve --class <CLASS>` for the local
    `model-routing.local.json` (legacy single-host form).
-4. Verify the target daemon is reachable (local: `paseo status`; remote: the
-   endpoint env var named by `connection.endpointEnv` must be SET before
-   routing — never print or invent its value).
-5. Call `list_providers` (mcp) ON THE TARGET DAEMON (remote daemons via the
-   `--host` mechanism; verify the answer comes from the intended daemon).
-6. Verify the route's role provider exists and is enabled AND reports a
+4. Verify the target daemon is reachable before routing:
+   - local: `paseo status` (daemon up);
+   - remote: the endpoint env var named by `connection.endpointEnv` must be
+     SET (never print or invent its value) AND
+     `node scripts/remote-paseo.mjs health --host-id <id>` must return
+     `ok: true` → else `BLOCKED: HOST_ROUTE_UNAVAILABLE` (no silent fallback
+     to another host; switching hosts is a recorded routing decision).
+
+### The hard rule — local MCP vs remote CLI
+
+The injected MCP server is LOCAL-ONLY. `--host` is a Paseo CLI option, not an
+MCP argument. Therefore the target host decides the mechanism:
+
+```text
+IF connection.type == local:
+    use MCP operations (through the mcp proxy)
+
+IF connection.type == remote:
+    do NOT use MCP operations for that host
+    use scripts/remote-paseo.mjs (Paseo CLI with --host under the hood)
+```
+
+Resolving a remote host and then calling `list_providers`/`create_agent`/…
+via MCP is a routing ERROR: the call lands on the LOCAL daemon, so you get
+local inventory and a local agent while believing you are on the remote host.
+This is the exact failure mode the cluster config exists to prevent.
+
+### LOCAL_CREATE_CYCLE — target is `connection.type: local` (MCP)
+
+1. Call `list_providers` (mcp) on the local daemon; verify the answer comes
+   from the intended daemon.
+2. Verify the route's role provider exists, is enabled AND reports a
    healthy status (an enabled provider with a bad status is NOT routable) →
    else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
-7. Call `list_models` for that role provider.
-8. Verify the exact model ID exists (check BOTH segments are non-empty in
+3. Call `list_models` for that role provider.
+4. Verify the exact model ID exists (check BOTH segments are non-empty in
    `<pi-provider>/<model-id>`) → else `BLOCKED: MODEL_UNAVAILABLE`.
-9. Verify the configured thinking level is in the model's thinking options →
+5. Verify the configured thinking level is in the model's thinking options →
    else `BLOCKED: THINKING_OPTION_UNAVAILABLE`. If the model exposes NO
    option list, thinking is UNVERIFIABLE — refuse the route
    (strict policy: unverifiable is not a pass).
-10. Verify against `~/.pi/agent/models.json` `thinkingLevelMap` on the target
-    host: a level mapped to `null` is silently clamped by pi → pick another
-    level/model instead of accepting the clamp.
-11. Compute the exact create_agent provider string:
-    `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
-    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
-    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
-12. Create the workspace when needed (worktree isolation for writers).
-13. Call `create_agent` with the exact provider string + thinking. NEVER omit
-    the model to inherit a daemon default.
-14. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
+6. Verify against `~/.pi/agent/models.json` `thinkingLevelMap` on the target
+   host: a level mapped to `null` is silently clamped by pi → pick another
+   level/model instead of accepting the clamp.
+7. Compute the exact create_agent provider string:
+   `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
+   slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
+   Thinking goes in `settings.thinkingOptionId` — never inside the model string.
+8. Create the workspace when needed (worktree isolation for writers).
+9. Call `create_agent` with the exact provider string + thinking. NEVER omit
+   the model to inherit a daemon default.
+10. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
     `runtimeInfo.thinkingOptionId`; compare against requested values →
     mismatch (or missing runtimeInfo) → `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
     archive the wrongly-resolved agent.
-15. Only then deliver/continue the initial task.
+11. Only then deliver/continue the initial task.
+
+### REMOTE_CREATE_CYCLE — target is `connection.type: remote` (remote-paseo.mjs)
+
+Every operation goes through `node scripts/remote-paseo.mjs` (it drives the
+Paseo CLI with `--host` and returns one JSON envelope per call). Never
+hand-build `paseo ... --host` shell commands — the wrapper validates
+provider/model/thinking, keeps the endpoint value out of every message, and
+returns host-tagged JSON so a remote answer can never be confused with a
+local one. In the commands below, `<id>` is the HOST_ID from
+`cluster-routing.local.json`.
+
+1. Reachability is already proven (step 4 of the shared cycle).
+2. List the REMOTE daemon's role providers:
+   `node scripts/remote-paseo.mjs providers --host-id <id>`
+3. Verify the route's role provider exists, is enabled AND healthy **on the
+   remote daemon** → else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
+4. List the REMOTE model inventory (the inventory is per-daemon — cache per
+   hostId, never by provider name):
+   `node scripts/remote-paseo.mjs models --host-id <id> --provider <role-provider>`
+   ⚠️ `list_models` via MCP would return the LOCAL inventory — only the
+   wrapper's answer counts for a remote host.
+5. Verify the exact model ID + thinking level against the REMOTE list (same
+   `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules;
+   unverifiable is not a pass).
+6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
+   ID has no meaning on the Mac:
+   `node scripts/remote-paseo.mjs workspaces --host-id <id>`
+   `node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
+7. Create the agent on the remote daemon (background by default; add
+   `--wait-timeout <dur>` to wait for completion):
+   `node scripts/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
+   The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
+8. Verify the OBSERVED runtime identity on the remote daemon:
+   `node scripts/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>`
+   Compare `data.Model` / `data.Thinking` against the requested values →
+   mismatch or missing → `BLOCKED: MODEL_RESOLUTION_MISMATCH`; archive the
+   wrongly-resolved agent on that host
+   (`node scripts/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>`).
+9. Follow-ups / corrections:
+   `node scripts/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>`
+   (or `--prompt-file <file>` for long briefs). send is fire-and-forget by
+   default; `status` confirms completion. To interrupt a stuck agent:
+   `node scripts/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>`.
+10. Only then deliver/continue the initial task.
 
 Never: omit the model field, silently change models, fall back to another
 model or host without recording a routing decision, launch first and "hope",
-or trust a model name written in a prompt instead of runtime config.
+trust a model name written in a prompt instead of runtime config, or call MCP
+for a remote host.
 
 Model classes (decided by task risk + disposition, not by role name):
 
@@ -115,6 +191,7 @@ TASK_ID:
 DISPOSITION:
 MODEL_CLASS:
 HOST_ID:
+MECHANISM: mcp | remote-cli        # local → mcp; remote → remote-paseo.mjs
 PASEO_PROVIDER:
 REQUESTED_MODEL:
 REQUESTED_THINKING:
@@ -123,7 +200,7 @@ OBSERVED_MODEL:
 OBSERVED_THINKING:
 WORKSPACE_REF: <host-id>/<workspace-id>
 AGENT_REF: <host-id>/<agent-id>
-ROUTING_EVIDENCE: <list_models match line + get_agent_status runtimeInfo>
+ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime identity>
 ```
 
 ## Monitoring

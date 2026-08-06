@@ -39,10 +39,12 @@ paseo-pi-team/
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installer
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
+│   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host qua HOST_ID (Lead REMOTE cycle)
 │   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
 ├── test/
 │   ├── policy.test.mts             # policy + lifecycle regression
-│   └── model-routing.test.mjs      # resolver regression
+│   ├── model-routing.test.mjs      # resolver regression
+│   └── remote-paseo.test.mjs       # remote executor regression (+ fixtures/fake-paseo.mjs)
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # thiết kế gốc
     ├── model-routing.md            # 4 lớp model routing, verified commands
@@ -139,6 +141,13 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
    chiếu `get_agent_status` runtimeInfo — lệch thì
    `BLOCKED: MODEL_RESOLUTION_MISMATCH`, không fallback. Lead (không phải Peer)
    sở hữu observed routing evidence.
+5. **Host remote**: MCP inject vào agent luôn trỏ daemon LOCAL — `--host` là
+   option CLI, không phải argument MCP. Lead dùng
+   `scripts/remote-paseo.mjs` (đọc cluster file theo HOST_ID, chạy Paseo CLI
+   `--host`, không in endpoint, trả JSON envelope có hostId) cho mọi thao tác
+   remote: `health/providers/models/workspaces/workspace-create/run/status/
+   send/cancel/archive` — xem `docs/multi-host.md` và Lead skill
+   (LOCAL_CREATE_CYCLE vs REMOTE_CREATE_CYCLE).
 
 ### Compatibility matrix (đã verify 2026-08-04)
 
@@ -231,6 +240,7 @@ stripping bật sẵn):
 ```bash
 node test/policy.test.mts          # policy + per-turn lifecycle regression
 node test/model-routing.test.mjs   # routing resolver regression
+node test/remote-paseo.test.mjs    # remote executor regression (fake CLI)
 ```
 
 Smoke-test load extension không cần LLM (in mode):

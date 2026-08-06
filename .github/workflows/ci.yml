@@ -41,10 +41,14 @@ jobs:
         run: node test/policy.test.mts
       - name: model-routing tests
         run: node test/model-routing.test.mjs
+      - name: remote-paseo tests (fake CLI)
+        run: node test/remote-paseo.test.mjs
       - name: preflight + resolver syntax check
         run: |
           node --check scripts/preflight.mjs
           node --check scripts/model-routing.mjs
+          node --check scripts/remote-paseo.mjs
+          node --check test/fixtures/fake-paseo.mjs
 
   # Live remote Paseo checks stay manual (they need two real hosts); this CI
   # only gates the pure tests. Typecheck needs the pi-coding-agent package
