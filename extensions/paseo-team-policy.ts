@@ -100,18 +100,36 @@ const PI_WRITE = ["read", "write", "edit", "bash"];
 /** pi-mcp-adapter proxy tools — Paseo tools are reached through the `mcp` tool. */
 const MCP_TOOLS = ["mcp", "mcp_script"];
 
-/**
- * Paseo tools the supervisor may call through the MCP proxy. Fail-closed:
- * anything else in the catalog (terminals, workspace scripts, schedules,
- * discovery, orchestration, permissions, ...) is blocked. send_agent_prompt
- * is allowed so the supervisor can deliver observations to the Lead.
- */
-const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
+/** Monitoring-only Paseo tools — the supervisor's default surface. */
+const SUPERVISOR_MONITORING_TARGETS: string[] = [
 	"list_agents",
 	"get_agent_status",
 	"get_agent_activity",
 	"send_agent_prompt",
 ];
+
+/**
+ * Paseo tools the supervisor may call through the MCP proxy. Fail-closed:
+ * anything else in the catalog (terminals, workspace scripts, schedules,
+ * discovery, orchestration, permissions, ...) is blocked. send_agent_prompt
+ * is allowed so the supervisor can deliver observations to the Lead.
+ * create_agent is the SINGLE orchestration exception — a gated lead-recovery
+ * action whose arguments are validated by supervisorCreateAgentBlockReason.
+ * Raw orchestration (peers, workspaces, discovery, arbitrary model choice)
+ * stays blocked.
+ */
+const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
+	...SUPERVISOR_MONITORING_TARGETS,
+	"create_agent",
+];
+
+/**
+ * Stricter set for the mcp_script backstop scan: create_agent is excluded
+ * because a script's arguments cannot be statically verified (the arg guard
+ * only runs on direct `mcp` proxy calls). Supervisor mcp_script is already
+ * hard-denied at the policy level — this is defense in depth only.
+ */
+const SUPERVISOR_MCP_SCRIPT_TARGETS: string[] = SUPERVISOR_MONITORING_TARGETS;
 
 /**
  * Match a possibly-prefixed proxy tool name against known Paseo tool names.
@@ -306,6 +324,71 @@ export function mcpAllowedTargets(role: TeamRole): string[] {
 	}
 }
 
+/** Extract create_agent args from an mcp proxy input ({ tool, args }). */
+function extractCreateAgentArgs(input: unknown): unknown {
+	if (typeof input !== "object" || input === null) return null;
+	const args = (input as Record<string, unknown>).args;
+	if (typeof args === "string") {
+		try {
+			return JSON.parse(args);
+		} catch {
+			return null;
+		}
+	}
+	return args ?? null;
+}
+
+const SUPERVISOR_RECOVERY_PURPOSES = new Set(["recovery", "bootstrap"]);
+
+/**
+ * Argument-level gate for supervisor create_agent through the MCP proxy.
+ * The supervisor may create exactly ONE kind of agent: a successor Lead
+ * (`pi-lead/<pi-provider>/<model-id>`), flagged recovery/bootstrap with a
+ * project id and an explicit thinking level. Anything else — peers, other
+ * providers, missing labels, missing thinking, malformed args — is blocked
+ * fail-closed. The labels land on the created agent, so `paseo agent ls`
+ * shows exactly why it exists (audit trail).
+ */
+export function supervisorCreateAgentBlockReason(
+	input: unknown,
+): string | null {
+	const args = extractCreateAgentArgs(input);
+	if (typeof args !== "object" || args === null) {
+		return "Supervisor create_agent requires an args object (provider, labels, settings). Refusing fail-closed.";
+	}
+	const rec = args as Record<string, unknown>;
+	const provider = typeof rec.provider === "string" ? rec.provider : "";
+	// pi-lead/<pi-provider>/<model-id>; model ids may contain slashes
+	// (Paseo splits at the first slash only), so just require both segments.
+	if (!/^pi-lead\/[^/]+\/[^/]+/.test(provider)) {
+		return `Supervisor create_agent is lead-recovery only: provider must be "pi-lead/<pi-provider>/<model-id>" (got "${provider || "<missing>"}"). Peers and other providers are created by the Lead, never by the Supervisor.`;
+	}
+	const labels = rec.labels;
+	if (typeof labels !== "object" || labels === null) {
+		return "Supervisor create_agent requires labels to prove this is a gated recovery action.";
+	}
+	const labelMap = labels as Record<string, unknown>;
+	const purpose = labelMap.purpose;
+	if (
+		typeof purpose !== "string" ||
+		!SUPERVISOR_RECOVERY_PURPOSES.has(purpose)
+	) {
+		return `Supervisor create_agent labels.purpose must be "recovery" or "bootstrap" (got "${typeof purpose === "string" ? purpose : "<missing>"}").`;
+	}
+	const recoveryFor = labelMap.recovery_for;
+	if (typeof recoveryFor !== "string" || recoveryFor.trim().length === 0) {
+		return "Supervisor create_agent labels.recovery_for (project id) is required.";
+	}
+	const thinking =
+		typeof rec.settings === "object" && rec.settings !== null
+			? (rec.settings as Record<string, unknown>).thinkingOptionId
+			: undefined;
+	if (typeof thinking !== "string" || thinking.trim().length === 0) {
+		return "Supervisor create_agent requires settings.thinkingOptionId (no daemon-default model — route from the approved Lead route).";
+	}
+	return null;
+}
+
 /**
  * Decide whether an `mcp` proxy call is allowed for a role.
  * Returns a block reason, or null when allowed.
@@ -322,9 +405,13 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 	const target = classification.target ?? "";
 	if (!matchesPaseoToolName(target, mcpAllowedTargets(role))) {
 		if (role === "supervisor") {
-			return `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt). "${target}" is blocked — send an observation to the Lead instead.`;
+			return `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`;
 		}
 		return `"${target}" is not in the ${role} MCP allowlist (discovery, workspace, monitoring, orchestration, permissions).`;
+	}
+	if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
+		const argBlock = supervisorCreateAgentBlockReason(input);
+		if (argBlock) return argBlock;
 	}
 	return null;
 }
@@ -357,7 +444,13 @@ export function mcpScriptBlockReason(
 	role: TeamRole,
 	code: string,
 ): string | null {
-	const allowed = mcpAllowedTargets(role);
+	// Supervisor: mcp_script can't be argument-guarded, so its scan keeps the
+	// stricter monitoring-only set (create_agent excluded). mcp_script is
+	// already hard-denied for the supervisor at the policy level anyway.
+	const allowed =
+		role === "supervisor"
+			? SUPERVISOR_MCP_SCRIPT_TARGETS
+			: mcpAllowedTargets(role);
 	for (const _match of code.matchAll(MCP_SCRIPT_DYNAMIC_CALL_RE)) {
 		return `mcp_script invokes an MCP tool through a non-literal target (variable, expression or computed key) — the ${role} allowlist cannot verify it, so the call is blocked fail-closed. Use a literal tool name: tools.call("<allowed_tool>", ...) or tools.<allowed_tool>().`;
 	}

@@ -511,12 +511,12 @@ assert.equal(isSupervisorAllowedMcpTarget("list_agents"), true);
 assert.equal(isSupervisorAllowedMcpTarget("paseo_list_agents"), true);
 assert.equal(isSupervisorAllowedMcpTarget("get_agent_status"), true);
 assert.equal(isSupervisorAllowedMcpTarget("send_agent_prompt"), true);
-assert.equal(isSupervisorAllowedMcpTarget("create_agent"), false);
 assert.equal(
-	isSupervisorAllowedMcpTarget("paseo_create_agent"),
-	false,
-	"prefixed form",
+	isSupervisorAllowedMcpTarget("create_agent"),
+	true,
+	"create_agent is the single orchestration exception at target level; args are gated by supervisorCreateAgentBlockReason",
 );
+assert.equal(isSupervisorAllowedMcpTarget("paseo_create_agent"), true);
 assert.equal(
 	isSupervisorAllowedMcpTarget("create_terminal"),
 	false,
@@ -553,9 +553,104 @@ assert.match(
 	mcpBlockReason("supervisor", { tool: "create_terminal" }) ?? "",
 	/monitoring tools/,
 );
+// Supervisor create_agent: the TARGET is allowed, but the ARGS are the gate
+// (fail-closed). Only a gated lead-recovery create passes.
+const recoveryCreateArgs = {
+	provider: "pi-lead/Minnyat/gpt-5.6-sol",
+	labels: { purpose: "recovery", recovery_for: "content-analysis" },
+	settings: { thinkingOptionId: "high" },
+};
+assert.equal(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: recoveryCreateArgs,
+	}),
+	null,
+	"gated recovery create_agent passes",
+);
+assert.equal(
+	mcpBlockReason("supervisor", {
+		tool: "paseo_create_agent",
+		args: {
+			...recoveryCreateArgs,
+			labels: { purpose: "bootstrap", recovery_for: "pod-product" },
+		},
+	}),
+	null,
+	"prefixed form + bootstrap purpose passes",
+);
+assert.equal(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: JSON.stringify(recoveryCreateArgs),
+	}),
+	null,
+	"string args are parsed like object args",
+);
+// Every deviation is blocked fail-closed.
 assert.match(
-	mcpBlockReason("supervisor", { tool: "paseo_create_agent" }) ?? "",
-	/blocked/,
+	mcpBlockReason("supervisor", { tool: "create_agent" }) ?? "",
+	/args object/,
+	"missing args → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: { ...recoveryCreateArgs, provider: "pi-peer/Minnyat/gpt-5.4" },
+	}) ?? "",
+	/pi-lead/,
+	"peer provider → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: { ...recoveryCreateArgs, provider: "pi-lead" },
+	}) ?? "",
+	/pi-lead/,
+	"role provider without model → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: { ...recoveryCreateArgs, labels: undefined },
+	}) ?? "",
+	/labels/,
+	"missing labels → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: {
+			...recoveryCreateArgs,
+			labels: { purpose: "engineer", recovery_for: "x" },
+		},
+	}) ?? "",
+	/purpose/,
+	"non-recovery purpose → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: { ...recoveryCreateArgs, labels: { purpose: "recovery" } },
+	}) ?? "",
+	/recovery_for/,
+	"missing project id → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: { ...recoveryCreateArgs, settings: {} },
+	}) ?? "",
+	/thinkingOptionId/,
+	"missing thinking → block",
+);
+assert.match(
+	mcpBlockReason("supervisor", {
+		tool: "create_agent",
+		args: JSON.stringify("{not json"),
+	}) ?? "",
+	/args object/,
+	"unparseable string args → block",
 );
 // Fail-closed on unclassifiable input.
 assert.ok(
