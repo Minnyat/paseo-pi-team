@@ -53,7 +53,7 @@ paseo-pi-team/
 
 | Profile | `PASEO_PI_ROLE` | Tool policy (mặc định, chỉnh sau khi chạy `/team-tools`) |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read` + `mcp` (chỉ gọi monitoring qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt`). Không `write`/`edit`, không tạo agent/workspace. |
+| `pi-supervisor` | `supervisor` | `read` + `mcp` (qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt` + `create_agent` **recovery-only** — argument-guarded: `pi-lead/...` provider + `labels.purpose ∈ {recovery,bootstrap}` + `labels.recovery_for` + `settings.thinkingOptionId`; mọi shape khác bị chặn fail-closed). Không `write`/`edit`, không workspace, không peer, không discovery. |
 | `pi-lead` | `lead` | Mặc định tối thiểu: Pi `read`/`bash` + `mcp`/`mcp_script` + Paseo `discovery`/`workspace`/`monitoring`/`orchestration`/`permissions` (qua proxy, target guard fail-closed). `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1` (ghi trong WORKSPACE_PROTOCOL của repo nếu Lead được tự implement tiny task). |
 | `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Không bao giờ có `mcp` hoặc Paseo orchestration tools. |
 
