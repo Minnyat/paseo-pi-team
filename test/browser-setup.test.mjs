@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
 	AGENT_BROWSER_MCP_SERVER,
 	browserMcpConfig,
+	isValidAgentBrowserMcpServer,
 	mergeAgentBrowserMcpConfig,
 	mcpConfigCandidates,
 	skillIsInstalled,
@@ -17,7 +18,7 @@ import {
 		mcpServers: {
 			github: { command: "gh-mcp", args: ["serve"] },
 			[AGENT_BROWSER_MCP_SERVER]: {
-				command: "custom-agent-browser",
+				command: "agent-browser",
 				args: ["mcp", "--tools", "core"],
 				disabled: true,
 			},
@@ -27,8 +28,16 @@ import {
 	assert.deepEqual(
 		merged,
 		existing,
-		"existing agent-browser config is never overwritten",
+		"valid existing agent-browser config is never overwritten",
 	);
+}
+
+{
+	const merged = mergeAgentBrowserMcpConfig({
+		mcpServers: { [AGENT_BROWSER_MCP_SERVER]: "enabled", github: { command: "gh" } },
+	});
+	assert.deepEqual(merged.mcpServers[AGENT_BROWSER_MCP_SERVER], browserMcpConfig());
+	assert.deepEqual(merged.mcpServers.github, { command: "gh" });
 }
 
 {
@@ -46,6 +55,10 @@ assert.equal(
 	mergeAgentBrowserMcpConfig({}).mcpServers[AGENT_BROWSER_MCP_SERVER].args[0],
 	"mcp",
 );
+assert.equal(isValidAgentBrowserMcpServer(browserMcpConfig()), true);
+assert.equal(isValidAgentBrowserMcpServer("enabled"), false);
+assert.equal(isValidAgentBrowserMcpServer({ command: "agent-browser", args: ["open"] }), false);
+assert.equal(isValidAgentBrowserMcpServer({ command: "agent-browser", args: ["mcp"] }), true);
 assert.ok(
 	mcpConfigCandidates("C:/pi").some((path) =>
 		/agent[\\/]mcp\.json$/.test(path),

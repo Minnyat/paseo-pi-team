@@ -32,13 +32,17 @@ export function computeRetryDelayMs(attempt, options = {}) {
 
 export async function retryWithBackoff(operation, options = {}) {
   const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 3));
+  const deadlineMs = options.deadlineMs ?? Infinity;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (Date.now() >= deadlineMs) {
+      throw Object.assign(new Error("retry deadline exceeded"), { code: "TIMEOUT" });
+    }
     try {
       return await operation(attempt);
     } catch (error) {
       const finalAttempt = attempt + 1 >= maxAttempts;
       if (finalAttempt || classifyRemoteFailure(error) !== "retryable") throw error;
-      const delay = computeRetryDelayMs(attempt, options);
+      const delay = Math.min(computeRetryDelayMs(attempt, options), Math.max(0, deadlineMs - Date.now()));
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

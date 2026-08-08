@@ -30,6 +30,20 @@ export function browserMcpConfig() {
 	};
 }
 
+export function isValidAgentBrowserMcpServer(server) {
+	return Boolean(
+		server &&
+		typeof server === "object" &&
+		!Array.isArray(server) &&
+		typeof server.command === "string" &&
+		server.command.trim() === "agent-browser" &&
+		Array.isArray(server.args) &&
+		server.args[0] === "mcp" &&
+		server.args.every((arg) => typeof arg === "string") &&
+		(server.disabled === undefined || typeof server.disabled === "boolean"),
+	);
+}
+
 /** Add agent-browser only when the user has not configured that server yet. */
 export function mergeAgentBrowserMcpConfig(config) {
 	const source =
@@ -42,7 +56,8 @@ export function mergeAgentBrowserMcpConfig(config) {
 		!Array.isArray(source.mcpServers)
 			? source.mcpServers
 			: {};
-	if (Object.hasOwn(servers, AGENT_BROWSER_MCP_SERVER)) return source;
+	const existing = servers[AGENT_BROWSER_MCP_SERVER];
+	if (existing !== undefined && isValidAgentBrowserMcpServer(existing)) return source;
 	return {
 		...source,
 		mcpServers: {
@@ -171,8 +186,8 @@ export function inspectAgentBrowser({ piHome, configPath, skillPath } = {}) {
 			return { path, config: null };
 		}
 	});
-	const configWithServer = configs.find(
-		(entry) => entry.config?.mcpServers?.[AGENT_BROWSER_MCP_SERVER],
+	const configWithServer = configs.find((entry) =>
+		isValidAgentBrowserMcpServer(entry.config?.mcpServers?.[AGENT_BROWSER_MCP_SERVER]),
 	);
 	const invalidConfig = configs.find(
 		(entry) => entry.config === null && existsSync(entry.path),
@@ -186,8 +201,8 @@ export function inspectAgentBrowser({ piHome, configPath, skillPath } = {}) {
 		cli: version.ok,
 		cliVersion: commandOutputPath(version.stdout),
 		browserRuntime: runtime.ok,
-		browserMcp: Boolean(server),
-		browserMcpEnabled: Boolean(server && server.disabled !== true),
+		browserMcp: isValidAgentBrowserMcpServer(server),
+		browserMcpEnabled: isValidAgentBrowserMcpServer(server) && server.disabled !== true,
 		skill: skillIsInstalled(join(resolvedSkill, "SKILL.md")),
 		skillPath: resolvedSkill,
 		configPath: configWithServer?.path ?? resolvedConfig,
@@ -266,7 +281,7 @@ export function installAgentBrowser({
 
 	const existingConfig = mcpConfigCandidates(piHome).some((path) => {
 		try {
-			return Boolean(readJson(path).mcpServers?.[AGENT_BROWSER_MCP_SERVER]);
+			return isValidAgentBrowserMcpServer(readJson(path).mcpServers?.[AGENT_BROWSER_MCP_SERVER]);
 		} catch {
 			return false;
 		}

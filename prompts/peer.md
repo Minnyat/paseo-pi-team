@@ -89,7 +89,7 @@ kind: question | blocked | dependency | progress
 message: evidence + câu hỏi/đề xuất cụ thể
 ```
 
-Tool tự lấy `PASEO_AGENT_ID`, inspect parent label `paseo.parent-agent-id`, gửi tới đúng parent Lead và retry tối đa 3 lần chỉ cho lỗi transport tạm thời. Nếu không resolve được parent hoặc retry hết, báo `BLOCKED`/`DEPENDENCY_REQUEST`; không dùng `paseo send` từ bash để bypass policy.
+Tool tự lấy `PASEO_AGENT_ID`, inspect parent label `paseo.parent-agent-id`, gửi tới đúng parent Lead. Inspect có retry giới hạn cho lỗi transport; thao tác `send` không retry vì Paseo chưa cung cấp idempotency/ACK contract. Nếu không resolve được parent hoặc send thất bại, báo `BLOCKED`/`DEPENDENCY_REQUEST`; không dùng `paseo send` từ bash để bypass policy.
 
 ## Escalations
 
@@ -107,7 +107,7 @@ SCOPE_CONFLICT
 `REOPEN_REQUEST` phải mô tả premise sai, evidence và phương án thay thế.
 
 `BROWSER_MCP_AUTHORITY: allowed` không cấp quyền ghi file, git, Paseo hoặc
-MCP server khác; nó chỉ mở agent-browser MCP/CLI trong current turn.
+MCP server khác; nó chỉ mở agent-browser MCP trong current turn; agent-browser CLI qua bash luôn bị chặn.
 
 `AUTHORITY_MISMATCH` — ví dụ: brief yêu cầu `CANDIDATE_SHA` nhưng không cấp
 `COMMIT_AUTHORITY: allowed`; hoặc brief cấp `MODE: write` nhưng

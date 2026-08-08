@@ -303,7 +303,10 @@ assert.equal(
 	callsAgentBrowserCli("npx -y agent-browser open https://example.com"),
 	true,
 );
-assert.equal(callsAgentBrowserCli("echo agent-browser open"), false);
+assert.equal(callsAgentBrowserCli("npm exec -- agent-browser cookies"), true);
+assert.equal(callsAgentBrowserCli("pnpm exec agent-browser state"), true);
+assert.equal(callsAgentBrowserCli("./node_modules/.bin/agent-browser debug"), true);
+assert.equal(callsAgentBrowserCli("echo agent-browser open"), true);
 assert.equal(callsAgentBrowserCli("npm test"), false);
 assert.equal(browserMcpAllowed(parseTaskBrief(v3WriteBrief)), true);
 assert.equal(
@@ -1203,14 +1206,14 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 			?.reason ?? "",
 		/agent-browser/,
 	);
-	assert.equal(
+	assert.match(
 		(
 			await toolCall({
 				toolName: "bash",
 				input: { command: "agent-browser open https://example.com" },
 			})
-		)?.block,
-		undefined,
+		)?.reason ?? "",
+		/Peer cannot run agent-browser CLI through bash/,
 	);
 
 	// Correction via real Paseo send without a full brief revokes browser access.

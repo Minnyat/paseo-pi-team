@@ -55,7 +55,7 @@ Engineer Peer.
    `templates/TASK_BRIEF_V3.md`). Legacy V1/V2 header bị extension xử
    read-only; body sau end marker không bao giờ cấp được quyền.
    Mọi follow-up `send_agent_prompt` cần authority phải lặp lại full brief.
-   `BROWSER_MCP_AUTHORITY: allowed` chỉ cấp quyền agent-browser MCP/CLI cho
+   `BROWSER_MCP_AUTHORITY: allowed` chỉ cấp quyền agent-browser MCP cho
    đúng turn; mặc định denied. Không cấp quyền này chỉ vì task có chữ browser.
 3. **Lead sở hữu observed routing evidence**: resolve route từ
    controller-local `cluster-routing.local.json`, verify bằng
@@ -91,7 +91,7 @@ Peer có custom tool `peer_ask_lead` để hỏi đúng Lead cha. Lead phải:
 - ghi lại quyết định/rationale khi câu trả lời làm thay đổi scope hoặc premise;
 - coi `blocked` là workflow event, không coi là Peer failure.
 
-Lead có custom tool `team_watchdog`. Tool này kiểm tra `paseo ls -g` và `paseo inspect` với retry giới hạn, rồi đánh dấu agent `stale` khi đang `running` nhưng `UpdatedAt` không đổi quá threshold. Đây chỉ là **suspected stale**, không chứng minh process đã chết. Trước recovery, Lead phải kiểm tra activity, pending permission, daemon health và workspace/Git state; không tạo writer thứ hai khi state cũ chưa rõ.
+Lead có custom tool `team_watchdog`. Tool này kiểm tra `paseo ls -g` và `paseo inspect` với bounded concurrency, global deadline và retry giới hạn. Chỉ inspect thành công với `UpdatedAt` không đổi quá threshold mới được đánh dấu `stale`/**suspected**; inspect thất bại là **unknown**. Đây không chứng minh process đã chết. Trước recovery, Lead phải kiểm tra activity, pending permission, daemon health và workspace/Git state; không tạo writer thứ hai khi state cũ chưa rõ.
 
 Independent code review uses the configured `paseo-ocr-reviewer` harness: OCR delegation is read-only, deterministic, and exact-SHA bound; the Reviewer recommends only and Lead owns acceptance.
 

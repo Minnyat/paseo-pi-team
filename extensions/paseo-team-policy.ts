@@ -115,12 +115,12 @@ function supportScriptPath(name: string): string {
 	return found;
 }
 
-function runSupportScript(name: string, args: string[], signal?: AbortSignal): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
+function runSupportScript(name: string, args: string[], signal?: AbortSignal, timeoutMs = 30_000): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
 	return new Promise((resolve, reject) => {
 		execFile(
 			process.execPath,
 			[supportScriptPath(name), ...args],
-			{ encoding: "utf8", timeout: 30_000, windowsHide: true, env: process.env, signal },
+			{ encoding: "utf8", timeout: timeoutMs, windowsHide: true, env: process.env, signal },
 			(error, stdout, stderr) => {
 				if (error && !stdout && !stderr) reject(error);
 				else resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), code: error ? 1 : 0, killed: Boolean(error?.killed) });
@@ -156,10 +156,10 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 		name: TEAM_WATCHDOG_TOOL,
 		label: "team_watchdog",
 		description: "Inspect running Paseo agents and report suspected stale agents. Observation only; never cancels or replaces agents.",
-		parameters: { type: "object", properties: { staleAfterMs: { type: "integer", minimum: 1000, maximum: 86400000 }, maxAgents: { type: "integer", minimum: 1, maximum: 200 } }, additionalProperties: false } as any,
+		parameters: { type: "object", properties: { staleAfterMs: { type: "integer", minimum: 1000, maximum: 86400000 }, maxAgents: { type: "integer", minimum: 1, maximum: 200 }, concurrency: { type: "integer", minimum: 1, maximum: 16 }, globalDeadlineMs: { type: "integer", minimum: 1000, maximum: 120000 }, commandTimeoutMs: { type: "integer", minimum: 250, maximum: 30000 } }, additionalProperties: false } as any,
 		async execute(_id, params, signal, _onUpdate, _ctx) {
 			if (r !== "lead" && r !== "supervisor") return { content: [{ type: "text", text: "team_watchdog is available only to Lead or Supervisor agents." }], details: undefined, isError: true };
-			const result = await runSupportScript("watchdog.mjs", [JSON.stringify(params ?? {})], signal);
+			const result = await runSupportScript("watchdog.mjs", [JSON.stringify(params ?? {})], signal, 130_000);
 			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
 		},
 	});
@@ -186,8 +186,11 @@ export function isAgentBrowserMcpTarget(name: string): boolean {
 }
 
 export function callsAgentBrowserCli(command: string): boolean {
-	return /(?:^|[;&|]\s*)(?:npx(?:\s+-y)?\s+)?agent-browser(?:\.(?:cmd|exe|ps1|sh))?(?:\s|$)/i.test(
-		command.trim(),
+	// This is a deny heuristic, not a shell parser: block every literal
+	// agent-browser reference in a Peer bash command so wrappers/aliases do not
+	// reopen the CLI surface. The typed MCP path is checked separately.
+	return /(?:^|[^a-z0-9])agent-browser(?:\.(?:cmd|exe|ps1|sh))?(?=$|[^a-z0-9])/i.test(
+		command,
 	);
 }
 
@@ -1275,11 +1278,11 @@ export default function (pi: ExtensionAPI) {
 						"Peer cannot drive the Paseo CLI from bash (would bypass the tool policy). Report a DEPENDENCY_REQUEST to the Lead instead.",
 				};
 			}
-			if (callsAgentBrowserCli(command) && !browserMcpAllowed(currentBrief)) {
+			if (callsAgentBrowserCli(command)) {
 				return {
 					block: true,
 					reason:
-						"agent-browser CLI is denied because BROWSER_MCP_AUTHORITY is not allowed in the current V3 brief. Ask the Lead for explicit browser authority.",
+						"Peer cannot run agent-browser CLI through bash; BROWSER_MCP_AUTHORITY only permits the typed agent-browser MCP surface.",
 				};
 			}
 			const gitBlockReason = gitAuthorityBlockReason(

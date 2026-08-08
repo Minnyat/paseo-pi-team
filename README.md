@@ -83,17 +83,18 @@ chặn trừ khi V3 brief cấp `*_AUTHORITY: allowed`; push authority là
 force-push (mọi spelling: `-f`, `-uf`, `-fu`, `--force*`, refspec `+`) và merge
 của Peer luôn bị chặn. `BROWSER_MCP_AUTHORITY` là grant theo current turn:
 chỉ các target có prefix agent-browser và `connect/search` được scope vào
-server `agent-browser`; Paseo MCP và MCP khác luôn bị chặn.
+server `agent-browser`; agent-browser CLI qua bash luôn bị chặn. Paseo MCP và
+MCP khác luôn bị chặn.
 
 ## Liên lạc và watchdog
 
 ### Peer hỏi Lead
 
-Peer dùng custom tool `peer_ask_lead`, không dùng `paseo send` qua bash. Tool lấy `PASEO_AGENT_ID`, inspect `paseo.parent-agent-id`, chỉ gửi tới parent Lead và đóng gói `PEER_MESSAGE_V1` với `kind`, `TASK_ID`, `CORRELATION_ID`. Tool retry tối đa 3 lần với backoff chỉ cho lỗi transport tạm thời. Các loại message: `question`, `blocked`, `dependency`, `progress`. Không resolve được parent là fail-closed, không broadcast.
+Peer dùng custom tool `peer_ask_lead`, không dùng `paseo send` qua bash. Tool lấy `PASEO_AGENT_ID`, inspect `paseo.parent-agent-id`, chỉ gửi tới parent Lead và đóng gói `PEER_MESSAGE_V1` với `kind`, `TASK_ID`, `CORRELATION_ID`. Inspect có retry tối đa 3 lần với backoff chỉ cho lỗi transport tạm thời; `send` không retry vì delivery ambiguity có thể tạo duplicate. Các loại message: `question`, `blocked`, `dependency`, `progress`. Không resolve được parent là fail-closed, không broadcast.
 
 ### Lead/Supervisor kiểm tra agent treo
 
-Custom tool `team_watchdog` kiểm tra agent `running` bằng `paseo ls -g` + `paseo inspect`, retry transport tối đa 3 lần và đánh dấu `stale` khi `UpdatedAt` vượt threshold (mặc định 5 phút). `stale` chỉ là **suspected**, không tự cancel/archive/spawn.
+Custom tool `team_watchdog` kiểm tra agent `running` bằng `paseo ls -g` + `paseo inspect` với bounded concurrency (mặc định 6), global deadline (mặc định 30 giây), partial result khi hết hạn và retry transport tối đa 3 lần. Chỉ inspect thành công với `UpdatedAt` quá threshold (mặc định 5 phút) mới được đánh dấu `stale`/**suspected**; inspect thất bại là **unknown**, không tự cancel/archive/spawn.
 
 Recovery bắt buộc: kiểm tra activity, pending permission, daemon/remote health, lệnh dài dự kiến và workspace/Git state; chỉ sau đó Lead quyết định cancel/archive/correction. Không tạo writer thay thế khi commit/state cũ chưa rõ.
 
@@ -159,6 +160,20 @@ search/connect server `agent-browser` và gọi target prefix `agent_browser_` /
 `agent-browser_` (cùng các prefix chuẩn hóa tương thích), không được dùng Paseo
 MCP hoặc server khác. `node scripts/preflight.mjs --json` có các check CLI,
 Chrome/runtime, skill và MCP entry.
+
+### Paseo inspect contract test
+
+Vì `peer_ask_lead` và watchdog phụ thuộc các field JSON do Paseo expose,
+repo có contract test chạy với daemon thật. Test này không chạy trong CI thông
+thường vì cần một agent đang tồn tại; chạy explicit với agent ID đã chọn:
+
+```bash
+PASEO_CONTRACT_AGENT_ID=<real-agent-id> node test/paseo-contract.test.mjs
+```
+
+Test kiểm tra agent xuất hiện trong `paseo ls -g --json` và các field
+`Id`, `Status`, `UpdatedAt`, `PendingPermissions`, `ParentAgentId` trong
+`paseo inspect --json`. Field thiếu hoặc schema đổi sẽ fail rõ ràng.
 
 ### Bắt buộc: pi-mcp-adapter (pinned)
 

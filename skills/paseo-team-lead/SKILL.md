@@ -205,7 +205,7 @@ ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime ide
 
 ## Monitoring
 
-Use `team_watchdog` for a bounded observation pass over running agents. It retries only transient Paseo transport errors and returns `stale` as a suspicion based on `UpdatedAt`, not as proof of process death.
+Use `team_watchdog` for a bounded observation pass over running agents. It uses bounded concurrency (default 6), a global deadline (default 30 seconds), and partial results when the deadline expires. It retries only transient Paseo transport errors. Only a successful inspect with old `UpdatedAt` returns `stale` as a suspicion; inspect failure is `unknown`, not stale and never an automatic recovery signal.
 
 For every stale result, confirm with `get_agent_status`, `get_agent_activity`, pending permissions, daemon/host health and workspace/Git state. A long-running build/test/cmd is valid when the Peer or brief marked it expected; do not cancel or replace it based on timestamp alone.
 
@@ -333,8 +333,8 @@ only MCP targets prefixed by `agent_browser_`/`agent-browser_` (and compatible
 adapter prefixes) plus an explicitly scoped `connect`/`search server=agent-browser`.
 It never grants Paseo orchestration or unrelated MCP servers. Repeat the full V3
 brief on every follow-up that needs browser access; otherwise the extension
-revokes it fail-closed. The Peer may also use the `agent-browser` CLI only while
-this field is allowed.
+revokes it fail-closed. The Peer may never invoke the `agent-browser` CLI through
+bash; this field only permits the typed MCP surface.
 
 PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
 extension permits is exactly

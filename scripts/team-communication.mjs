@@ -7,6 +7,14 @@ import { pathToFileURL } from "node:url";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const MESSAGE_KINDS = Object.freeze(["question", "blocked", "dependency", "progress"]);
+const METADATA_TOKEN = /^[A-Za-z0-9._:-]{1,256}$/;
+
+function metadataToken(name, value) {
+  if (typeof value !== "string" || !METADATA_TOKEN.test(value)) {
+    throw new Error(`${name} must be a single-line token matching [A-Za-z0-9._:-] (max 256 characters)`);
+  }
+  return value;
+}
 
 export function validatePeerMessage(input) {
   if (!input || typeof input !== "object") throw new Error("message must be an object");
@@ -17,10 +25,10 @@ export function validatePeerMessage(input) {
   return {
     kind,
     message: message.trim(),
-    taskId: typeof taskId === "string" && taskId.trim() ? taskId.trim() : "unknown",
-    correlationId: typeof correlationId === "string" && correlationId.trim()
-      ? correlationId.trim()
-      : `peer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    taskId: taskId === undefined ? "unknown" : metadataToken("taskId", taskId),
+    correlationId: correlationId === undefined
+      ? `peer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      : metadataToken("correlationId", correlationId),
   };
 }
 
@@ -43,7 +51,7 @@ function resolvePaseoExec() {
   return ["paseo"];
 }
 
-function runPaseo(args, timeoutMs = 20_000) {
+export function runPaseo(args, timeoutMs = 20_000) {
   const [bin, ...prefix] = resolvePaseoExec();
   try {
     return { ok: true, data: JSON.parse(execFileSync(bin, [...prefix, ...args, "--json"], {
@@ -63,13 +71,16 @@ export function parentAgentIdFromInspect(snapshot) {
 
 export async function sendPeerMessage(input, options = {}) {
   const message = validatePeerMessage(input);
-  const self = process.env.PASEO_AGENT_ID?.trim();
-  if (!self) throw Object.assign(new Error("PASEO_AGENT_ID is missing"), { code: "AGENT_ID_MISSING" });
-  const inspected = await retryWithBackoff(() => runPaseo(["inspect", self]), {
+  const rawSelf = process.env.PASEO_AGENT_ID?.trim();
+  if (!rawSelf) throw Object.assign(new Error("PASEO_AGENT_ID is missing"), { code: "AGENT_ID_MISSING" });
+  const self = metadataToken("fromAgentId", rawSelf);
+  const paseo = options.runPaseo ?? runPaseo;
+  const inspected = await retryWithBackoff(() => paseo(["inspect", self]), {
     maxAttempts: options.maxAttempts ?? 3, baseMs: options.baseMs ?? 250, jitter: 0,
   });
-  const parent = parentAgentIdFromInspect(inspected.data);
-  if (!parent) throw Object.assign(new Error("Paseo did not expose a parent Lead for this Peer"), { code: "PARENT_LEAD_UNAVAILABLE" });
+  const rawParent = parentAgentIdFromInspect(inspected.data);
+  if (!rawParent) throw Object.assign(new Error("Paseo did not expose a parent Lead for this Peer"), { code: "PARENT_LEAD_UNAVAILABLE" });
+  const parent = metadataToken("parentAgentId", rawParent);
   const body = [
     "PEER_MESSAGE_V1",
     `KIND: ${message.kind}`,
@@ -79,9 +90,10 @@ export async function sendPeerMessage(input, options = {}) {
     "",
     message.message,
   ].join("\n");
-  const sent = await retryWithBackoff(() => runPaseo(["send", parent, "--prompt", body, "--no-wait"]), {
-    maxAttempts: options.maxAttempts ?? 3, baseMs: options.baseMs ?? 250, jitter: 0,
-  });
+  // `send` is a mutation with delivery ambiguity: the daemon may accept it
+  // before the response is lost. Never retry without a Paseo idempotency/ACK
+  // contract; correlationId is for Lead-side deduplication, not transport.
+  const sent = await paseo(["send", parent, "--prompt", body, "--no-wait"], options.sendTimeoutMs ?? 20_000);
   return { ok: true, recipient: parent, correlationId: message.correlationId, response: sent.data };
 }
 

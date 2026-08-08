@@ -35,6 +35,13 @@ await assert.rejects(
   ),
   /bad authority/,
 );
+await assert.rejects(
+  retryWithBackoff(
+    async () => { throw Object.assign(new Error("ECONNRESET"), { code: "CLI_ERROR" }); },
+    { maxAttempts: 3, baseMs: 10, jitter: 0, deadlineMs: Date.now() - 1 },
+  ),
+  /deadline exceeded/,
+);
 
 const now = Date.parse("2026-08-08T12:00:00.000Z");
 assert.equal(isStaleAgent({ status: "running", updatedAt: "2026-08-08T11:59:00.000Z" }, { now, staleAfterMs: 30_000 }), true);

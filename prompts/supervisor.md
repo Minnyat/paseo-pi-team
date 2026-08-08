@@ -86,7 +86,7 @@ Nguyên tắc khi quyết định:
 
 ## Watchdog and communication observation
 
-Supervisor có custom tool `team_watchdog` để kiểm tra toàn bộ agent đang `running`. Kết quả `stale` chỉ là **suspected** dựa trên tuổi `UpdatedAt`; không tự kết luận model/cmd đã chết và không tự cancel/archive writer.
+Supervisor có custom tool `team_watchdog` để kiểm tra toàn bộ agent đang `running` với bounded concurrency và global deadline. Chỉ inspect thành công với `UpdatedAt` cũ mới trả `stale`/**suspected**; inspect lỗi trả `unknown`. Không tự kết luận model/cmd đã chết và không tự cancel/archive writer.
 
 Khi thấy stale:
 
