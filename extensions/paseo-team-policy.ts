@@ -100,6 +100,32 @@ const PI_WRITE = ["read", "write", "edit", "bash"];
 /** pi-mcp-adapter proxy tools — Paseo tools are reached through the `mcp` tool. */
 const MCP_TOOLS = ["mcp", "mcp_script"];
 
+/**
+ * agent-browser MCP names are normalized by pi-mcp-adapter. Keep this prefix
+ * allowlist explicit: a bare `open`/`click` target could belong to another
+ * MCP server and must never be treated as browser authority.
+ */
+const AGENT_BROWSER_MCP_PREFIXES = [
+	"agent_browser_",
+	"agent-browser_",
+	"agent_browser:",
+	"agent-browser:",
+	"mcp__agent_browser__",
+	"mcp__agent-browser__",
+];
+export function isAgentBrowserMcpTarget(name: string): boolean {
+	const normalized = name.trim().toLowerCase();
+	return AGENT_BROWSER_MCP_PREFIXES.some((prefix) =>
+		normalized.startsWith(prefix),
+	);
+}
+
+export function callsAgentBrowserCli(command: string): boolean {
+	return /(?:^|[;&|]\s*)(?:npx(?:\s+-y)?\s+)?agent-browser(?:\.(?:cmd|exe|ps1|sh))?(?:\s|$)/i.test(
+		command.trim(),
+	);
+}
+
 /** Monitoring-only Paseo tools — the supervisor's default surface. */
 const SUPERVISOR_MONITORING_TARGETS: string[] = [
 	"list_agents",
@@ -194,17 +220,23 @@ export function policyWithAuthority(
 	brief: ParsedTaskBrief | null,
 ): Policy {
 	const policy = policyFor(role, peerMode);
-	if (
-		role === "peer" &&
-		peerMode === "write" &&
-		!peerGitAuthority(brief).edit
-	) {
+	if (role !== "peer") return policy;
+
+	const authority = peerAuthority(brief);
+	const allow = [...policy.allow];
+	const deny = [...policy.deny];
+	if (authority.browserMcp) {
+		allow.push("mcp");
+		const mcpIndex = deny.indexOf("mcp");
+		if (mcpIndex >= 0) deny.splice(mcpIndex, 1);
+	}
+	if (peerMode === "write" && !authority.edit) {
 		return {
-			allow: policy.allow.filter((t) => t !== "write" && t !== "edit"),
-			deny: [...new Set([...policy.deny, "write", "edit"])],
+			allow: allow.filter((t) => t !== "write" && t !== "edit"),
+			deny: [...new Set([...deny, "write", "edit"])],
 		};
 	}
-	return policy;
+	return { allow: [...new Set(allow)], deny: [...new Set(deny)] };
 }
 
 export function denyReason(
@@ -213,7 +245,7 @@ export function denyReason(
 	toolName: string,
 ): string {
 	if (role === "peer" && (toolName === "mcp" || toolName === "mcp_script")) {
-		return "Peer cannot use the MCP proxy (it would expose Paseo orchestration tools). Report a DEPENDENCY_REQUEST to the Lead instead.";
+		return "Peer cannot use the MCP proxy unless the current V3 brief grants BROWSER_MCP_AUTHORITY: allowed. Paseo orchestration MCP remains forbidden. Report a DEPENDENCY_REQUEST to the Lead instead.";
 	}
 	if (role === "peer" && matchesPaseoToolName(toolName, ALL_PASEO_TOOLS)) {
 		return "Peer cannot orchestrate agents or manage workspaces. Report a DEPENDENCY_REQUEST to the Lead instead.";
@@ -393,6 +425,53 @@ export function supervisorCreateAgentBlockReason(
  * Decide whether an `mcp` proxy call is allowed for a role.
  * Returns a block reason, or null when allowed.
  */
+function isAgentBrowserServer(value: unknown): boolean {
+	return value === "agent-browser" || value === "agent_browser";
+}
+
+export function peerMcpBlockReason(
+	input: unknown,
+	brief: ParsedTaskBrief | null,
+): string | null {
+	if (!browserMcpAllowed(brief)) {
+		return "Peer browser MCP is not authorized for this turn. Lead must send a V3 brief with BROWSER_MCP_AUTHORITY: allowed.";
+	}
+	const classification = classifyMcpInput(input);
+	if (classification.kind === "unknown") {
+		return (
+			classification.reason ??
+			"browser MCP call could not be classified — blocked fail-closed"
+		);
+	}
+	if (classification.kind === "meta") {
+		const rec = input as Record<string, unknown>;
+		if (typeof rec.connect === "string" || typeof rec.server === "string") {
+			const selected = [rec.connect, rec.server].filter(
+				(value): value is string => typeof value === "string",
+			);
+			return selected.every(isAgentBrowserServer)
+				? null
+				: "Peer may connect/query only the agent-browser MCP server; other MCP servers are denied.";
+		}
+		if (typeof rec.search === "string") {
+			return isAgentBrowserServer(rec.server)
+				? null
+				: "Peer MCP search must set server=agent-browser; broad discovery is denied.";
+		}
+		if (typeof rec.describe === "string") {
+			return (rec.server === undefined || isAgentBrowserServer(rec.server)) &&
+				isAgentBrowserMcpTarget(rec.describe)
+				? null
+				: "Peer may describe only an agent-browser MCP target.";
+		}
+		return "Peer browser MCP meta operation is not allowed; use an agent-browser target explicitly.";
+	}
+	const target = classification.target ?? "";
+	return isAgentBrowserMcpTarget(target)
+		? null
+		: `"${target}" is not an agent-browser MCP target; Paseo and unrelated MCP servers remain forbidden for Peers.`;
+}
+
 export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 	const classification = classifyMcpInput(input);
 	if (classification.kind === "meta") return null;
@@ -403,6 +482,7 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 		);
 	}
 	const target = classification.target ?? "";
+	if (role === "lead" && isAgentBrowserMcpTarget(target)) return null;
 	if (!matchesPaseoToolName(target, mcpAllowedTargets(role))) {
 		if (role === "supervisor") {
 			return `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`;
@@ -462,7 +542,10 @@ export function mcpScriptBlockReason(
 		// target escapes allowlist validation entirely.
 		const name = match[1] ?? match[2] ?? match[3] ?? match[4] ?? "";
 		if (["call", "describe", "search", "emit"].includes(name)) continue;
-		if (!matchesPaseoToolName(name, allowed)) {
+		if (
+			!matchesPaseoToolName(name, allowed) &&
+			!(role === "lead" && isAgentBrowserMcpTarget(name))
+		) {
 			return `Tool "${name}" referenced in mcp_script is not in the ${role} MCP allowlist.`;
 		}
 	}
@@ -491,6 +574,7 @@ const V3_END = "PASEO_TEAM_TASK_V3_END";
 const BRIEF_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
 const AUTHORITY_FIELDS = [
 	"EDIT_AUTHORITY",
+	"BROWSER_MCP_AUTHORITY",
 	"COMMIT_AUTHORITY",
 	"PUSH_TASK_BRANCH_AUTHORITY",
 	"FORCE_PUSH_AUTHORITY",
@@ -703,14 +787,46 @@ export function resolvePeerMode(brief: ParsedTaskBrief | null): PeerMode {
 	return brief.mode ?? "read-only";
 }
 
-export interface PeerGitAuthority {
+export interface PeerAuthority {
 	edit: boolean;
+	browserMcp: boolean;
 	commit: boolean;
 	pushTaskBranch: boolean;
 	forcePush: boolean;
 	merge: boolean;
 	deploy: boolean;
 }
+
+function peerAuthority(brief: ParsedTaskBrief | null): PeerAuthority {
+	if (brief === null || isLegacyBrief(brief)) {
+		return {
+			edit: false,
+			browserMcp: false,
+			commit: false,
+			pushTaskBranch: false,
+			forcePush: false,
+			merge: false,
+			deploy: false,
+		};
+	}
+	const mode = resolvePeerMode(brief);
+	return {
+		edit: authorityField(brief, "EDIT_AUTHORITY") ?? mode === "write",
+		browserMcp: authorityField(brief, "BROWSER_MCP_AUTHORITY") ?? false,
+		commit: authorityField(brief, "COMMIT_AUTHORITY") ?? false,
+		pushTaskBranch:
+			authorityField(brief, "PUSH_TASK_BRANCH_AUTHORITY") ?? false,
+		forcePush: false,
+		merge: false,
+		deploy: false,
+	};
+}
+
+export function browserMcpAllowed(brief: ParsedTaskBrief | null): boolean {
+	return peerAuthority(brief).browserMcp;
+}
+
+export type PeerGitAuthority = Omit<PeerAuthority, "browserMcp">;
 
 function authorityField(
 	brief: ParsedTaskBrief | null,
@@ -741,15 +857,14 @@ export function peerGitAuthority(
 			deploy: false,
 		};
 	}
-	const mode = resolvePeerMode(brief);
+	const authority = peerAuthority(brief);
 	return {
-		edit: authorityField(brief, "EDIT_AUTHORITY") ?? mode === "write",
-		commit: authorityField(brief, "COMMIT_AUTHORITY") ?? false,
-		pushTaskBranch:
-			authorityField(brief, "PUSH_TASK_BRANCH_AUTHORITY") ?? false,
-		forcePush: false,
-		merge: false,
-		deploy: false,
+		edit: authority.edit,
+		commit: authority.commit,
+		pushTaskBranch: authority.pushTaskBranch,
+		forcePush: authority.forcePush,
+		merge: authority.merge,
+		deploy: authority.deploy,
 	};
 }
 
@@ -900,9 +1015,13 @@ function currentPolicy(r: TeamRole): Policy {
 function applyPolicy(pi: ExtensionAPI, r: TeamRole): Policy {
 	const registered = new Set(pi.getAllTools().map((t) => t.name));
 	const policy = currentPolicy(r);
-	const allowed = [...new Set([...policy.allow, ...extraTools()])].filter(
-		(name) => registered.has(name),
-	);
+	const browserTools =
+		r === "peer" && browserMcpAllowed(currentBrief)
+			? [...registered].filter(isAgentBrowserMcpTarget)
+			: [];
+	const allowed = [
+		...new Set([...policy.allow, ...browserTools, ...extraTools()]),
+	].filter((name) => registered.has(name));
 	pi.setActiveTools(allowed);
 	return policy;
 }
@@ -1009,6 +1128,17 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event) => {
 		const peerMode = currentPeerMode();
 		const policy = currentPolicy(r);
+		if (
+			r === "peer" &&
+			isAgentBrowserMcpTarget(event.toolName) &&
+			!browserMcpAllowed(currentBrief)
+		) {
+			return {
+				block: true,
+				reason:
+					"Direct agent-browser MCP tool is denied because BROWSER_MCP_AUTHORITY is not allowed in the current V3 brief.",
+			};
+		}
 		if (policy.deny.includes(event.toolName)) {
 			if (
 				r === "peer" &&
@@ -1028,11 +1158,8 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (isToolCallEventType("mcp", event)) {
 			if (r === "peer") {
-				return {
-					block: true,
-					reason:
-						"Peer cannot use the MCP proxy (it would expose Paseo orchestration tools). Report a DEPENDENCY_REQUEST to the Lead instead.",
-				};
+				const blockReason = peerMcpBlockReason(event.input, currentBrief);
+				if (blockReason) return { block: true, reason: blockReason };
 			}
 			if (r === "supervisor" || r === "lead") {
 				const blockReason = mcpBlockReason(r, event.input);
@@ -1058,6 +1185,13 @@ export default function (pi: ExtensionAPI) {
 					block: true,
 					reason:
 						"Peer cannot drive the Paseo CLI from bash (would bypass the tool policy). Report a DEPENDENCY_REQUEST to the Lead instead.",
+				};
+			}
+			if (callsAgentBrowserCli(command) && !browserMcpAllowed(currentBrief)) {
+				return {
+					block: true,
+					reason:
+						"agent-browser CLI is denied because BROWSER_MCP_AUTHORITY is not allowed in the current V3 brief. Ask the Lead for explicit browser authority.",
 				};
 			}
 			const gitBlockReason = gitAuthorityBlockReason(

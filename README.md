@@ -57,7 +57,7 @@ paseo-pi-team/
 |---|---|---|
 | `pi-supervisor` | `supervisor` | `read` + `mcp` (qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt` + `create_agent` **recovery-only** — argument-guarded: `pi-lead/...` provider + `labels.purpose ∈ {recovery,bootstrap}` + `labels.recovery_for` + `settings.thinkingOptionId`; mọi shape khác bị chặn fail-closed). Không `write`/`edit`, không workspace, không peer, không discovery. |
 | `pi-lead` | `lead` | Mặc định tối thiểu: Pi `read`/`bash` + `mcp`/`mcp_script` + Paseo `discovery`/`workspace`/`monitoring`/`orchestration`/`permissions` (qua proxy, target guard fail-closed). `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1` (ghi trong WORKSPACE_PROTOCOL của repo nếu Lead được tự implement tiny task). |
-| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Không bao giờ có `mcp` hoặc Paseo orchestration tools. |
+| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Chỉ có agent-browser MCP khi V3 brief cấp `BROWSER_MCP_AUTHORITY: allowed`; không bao giờ có Paseo orchestration MCP. |
 
 Policy là **allowlist thuần** (`setActiveTools`), cộng lớp backstop chặn trong
 `song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối. Mọi authority
@@ -69,7 +69,9 @@ prompt và là lổ hổng injection). `git commit`/`git push` qua bash của Pe
 chặn trừ khi V3 brief cấp `*_AUTHORITY: allowed`; push authority là
 **branch-scoped** (duy nhất `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`);
 force-push (mọi spelling: `-f`, `-uf`, `-fu`, `--force*`, refspec `+`) và merge
-của Peer luôn bị chặn.
+của Peer luôn bị chặn. `BROWSER_MCP_AUTHORITY` là grant theo current turn:
+chỉ các target có prefix agent-browser và `connect/search` được scope vào
+server `agent-browser`; Paseo MCP và MCP khác luôn bị chặn.
 
 ## Cài đặt
 
@@ -85,7 +87,29 @@ Script copy:
 
 - `extensions/paseo-team-policy.ts` → `~/.pi/agent/extensions/`
 - `prompts/*.md` → `~/.pi/agent/extensions/prompts/`
-- `skills/paseo-team-lead/` → `~/.pi/agent/skills/`
+- `skills/paseo-team-lead/` → `~/.pi/agent/skills/paseo-team-lead/`
+- `agent-browser` CLI + Chrome runtime (nếu thiếu), bundled skill → `~/.pi/agent/skills/agent-browser/`
+- MCP entry `agent-browser: { command: "agent-browser", args: ["mcp"] }` → `~/.pi/agent/mcp.json` nếu chưa có ở các config chuẩn
+
+### agent-browser browser MCP
+
+Installer tự kiểm tra `agent-browser --version`, `agent-browser doctor --offline --quick`,
+bundled skill (`agent-browser skills path agent-browser`) và các MCP config chuẩn.
+Nếu thiếu, nó cài `npm install -g agent-browser`, chạy `agent-browser install`
+(`--with-deps` trên Linux), copy skill, rồi merge entry `agent-browser` vào
+`~/.pi/agent/mcp.json` mà không ghi đè server khác. Chạy lại installer là an toàn.
+
+Lead cấp quyền cho Peer bằng field trong V3 brief:
+
+```text
+BROWSER_MCP_AUTHORITY: allowed
+```
+
+Mặc định là `denied`; quyền không lưu qua turn. Khi được cấp, Peer chỉ được
+search/connect server `agent-browser` và gọi target prefix `agent_browser_` /
+`agent-browser_` (cùng các prefix chuẩn hóa tương thích), không được dùng Paseo
+MCP hoặc server khác. `node scripts/preflight.mjs --json` có các check CLI,
+Chrome/runtime, skill và MCP entry.
 
 ### Bắt buộc: pi-mcp-adapter (pinned)
 

@@ -291,6 +291,7 @@ OWNED_SCOPE: <files>
 EXCLUDED_SCOPE: <files>
 
 EDIT_AUTHORITY: allowed | denied        # default: follows MODE
+BROWSER_MCP_AUTHORITY: allowed | denied # default: denied; agent-browser only
 COMMIT_AUTHORITY: allowed | denied      # default: denied
 PUSH_TASK_BRANCH_AUTHORITY: allowed | denied  # default: denied
 FORCE_PUSH_AUTHORITY: denied            # always denied for peers
@@ -307,6 +308,14 @@ OBJECTIVE / SUCCESS_BOUNDARY / KNOWN_EVIDENCE / QUESTIONS TO ANSWER
 CONSTRAINTS / REQUIRED HANDOFF
 TASK_BODY_END
 ```
+
+`BROWSER_MCP_AUTHORITY: allowed` is a narrow, current-turn grant: it permits
+only MCP targets prefixed by `agent_browser_`/`agent-browser_` (and compatible
+adapter prefixes) plus an explicitly scoped `connect`/`search server=agent-browser`.
+It never grants Paseo orchestration or unrelated MCP servers. Repeat the full V3
+brief on every follow-up that needs browser access; otherwise the extension
+revokes it fail-closed. The Peer may also use the `agent-browser` CLI only while
+this field is allowed.
 
 PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
 extension permits is exactly

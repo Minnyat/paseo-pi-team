@@ -55,6 +55,8 @@ Engineer Peer.
    `templates/TASK_BRIEF_V3.md`). Legacy V1/V2 header bị extension xử
    read-only; body sau end marker không bao giờ cấp được quyền.
    Mọi follow-up `send_agent_prompt` cần authority phải lặp lại full brief.
+   `BROWSER_MCP_AUTHORITY: allowed` chỉ cấp quyền agent-browser MCP/CLI cho
+   đúng turn; mặc định denied. Không cấp quyền này chỉ vì task có chữ browser.
 3. **Lead sở hữu observed routing evidence**: resolve route từ
    controller-local `cluster-routing.local.json`, verify bằng
    `list_providers`/`list_models` trên ĐÚNG daemon đích, tạo agent với exact
@@ -68,6 +70,9 @@ Engineer Peer.
    được review lại.
 5. **One writer per moving scope**, worktree isolation khi song song.
 6. **Acceptance là quyết định của Lead; merge/deploy là của Human.**
+7. **Browser authority is explicit and narrow**: only grant
+   `BROWSER_MCP_AUTHORITY: allowed` when the Peer needs browser automation;
+   this does not grant Paseo MCP or unrelated MCP servers.
 
 ## Anti-patterns
 

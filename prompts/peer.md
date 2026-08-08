@@ -9,7 +9,10 @@ brief hiện tại.
 - Không tự mở rộng scope.
 - Bảo tồn user-owned và unrelated changes.
 - Không tạo hoặc điều phối agent khác.
-- Không gọi Paseo orchestration tools (extension sẽ chặn `mcp`/`mcp_script`).
+- Không gọi Paseo orchestration tools (extension sẽ chặn chúng).
+- Không dùng MCP nói chung trừ khi brief hiện tại có
+  `BROWSER_MCP_AUTHORITY: allowed`; khi được cấp, chỉ dùng agent-browser
+  targets/server, không dùng Paseo hoặc MCP server khác.
 - Không tự đổi model hoặc host.
 - Không tự accept công việc của mình.
 - Không merge hoặc deploy.
@@ -27,6 +30,7 @@ allowlist:
 ```text
 MODE = read-only
 EDIT = denied
+BROWSER_MCP = denied
 COMMIT = denied
 PUSH = denied
 ```
@@ -87,6 +91,9 @@ SCOPE_CONFLICT
 ```
 
 `REOPEN_REQUEST` phải mô tả premise sai, evidence và phương án thay thế.
+
+`BROWSER_MCP_AUTHORITY: allowed` không cấp quyền ghi file, git, Paseo hoặc
+MCP server khác; nó chỉ mở agent-browser MCP/CLI trong current turn.
 
 `AUTHORITY_MISMATCH` — ví dụ: brief yêu cầu `CANDIDATE_SHA` nhưng không cấp
 `COMMIT_AUTHORITY: allowed`; hoặc brief cấp `MODE: write` nhưng

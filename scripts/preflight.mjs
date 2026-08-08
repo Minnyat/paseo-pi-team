@@ -20,6 +20,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { inspectAgentBrowser } from "./browser-setup.mjs";
 import {
 	RoutingError,
 	buildProviderInventory,
@@ -209,6 +210,48 @@ let daemonUp = false;
 			warn("mcp-adapter", "installed but version unreadable");
 		else warn("mcp-adapter", `detected ${version}, pinned ${PINNED.adapter}`);
 	}
+}
+
+// --- agent-browser -------------------------------------------------------------
+
+{
+	const browser = inspectAgentBrowser();
+	if (browser.cli) pass("agent-browser-cli", browser.cliVersion || "installed");
+	else
+		fail(
+			"agent-browser-cli",
+			"agent-browser CLI missing → installer should run npm install -g agent-browser",
+		);
+	if (browser.browserRuntime)
+		pass("agent-browser-runtime", "Chrome/runtime ready");
+	else
+		fail(
+			"agent-browser-runtime",
+			"Chrome/runtime missing or doctor failed → run agent-browser install",
+		);
+	if (browser.skill) pass("agent-browser-skill", browser.skillPath);
+	else
+		fail(
+			"agent-browser-skill",
+			`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
+		);
+	if (browser.configReadable && browser.browserMcpEnabled)
+		pass("agent-browser-mcp", browser.configPath);
+	else if (!browser.configReadable)
+		fail(
+			"agent-browser-mcp",
+			`${browser.configPath} is missing or invalid JSON`,
+		);
+	else if (browser.browserMcp)
+		fail(
+			"agent-browser-mcp",
+			`${browser.configPath} contains a disabled agent-browser server`,
+		);
+	else
+		fail(
+			"agent-browser-mcp",
+			`${browser.configPath} has no agent-browser server entry`,
+		);
 }
 
 // --- role-pack installation ---------------------------------------------------
