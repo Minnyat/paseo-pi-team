@@ -1,0 +1,260 @@
+// ocr-review.test.mjs — deterministic OCR delegation preflight contract.
+// Run: node test/ocr-review.test.mjs
+
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  OCR_ERROR_CODES,
+  OCR_SUPPORTED_VERSION,
+  normalizePreview,
+  normalizeRules,
+  parsePreviewText,
+  parseRulesText,
+  verifyReviewWorkspace,
+} from "../scripts/ocr-review.mjs";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const WRAPPER = join(ROOT, "scripts", "ocr-review.mjs");
+const FAKE_OCR = join(ROOT, "test", "fixtures", "fake-ocr.mjs");
+const OCR_FIXTURE_ROOT = join(ROOT, "test", "fixtures", "ocr", "v1.8.10");
+const GIT = process.platform === "win32" ? "git.exe" : "git";
+const NODE = process.execPath;
+
+function git(repo, ...args) {
+  return execFileSync(GIT, args, { cwd: repo, encoding: "utf8" }).trim();
+}
+
+function makeRepo() {
+  const repo = mkdtempSync(join(tmpdir(), "paseo-ocr-review-"));
+  git(repo, "init", "-q");
+  git(repo, "config", "user.email", "test@example.invalid");
+  git(repo, "config", "user.name", "OCR Test");
+  mkdirSync(join(repo, "src"));
+  writeFileSync(join(repo, "src", "reviewed.js"), "export const value = 1;\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-qm", "initial");
+  const base = git(repo, "rev-parse", "HEAD");
+  writeFileSync(join(repo, "src", "reviewed.js"), "export const value = 2;\n");
+  git(repo, "commit", "-qam", "candidate");
+  const candidate = git(repo, "rev-parse", "HEAD");
+  return { repo, base, candidate };
+}
+
+function runWrapper(repo, base, candidate, extraEnv = {}) {
+  const env = {
+    ...process.env,
+    PASEO_TEAM_OCR_EXEC: `"${NODE}" "${FAKE_OCR}"`,
+    OCR_FIXTURE_FILE: "src/reviewed.js",
+    OCR_FIXTURE_MERGE_BASE: base,
+    ...extraEnv,
+  };
+  const result = spawnSync(
+    NODE,
+    [WRAPPER, "--repo", repo, "--base", base, "--candidate", candidate],
+    { encoding: "utf8", env, timeout: 30_000 },
+  );
+  let json;
+  try {
+    json = JSON.parse(result.stdout);
+  } catch {
+    json = null;
+  }
+  return { ...result, json };
+}
+
+// Pure response validation cases.
+assert.deepEqual(normalizePreview({
+  schema_version: "1",
+  mode: "range",
+  from: "base",
+  to: "candidate",
+  merge_base: "merge",
+  reviewable_files: [{ path: "src/a.js", status: "modified" }],
+  excluded_files: [],
+}), {
+  mode: "range",
+  from: "base",
+  to: "candidate",
+  merge_base: "merge",
+  reviewable_files: [{ path: "src/a.js", status: "modified" }],
+  excluded_files: [],
+});
+assert.throws(
+  () => normalizePreview({ mode: "range", reviewable_files: [] }),
+  (error) => error.code === "PREVIEW_INVALID" && error.message.includes("schema_version"),
+);
+assert.throws(
+  () => normalizeRules({ schema_version: "1", groups: [{ group_id: 1, files: ["src/a.js"] }] }),
+  (error) => error.code === "RULES_INVALID" && error.message.includes("groups[0]"),
+);
+assert.deepEqual(normalizeRules({
+  schema_version: "1",
+  groups: [{ group_id: 1, source: "default", pattern: "*.js", files: ["src/a.js"], rule: "Check bugs." }],
+}), [{ group_id: 1, source: "default", pattern: "*.js", files: ["src/a.js"], rule: "Check bugs." }]);
+
+// Golden parser fixtures captured from the real v1.8.10 CLI, including CRLF.
+const goldenPreview = readFileSync(join(OCR_FIXTURE_ROOT, "preview-range.txt"), "utf8");
+const goldenRules = readFileSync(join(OCR_FIXTURE_ROOT, "rule-multiple-groups.txt"), "utf8");
+const parsedGoldenPreview = normalizePreview(parsePreviewText(goldenPreview.replace(/\n/g, "\r\n")));
+assert.equal(parsedGoldenPreview.mode, "range");
+assert.equal(parsedGoldenPreview.reviewable_files[0].path, "src/app.js");
+assert.equal(parsedGoldenPreview.excluded_files[0].path, "docs/guide.md");
+assert.equal(parsedGoldenPreview.excluded_files[0].exclude_reason, "unsupported_ext");
+const parsedGoldenRules = normalizeRules(parseRulesText(goldenRules.replace(/\n/g, "\r\n")));
+assert.equal(parsedGoldenRules.length, 2);
+assert.equal(parsedGoldenRules[0].files[0], "src/with space.js");
+assert.equal(parsedGoldenRules[1].files[0], "scripts/tool.py");
+const parsedSingleRules = normalizeRules(parseRulesText(readFileSync(join(OCR_FIXTURE_ROOT, "rule-single.txt"), "utf8")));
+assert.equal(parsedSingleRules.length, 1);
+assert.equal(parsedSingleRules[0].files[0], "src/app.js");
+const parsedNoMatchRules = normalizeRules(parseRulesText(readFileSync(join(OCR_FIXTURE_ROOT, "rule-no-match.txt"), "utf8")));
+assert.equal(parsedNoMatchRules.length, 1);
+assert.equal(parsedNoMatchRules[0].files[0], "README.txt");
+const parsedZeroPreview = normalizePreview(parsePreviewText(readFileSync(join(OCR_FIXTURE_ROOT, "preview-zero-files.txt"), "utf8")));
+assert.equal(parsedZeroPreview.reviewable_files.length, 0);
+assert.equal(parsedZeroPreview.excluded_files.length, 1);
+const parsedRename = normalizePreview(parsePreviewText(readFileSync(join(OCR_FIXTURE_ROOT, "preview-renamed-file.txt"), "utf8")));
+assert.equal(parsedRename.reviewable_files[0].status, "renamed");
+const parsedDeleted = normalizePreview(parsePreviewText(readFileSync(join(OCR_FIXTURE_ROOT, "preview-deleted-file.txt"), "utf8")));
+assert.equal(parsedDeleted.reviewable_files.length, 0);
+assert.equal(parsedDeleted.excluded_files[0].status, "deleted");
+const parsedUnicode = normalizePreview(parsePreviewText(readFileSync(join(OCR_FIXTURE_ROOT, "preview-unicode-file.txt"), "utf8")));
+assert.equal(parsedUnicode.reviewable_files[0].path, "src/你好.js");
+const parsedLong = normalizePreview(parsePreviewText(readFileSync(join(OCR_FIXTURE_ROOT, "preview-long-path.txt"), "utf8")));
+assert.ok(parsedLong.reviewable_files[0].path.length > 100);
+assert.throws(
+  () => normalizePreview(parsePreviewText(readFileSync(join(OCR_FIXTURE_ROOT, "preview-leading-dash.txt"), "utf8"))),
+  /repository-relative path/,
+);
+assert.throws(() => normalizePreview({
+  schema_version: "1",
+  mode: "range",
+  merge_base: "a".repeat(40),
+  reviewable_files: [{ path: "-unsafe.js", status: "modified" }],
+  excluded_files: [],
+}), /repository-relative path/);
+
+for (const code of [
+  "CANDIDATE_SHA_MISMATCH",
+  "DIRTY_REVIEW_WORKSPACE",
+  "OCR_UNAVAILABLE",
+  "PREVIEW_INVALID",
+  "RULES_INVALID",
+]) {
+  assert.ok(OCR_ERROR_CODES.includes(code), `exports ${code}`);
+assert.equal(OCR_SUPPORTED_VERSION, "1.8.10");
+}
+
+// Ref inputs must be full immutable SHAs, not branch names or shell-like values.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, "HEAD");
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "USAGE");
+}
+
+// Capability/version failures are distinct and fail before selection.
+for (const [mode, code] of [["old-version", "OCR_VERSION_UNSUPPORTED"], ["missing-capability", "OCR_CAPABILITY_MISSING"]]) {
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: mode });
+  assert.equal(result.status, 2, mode);
+  assert.equal(result.json.code, code, mode);
+}
+
+// Candidate SHA must match current HEAD before OCR is invoked.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, candidate, base);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "CANDIDATE_SHA_MISMATCH");
+}
+
+// Dirty review workspace is a hard blocker, not an implicit cleanup request.
+{
+  const { repo, base, candidate } = makeRepo();
+  writeFileSync(join(repo, "unrelated.txt"), "do not discard\n");
+  const result = runWrapper(repo, base, candidate);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "DIRTY_REVIEW_WORKSPACE");
+}
+
+// Missing OCR executable is explicit and never falls back to manual selection.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, {
+    PASEO_TEAM_OCR_EXEC: join(repo, "does-not-exist-ocr"),
+  });
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "OCR_UNAVAILABLE");
+}
+
+// Valid preview + rule output becomes a normalized manifest.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.json.schema, "paseo.ocr-review-manifest/v1");
+  assert.equal(result.json.base_sha, base);
+  assert.equal(result.json.candidate_sha, candidate);
+  assert.equal(result.json.reviewable_files.length, 1);
+  assert.equal(result.json.rule_groups[0].files[0], "src/reviewed.js");
+  assert.match(result.json.ocr_version, /open-code-review/);
+  assert.equal(result.json.review.candidate_sha, candidate);
+  assert.equal(result.json.review.candidate_tree_sha.length, 40);
+  assert.equal(result.json.workspace.clean_entry, true);
+  assert.equal(result.json.scope.selected_count, 1);
+  assert.equal(result.json.scope.excluded_count, 0);
+  assert.equal(result.json.scope.discovered_count, 1);
+  assert.match(result.json.scope.selected_digest, /^sha256:/);
+  assert.match(result.json.rules.resolution_digest, /^sha256:/);
+}
+
+// Zero selected files is observable, not silently treated as a manual diff.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_ZERO: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.json.reviewable_files.length, 0);
+  assert.equal(result.json.empty_review, true);
+}
+
+// Exit verification catches a workspace mutation after the harness ran.
+{
+  const { repo, base, candidate } = makeRepo();
+  const entry = verifyReviewWorkspace(repo, candidate);
+  assert.equal(entry.clean, true);
+  writeFileSync(join(repo, "changed-during-review.txt"), "external mutation\n");
+  assert.throws(
+    () => verifyReviewWorkspace(repo, candidate, entry.tree),
+    (error) => error.code === "REVIEW_WORKSPACE_CHANGED_DURING_REVIEW",
+  );
+  const cleanRepo = makeRepo();
+  const cleanTree = verifyReviewWorkspace(cleanRepo.repo, cleanRepo.candidate).tree;
+  const verifyResult = spawnSync(
+    NODE,
+    [WRAPPER, "--verify", "--repo", cleanRepo.repo, "--candidate", cleanRepo.candidate, "--tree", cleanTree],
+    { encoding: "utf8", env: process.env, timeout: 30_000 },
+  );
+  assert.equal(verifyResult.status, 0);
+  assert.match(verifyResult.stdout, /paseo\.ocr-review-verification\/v1/);
+}
+
+// Malformed preview/rule JSON is a blocker.
+for (const mode of ["preview-malformed", "rules-malformed"]) {
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: mode });
+  assert.equal(result.status, 2, mode);
+  assert.equal(result.json.code, mode === "preview-malformed" ? "OCR_OUTPUT_SCHEMA_UNSUPPORTED" : "RULES_INVALID");
+}
+
+console.log("ocr-review tests passed");

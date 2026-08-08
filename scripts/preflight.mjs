@@ -116,8 +116,19 @@ function summarizeMessages() {
 
 {
 	const ocr = tryExec("ocr", ["version"]);
-	if (ocr.ok) pass("ocr-cli", ocr.stdout.trim().split(/\r?\n/)[0] || "installed");
-	else warn("ocr-cli", "ocr CLI unavailable — independent-reviewer OCR workflow is blocked (install @alibaba-group/open-code-review)");
+	if (!ocr.ok) {
+		warn("ocr-cli", "ocr CLI unavailable — independent-reviewer OCR workflow is blocked (install @alibaba-group/open-code-review)");
+	} else {
+		const versionLine = ocr.stdout.trim().split(/\r?\n/)[0] || "";
+		const supported = /^open-code-review v1\.8\.10(?:\b|\s)/i.test(versionLine);
+		if (supported) pass("ocr-cli", versionLine);
+		else warn("ocr-cli", `${versionLine || "installed"} — tested contract is open-code-review v1.8.10; reviewer wrapper will fail closed`);
+		for (const command of ["preview", "rule"]) {
+			const help = tryExec("ocr", ["delegate", command, "--help"]);
+			if (help.ok && help.stdout.includes("--repo") && help.stdout.includes("--from")) pass(`ocr-capability:${command}`, "delegate capability available");
+			else warn(`ocr-capability:${command}`, "delegate capability probe failed — reviewer wrapper will fail closed");
+		}
+	}
 }
 {
 	const major = Number(process.versions.node.split(".")[0]);

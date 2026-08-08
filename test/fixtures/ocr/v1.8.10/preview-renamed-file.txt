@@ -1,0 +1,10 @@
+# Files (1 reviewable / 1 total)
+
+- mode: range
+- from: c2138bb4e20a8f07722aa256e232515b16e71700
+- to: 226c1171cb0e78b66e7a1d48c7f643e9fe737c2d
+- merge_base: c2138bb4e20a8f07722aa256e232515b16e71700
+- total_insertions: 0
+- total_deletions: 0
+
+  - `src/new.js` [renamed] +0/-0

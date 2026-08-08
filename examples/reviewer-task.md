@@ -48,6 +48,12 @@ KNOWN_EVIDENCE:
 - The engineer reported: all tests pass; two edge cases fixed;
   WORKTREE_CLEAN: yes.
 
+REVIEW_ENGINE:
+ocr-delegate
+
+REVIEW_BASE_SHA: <base-sha>
+REVIEW_CANDIDATE_SHA: <candidate-sha>
+
 QUESTIONS TO ANSWER:
 - Is the fix consistent with the test expectations?
 - Does the change introduce regressions outside the two edge cases?
@@ -58,15 +64,22 @@ CONSTRAINTS:
   git fetch origin agent/T-001
   git worktree add --detach ../reviews/T-001-<short-sha> <candidate-sha>
 - Verify `git rev-parse HEAD` equals ASSIGNED_CANDIDATE_SHA.
-  Review on any other SHA must return VERDICT: REFUSE.
+  Review on any other SHA must return `BLOCKED: CANDIDATE_SHA_MISMATCH`.
 - Verify `git status --porcelain` prints nothing (clean worktree).
-- Do NOT normalize or fix the candidate to make tests pass.
+  A dirty workspace must return `BLOCKED: DIRTY_REVIEW_WORKSPACE`.
+- Run `ocr version`, then `ocr delegate preview --from <base-sha> --to <candidate-sha>` and `ocr delegate rule <selected-paths>` using the current installed upstream syntax. The verified v1.8.10 CLI emits structured Markdown; normalize it only through the deterministic wrapper.
+- Account for every OCR `reviewable_files` item as reviewed or skipped with a concrete reason.
+- Do NOT normalize, edit, or fix the candidate to make tests pass.
 
 REQUIRED HANDOFF:
-- ASSIGNED_SHA, OBSERVED_SHA, WORKTREE_CLEAN
-- COMMANDS_RUN
-- FINDINGS_BY_SEVERITY
-- VERDICT: ACCEPT | ACCEPT_WITH_RISK | REJECT | REFUSE
+- ASSIGNED_CANDIDATE_SHA, OBSERVED_CANDIDATE_SHA, WORKTREE_CLEAN
+- OCR_VERSION, MERGE_BASE, CANDIDATE_TREE_SHA, MANIFEST_DIGEST
+- DISCOVERED, TOTAL_REVIEWABLE, EXCLUDED, REVIEWED, SKIPPED, COVERAGE_RATE
+- EXCLUDED_FILES with OCR reasons
+- COMMANDS_RUN, including the post-review workspace verification
+- Structured OCR findings and evidence; every finding has DISPOSITION:
+  BLOCKER | REQUIRED | SUGGESTION | QUESTION | NIT
+- RECOMMENDATION: PASS | CHANGES_REQUIRED | BLOCKED
 - REVIEW_LIMITATIONS
 
 TASK_BODY_END

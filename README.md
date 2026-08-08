@@ -116,9 +116,11 @@ The optional deterministic preflight emits a normalized manifest:
 node scripts/ocr-review.mjs --repo <repo> --base <base-sha> --candidate <candidate-sha>
 ```
 
-It blocks candidate mismatch, dirty workspaces, unavailable OCR, malformed
-selection/rules, and incomplete rule coverage. It never edits Git state or
-calls an LLM.
+It pins OCR `1.8.10`, probes `delegate preview/rule` capabilities, and blocks
+candidate mismatch, dirty/mutated workspaces, unavailable/unsupported OCR,
+malformed selection/rules, and incomplete rule coverage. Its manifest includes
+candidate-tree/workspace entry-exit state and deterministic digests. It never
+edits Git state or calls an LLM.
 
 ## Cài đặt
 

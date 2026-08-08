@@ -1,0 +1,10 @@
+# Files (0 reviewable / 1 total)
+
+- mode: range
+- from: 40ae5b4b049191416a98d92a235c6b522e88693b
+- to: 72f141790fb87445da6782335083e085ee0067e2
+- merge_base: 40ae5b4b049191416a98d92a235c6b522e88693b
+- total_insertions: 0
+- total_deletions: 1
+
+~~- `src/deleted.js` [deleted] +0/-1 (excluded: deleted)~~
