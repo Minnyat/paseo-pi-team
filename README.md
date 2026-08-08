@@ -231,7 +231,10 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
    sở hữu observed routing evidence.
 5. **Host remote**: MCP inject vào agent luôn trỏ daemon LOCAL — `--host` là
    option CLI, không phải argument MCP. Lead dùng
-   `scripts/remote-paseo.mjs` (đọc cluster file theo HOST_ID, chạy Paseo CLI
+   `<PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (installer copies the support
+   scripts to `~/.pi/agent/extensions/paseo-team-scripts`; the environment
+   variable is persisted by the installer; it reads cluster file theo HOST_ID,
+   chạy Paseo CLI
    `--host`, không in endpoint, trả JSON envelope có hostId) cho mọi thao tác
    remote: `health/providers/models/workspaces/workspace-create/run/status/
    send/cancel/archive` — xem `docs/multi-host.md` và Lead skill

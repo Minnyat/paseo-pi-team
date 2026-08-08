@@ -20,6 +20,14 @@ $skillsDir = Join-Path $PiHome "agent\skills"
 $skillDir  = Join-Path $skillsDir "paseo-team-lead"
 $ocrSkillDir = Join-Path $skillsDir "paseo-ocr-reviewer"
 $teamScriptsDir = Join-Path $extDir "paseo-team-scripts"
+$teamSupportFiles = @(
+  "reliability.mjs",
+  "watchdog.mjs",
+  "team-communication.mjs",
+  "ocr-review.mjs",
+  "remote-paseo.mjs",
+  "model-routing.mjs"
+)
 
 New-Item -ItemType Directory -Force -Path $extDir, $promptDir, $skillsDir | Out-Null
 # Routing configs live in ~/.paseo-pi-team (model-routing.local.json, cluster-routing.local.json).
@@ -35,7 +43,9 @@ Copy-Item -Recurse -Force (Join-Path $RolePackRoot "skills\paseo-team-lead") $sk
 Copy-Item -Recurse -Force (Join-Path $RolePackRoot "skills\paseo-ocr-reviewer") $ocrSkillDir
 if (Test-Path $teamScriptsDir) { Remove-Item -Recurse -Force $teamScriptsDir }
 New-Item -ItemType Directory -Force -Path $teamScriptsDir | Out-Null
-Copy-Item (Join-Path $RolePackRoot "scripts\reliability.mjs"), (Join-Path $RolePackRoot "scripts\watchdog.mjs"), (Join-Path $RolePackRoot "scripts\team-communication.mjs"), (Join-Path $RolePackRoot "scripts\ocr-review.mjs") $teamScriptsDir -Force
+foreach ($supportFile in $teamSupportFiles) {
+  Copy-Item (Join-Path $RolePackRoot "scripts\$supportFile") $teamScriptsDir -Force
+}
 
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
 # idempotent and merges only the missing agent-browser entry in Pi's MCP config.
@@ -51,6 +61,8 @@ Write-Host "  prompts   -> $promptDir"
 Write-Host "  lead skill -> $skillDir"
 Write-Host "  OCR skill  -> $ocrSkillDir"
 Write-Host "  support   -> $teamScriptsDir"
+[Environment]::SetEnvironmentVariable("PASEO_TEAM_SCRIPTS_DIR", $teamScriptsDir, "User")
+Write-Host "  support env -> PASEO_TEAM_SCRIPTS_DIR=$teamScriptsDir (new processes)"
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. The installer checked/installed agent-browser CLI, Chrome runtime, skill and Pi MCP config."

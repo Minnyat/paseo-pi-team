@@ -29,6 +29,7 @@ const FAKE_OCR = join(ROOT, "test", "fixtures", "fake-ocr.mjs");
 const OCR_FIXTURE_ROOT = join(ROOT, "test", "fixtures", "ocr", "v1.8.10");
 const GIT = process.platform === "win32" ? "git.exe" : "git";
 const NODE = process.execPath;
+const toCrlf = (text) => text.replace(/\r?\n/g, "\n").replace(/\n/g, "\r\n");
 
 function git(repo, ...args) {
   return execFileSync(GIT, args, { cwd: repo, encoding: "utf8" }).trim();
@@ -111,12 +112,12 @@ assert.deepEqual(normalizeRules({
 // Golden parser fixtures captured from the real v1.8.10 CLI, including CRLF.
 const goldenPreview = readFileSync(join(OCR_FIXTURE_ROOT, "preview-range.txt"), "utf8");
 const goldenRules = readFileSync(join(OCR_FIXTURE_ROOT, "rule-multiple-groups.txt"), "utf8");
-const parsedGoldenPreview = normalizePreview(parsePreviewText(goldenPreview.replace(/\n/g, "\r\n")));
+const parsedGoldenPreview = normalizePreview(parsePreviewText(toCrlf(goldenPreview)));
 assert.equal(parsedGoldenPreview.mode, "range");
 assert.equal(parsedGoldenPreview.reviewable_files[0].path, "src/app.js");
 assert.equal(parsedGoldenPreview.excluded_files[0].path, "docs/guide.md");
 assert.equal(parsedGoldenPreview.excluded_files[0].exclude_reason, "unsupported_ext");
-const parsedGoldenRules = normalizeRules(parseRulesText(goldenRules.replace(/\n/g, "\r\n")));
+const parsedGoldenRules = normalizeRules(parseRulesText(toCrlf(goldenRules)));
 assert.equal(parsedGoldenRules.length, 2);
 assert.equal(parsedGoldenRules[0].files[0], "src/with space.js");
 assert.equal(parsedGoldenRules[1].files[0], "scripts/tool.py");
@@ -253,6 +254,12 @@ for (const [mode, code] of [["old-version", "OCR_VERSION_UNSUPPORTED"], ["missin
   );
   assert.equal(verifyResult.status, 0);
   assert.match(verifyResult.stdout, /paseo\.ocr-review-verification\/v1/);
+  const uppercaseTree = spawnSync(
+    NODE,
+    [WRAPPER, "--verify", "--repo", cleanRepo.repo, "--candidate", cleanRepo.candidate, "--tree", cleanTree.toUpperCase()],
+    { encoding: "utf8", env: process.env, timeout: 30_000 },
+  );
+  assert.equal(uppercaseTree.status, 0);
 }
 
 // Malformed preview/rule JSON is a blocker.

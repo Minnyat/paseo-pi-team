@@ -49,10 +49,12 @@ jobs:
           node test/watchdog.test.mjs
           node test/team-communication.test.mjs
           node test/browser-setup.test.mjs
+          node test/installer-contract.test.mjs
           node test/ocr-review.test.mjs
           node test/ocr-integrity.test.mjs
           node test/paseo-contract.test.mjs
       - name: syntax checks
+        shell: bash
         run: |
           node --check scripts/preflight.mjs
           node --check scripts/model-routing.mjs

@@ -55,7 +55,9 @@ On Windows, use the shell-native equivalent to locate the command when needed
 (`Get-Command ocr` in PowerShell; `command -v ocr` on Unix-like shells). Do
 not hardcode a Windows, macOS, or Linux path.
 
-Verify `observed HEAD == ASSIGNED_CANDIDATE_SHA` exactly. If not, stop with:
+Verify `observed HEAD == ASSIGNED_CANDIDATE_SHA == REVIEW_CANDIDATE_SHA` exactly. The
+reviewer must refuse if either candidate value is missing or the two assigned
+values differ. If not, stop with:
 
 ```text
 STATUS: BLOCKED
@@ -81,11 +83,16 @@ Never repair the workspace with `git checkout`, `git reset`, `git rebase`, or
 
 ### B. Determine the review range with OCR
 
-Use the exact base/candidate range, never an inferred `HEAD~1` range:
+Use the deterministic wrapper as the primary path so repository, range,
+merge-base, and rule scope are checked together:
 
 ```text
-ocr delegate preview --from <REVIEW_BASE_SHA> --to <REVIEW_CANDIDATE_SHA>
+node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --repo <review-repo> --base <REVIEW_BASE_SHA> --candidate <ASSIGNED_CANDIDATE_SHA>
 ```
+
+If a direct OCR command is needed for diagnosis, it MUST use the same exact
+`--repo`, `--from <REVIEW_BASE_SHA>`, and `--to <ASSIGNED_CANDIDATE_SHA>` values;
+never use a task-body candidate that differs from the authority candidate.
 
 Use the repository's actual installed OCR syntax. Upstream `main` documents a
 JSON format flag, but the verified npm CLI `open-code-review v1.8.10` rejects
@@ -110,10 +117,10 @@ The tested Phase 1 contract is OCR `1.8.10`; capability/version drift is a
 blocker (`OCR_VERSION_UNSUPPORTED`, `OCR_CAPABILITY_MISSING`, or
 `OCR_OUTPUT_SCHEMA_UNSUPPORTED`).
 
-The repository includes an optional deterministic preflight wrapper:
+The installed support directory contains the deterministic wrapper:
 
 ```text
-node scripts/ocr-review.mjs --base <base-sha> --candidate <candidate-sha>
+node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --repo <review-repo> --base <base-sha> --candidate <assigned-candidate-sha>
 ```
 
 It performs the same gates and emits a normalized manifest. It never edits
@@ -166,7 +173,9 @@ back to the review.
 Resolve rules using the paths returned by OCR, not a hand-written file list:
 
 ```text
-ocr delegate rule <file-1> <file-2> ...
+For direct diagnosis only, `ocr delegate rule` must receive the exact
+`--repo`, `--from <REVIEW_BASE_SHA>`, `--to <ASSIGNED_CANDIDATE_SHA>`, and
+OCR-selected paths; normal review execution uses the wrapper above.
 ```
 
 The verified v1.8.10 output is structured Markdown with `Rule Group` headers,
@@ -196,7 +205,7 @@ Before returning the report, rerun the workspace invariant. The wrapper's
 post-review check is:
 
 ```text
-node scripts/ocr-review.mjs --verify --candidate <candidate-sha> --tree <candidate-tree-sha>
+node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --verify --candidate <assigned-candidate-sha> --tree <candidate-tree-sha>
 ```
 
 A changed HEAD, tree, or dirty workspace blocks with

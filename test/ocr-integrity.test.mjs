@@ -11,6 +11,7 @@ const leadPrompt = read("prompts/lead.md");
 const peerPrompt = read("prompts/peer.md");
 const brief = read("examples/reviewer-task.md");
 const installPs1 = read("scripts/install.ps1");
+const installSh = read("scripts/install.sh");
 
 assert.match(ocrSkill, /name: paseo-ocr-reviewer/);
 assert.match(leadSkill, /load `paseo-ocr-reviewer`/);
@@ -21,8 +22,9 @@ assert.match(ocrSkill, /DIRTY_REVIEW_WORKSPACE/);
 assert.match(ocrSkill, /OCR_UNAVAILABLE/);
 assert.match(ocrSkill, /reviewed.*skipped:<concrete reason>/s);
 assert.match(ocrSkill, /COVERAGE_RATE/);
-assert.match(ocrSkill, /ocr delegate preview/);
-assert.match(ocrSkill, /ocr delegate rule/);
+assert.match(ocrSkill, /ocr-review\.mjs --repo/);
+assert.match(ocrSkill, /--from <REVIEW_BASE_SHA>/);
+assert.match(ocrSkill, /--to <ASSIGNED_CANDIDATE_SHA>/);
 assert.match(ocrSkill, /RECOMMENDATION: PASS \| CHANGES_REQUIRED \| BLOCKED/);
 assert.match(ocrSkill, /STATUS: PARTIAL.*BLOCKED/s);
 assert.match(ocrSkill, /`PARTIAL` is never eligible to derive `PASS`/);
@@ -35,6 +37,12 @@ assert.match(ocrSkill, /MANIFEST_DIGEST:/);
 assert.doesNotMatch(ocrSkill, /apply critical fixes|fix automatically|review and fix/i);
 assert.match(installPs1, /Remove-Item -Recurse -Force \$ocrSkillDir/);
 assert.match(installPs1, /\$LASTEXITCODE -ne 0/);
+assert.match(installPs1, /remote-paseo\.mjs/);
+assert.match(installPs1, /model-routing\.mjs/);
+assert.match(installPs1, /PASEO_TEAM_SCRIPTS_DIR/);
+assert.match(installSh, /remote-paseo\.mjs/);
+assert.match(installSh, /model-routing\.mjs/);
+assert.match(installSh, /PASEO_TEAM_SCRIPTS_DIR/);
 assert.match(ocrSkill, /MUST NOT:[\s\S]*edit product code[\s\S]*commit[\s\S]*push[\s\S]*merge[\s\S]*deploy/);
 
 // OCR metadata stays outside the V3 authority marker block.
@@ -43,6 +51,10 @@ assert.doesNotMatch(authorityBlock, /OCR_MODE|OCR_ENGINE|OCR_BASE_SHA|REVIEW_BAS
 assert.match(brief, /REVIEW_ENGINE:\s*\nocr-delegate/);
 assert.match(brief, /REVIEW_BASE_SHA:/);
 assert.match(brief, /REVIEW_CANDIDATE_SHA:/);
+assert.match(leadSkill, /ASSIGNED_CANDIDATE_SHA == REVIEW_CANDIDATE_SHA/);
+assert.match(ocrSkill, /ASSIGNED_CANDIDATE_SHA == REVIEW_CANDIDATE_SHA/);
+assert.match(leadSkill, /PASEO_TEAM_SCRIPTS_DIR.*remote-paseo\.mjs/s);
+assert.match(ocrSkill, /PASEO_TEAM_SCRIPTS_DIR.*ocr-review\.mjs/s);
 
 // Reviewer authority remains denied in the canonical example.
 for (const field of ["EDIT_AUTHORITY", "COMMIT_AUTHORITY", "PUSH_TASK_BRANCH_AUTHORITY", "MERGE_AUTHORITY", "DEPLOY_AUTHORITY"]) {

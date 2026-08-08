@@ -63,11 +63,17 @@ CONSTRAINTS:
 - Work in a fresh checkout of the assigned SHA — not the engineer's tree:
   git fetch origin agent/T-001
   git worktree add --detach ../reviews/T-001-<short-sha> <candidate-sha>
-- Verify `git rev-parse HEAD` equals ASSIGNED_CANDIDATE_SHA.
+- Verify `git rev-parse HEAD` equals `ASSIGNED_CANDIDATE_SHA` and
+  `REVIEW_CANDIDATE_SHA` equals `ASSIGNED_CANDIDATE_SHA`; any missing or
+  differing value is `BLOCKED: CANDIDATE_SHA_MISMATCH`.
   Review on any other SHA must return `BLOCKED: CANDIDATE_SHA_MISMATCH`.
 - Verify `git status --porcelain` prints nothing (clean worktree).
   A dirty workspace must return `BLOCKED: DIRTY_REVIEW_WORKSPACE`.
-- Run `ocr version`, then `ocr delegate preview --from <base-sha> --to <candidate-sha>` and `ocr delegate rule <selected-paths>` using the current installed upstream syntax. The verified v1.8.10 CLI emits structured Markdown; normalize it only through the deterministic wrapper.
+- Run the deterministic wrapper from the installed support directory:
+  `node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --repo <review-repo> --base <base-sha> --candidate <assigned-candidate-sha>`.
+  Any direct OCR diagnostic must use the same `--repo`, `--from <base-sha>`,
+  and `--to <assigned-candidate-sha>` values. The verified v1.8.10 CLI emits
+  structured Markdown; normalize it only through the deterministic wrapper.
 - Account for every OCR `reviewable_files` item as reviewed or skipped with a concrete reason.
 - Do NOT normalize, edit, or fix the candidate to make tests pass.
 

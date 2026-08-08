@@ -361,8 +361,7 @@ function parseArgs(argv) {
     if (!options.candidate) fail("USAGE", "--candidate <sha> is required");
     options.candidate = requireSha(options.candidate, "--candidate");
     if (options.verify) {
-      options.tree = requireString(options.tree, "--tree", "USAGE");
-      if (!/^[0-9a-f]{40}$/i.test(options.tree)) fail("USAGE", "--tree must be a full 40-character Git tree SHA");
+      options.tree = requireSha(options.tree, "--tree");
     } else {
       if (!options.base) fail("USAGE", "--base <sha> is required");
       options.base = requireSha(options.base, "--base");

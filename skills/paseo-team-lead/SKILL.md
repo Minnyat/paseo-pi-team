@@ -51,7 +51,11 @@ Paseo tools are not separate tools in the prompt — they are reached through th
 The MCP server injected into THIS agent always talks to the **local daemon**
 only — there is no `--host` on any MCP tool (`--host` is a Paseo CLI option,
 not an MCP argument). Remote daemons are driven through the Paseo CLI via
-`scripts/remote-paseo.mjs` (see REMOTE_CREATE_CYCLE below).
+`remote-paseo.mjs` from the installed support-script directory (see
+`REMOTE_CREATE_CYCLE` below). Use `<PASEO_TEAM_SCRIPTS_DIR>` below; installers
+place the scripts at `~/.pi/agent/extensions/paseo-team-scripts`. Source
+checkouts may set the variable to the repository `scripts/` directory. Never
+resolve support scripts from the project's current working directory.
 
 ## Implementation — model routing cycle (mandatory)
 
@@ -64,13 +68,13 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
    run the resolver when the role pack repo is available:
-   `node scripts/model-routing.mjs resolve --class <CLASS>` for the local
+   `node <PASEO_TEAM_SCRIPTS_DIR>/model-routing.mjs resolve --class <CLASS>` for the local
    `model-routing.local.json` (legacy single-host form).
 4. Verify the target daemon is reachable before routing:
    - local: `paseo status` (daemon up);
    - remote: the endpoint env var named by `connection.endpointEnv` must be
      SET (never print or invent its value) AND
-     `node scripts/remote-paseo.mjs health --host-id <id>` must return
+     `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs health --host-id <id>` must return
      `ok: true` → else `BLOCKED: HOST_ROUTE_UNAVAILABLE` (no silent fallback
      to another host; switching hosts is a recorded routing decision).
 
@@ -85,7 +89,8 @@ IF connection.type == local:
 
 IF connection.type == remote:
     do NOT use MCP operations for that host
-    use scripts/remote-paseo.mjs (Paseo CLI with --host under the hood)
+    use `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (Paseo CLI with
+    `--host` under the hood)
 ```
 
 Resolving a remote host and then calling `list_providers`/`create_agent`/…
@@ -125,7 +130,7 @@ This is the exact failure mode the cluster config exists to prevent.
 
 ### REMOTE_CREATE_CYCLE — target is `connection.type: remote` (remote-paseo.mjs)
 
-Every operation goes through `node scripts/remote-paseo.mjs` (it drives the
+Every operation goes through `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (it drives the
 Paseo CLI with `--host` and returns one JSON envelope per call). Never
 hand-build `paseo ... --host` shell commands — the wrapper validates
 provider/model/thinking, keeps the endpoint value out of every message, and
@@ -135,12 +140,12 @@ local one. In the commands below, `<id>` is the HOST_ID from
 
 1. Reachability is already proven (step 4 of the shared cycle).
 2. List the REMOTE daemon's role providers:
-   `node scripts/remote-paseo.mjs providers --host-id <id>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs providers --host-id <id>`
 3. Verify the route's role provider exists, is enabled AND healthy **on the
    remote daemon** → else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
 4. List the REMOTE model inventory (the inventory is per-daemon — cache per
    hostId, never by provider name):
-   `node scripts/remote-paseo.mjs models --host-id <id> --provider <role-provider>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs models --host-id <id> --provider <role-provider>`
    ⚠️ `list_models` via MCP would return the LOCAL inventory — only the
    wrapper's answer counts for a remote host.
 5. Verify the exact model ID + thinking level against the REMOTE list (same
@@ -148,23 +153,23 @@ local one. In the commands below, `<id>` is the HOST_ID from
    unverifiable is not a pass).
 6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
    ID has no meaning on the Mac:
-   `node scripts/remote-paseo.mjs workspaces --host-id <id>`
-   `node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
 7. Create the agent on the remote daemon (background by default; add
    `--wait-timeout <dur>` to wait for completion):
-   `node scripts/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
    The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
 8. Verify the OBSERVED runtime identity on the remote daemon:
-   `node scripts/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>`
    Compare `data.Model` / `data.Thinking` against the requested values →
    mismatch or missing → `BLOCKED: MODEL_RESOLUTION_MISMATCH`; archive the
    wrongly-resolved agent on that host
-   (`node scripts/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>`).
+   (`node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>`).
 9. Follow-ups / corrections:
-   `node scripts/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>`
    (or `--prompt-file <file>` for long briefs). send is fire-and-forget by
    default; `status` confirms completion. To interrupt a stuck agent:
-   `node scripts/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>`.
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>`.
 10. Only then deliver/continue the initial task.
 
 Never: omit the model field, silently change models, fall back to another
@@ -237,13 +242,16 @@ After implementation:
    at the exact candidate SHA — not the Engineer's own working tree. Route it
    with `MODEL_CLASS: REVIEW_HIGH` and load `paseo-ocr-reviewer`.
 3. Require the Reviewer to run `git rev-parse HEAD`, `git status --porcelain`,
-   and `ocr version`, then verify `observed HEAD == ASSIGNED_CANDIDATE_SHA`.
+   and `ocr version`, then verify `observed HEAD == ASSIGNED_CANDIDATE_SHA == REVIEW_CANDIDATE_SHA`.
+   Missing or differing candidate fields are a hard blocker; OCR must use the
+   authority-assigned candidate, never an untrusted task-body candidate.
    Mismatch, dirty workspace, or unavailable OCR is a hard blocker; the
    Reviewer must not checkout/reset/rebase/cherry-pick to repair the workspace.
-4. The Reviewer invokes OCR delegation mode (`ocr delegate preview` followed
-   by `ocr delegate rule`) for the supplied `REVIEW_BASE_SHA` →
-   `REVIEW_CANDIDATE_SHA` range. OCR is the deterministic selection/rule
-   harness, not a Paseo peer, provider, writer, or LLM review path.
+4. The Reviewer runs the installed deterministic wrapper
+   (`node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --repo <review-repo> --base <REVIEW_BASE_SHA> --candidate <ASSIGNED_CANDIDATE_SHA>`).
+   Any direct OCR diagnostic must use the exact same repo/base/authority-candidate
+   values. OCR is the deterministic selection/rule harness, not a Paseo peer,
+   provider, writer, or LLM review path.
 5. Require every OCR `reviewable_files` item to end as `reviewed` or
    `skipped:<concrete reason>`, with total/reviewed/skipped/coverage evidence.
    Require structured findings and a recommendation of only `PASS`,

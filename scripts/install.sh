@@ -19,6 +19,14 @@ SKILLS_DIR="$PI_HOME/agent/skills"
 SKILL_DIR="$SKILLS_DIR/paseo-team-lead"
 OCR_SKILL_DIR="$SKILLS_DIR/paseo-ocr-reviewer"
 TEAM_SCRIPTS_DIR="$EXT_DIR/paseo-team-scripts"
+TEAM_SUPPORT_FILES=(
+  reliability.mjs
+  watchdog.mjs
+  team-communication.mjs
+  ocr-review.mjs
+  remote-paseo.mjs
+  model-routing.mjs
+)
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
 # Routing configs live here (model-routing.local.json, cluster-routing.local.json);
@@ -33,7 +41,9 @@ rm -rf "$OCR_SKILL_DIR"
 cp -R "$ROLE_PACK_ROOT/skills/paseo-ocr-reviewer" "$OCR_SKILL_DIR"
 rm -rf "$TEAM_SCRIPTS_DIR"
 mkdir -p "$TEAM_SCRIPTS_DIR"
-cp -f "$ROLE_PACK_ROOT/scripts/reliability.mjs" "$ROLE_PACK_ROOT/scripts/watchdog.mjs" "$ROLE_PACK_ROOT/scripts/team-communication.mjs" "$ROLE_PACK_ROOT/scripts/ocr-review.mjs" "$TEAM_SCRIPTS_DIR/"
+for support_file in "${TEAM_SUPPORT_FILES[@]}"; do
+  cp -f "$ROLE_PACK_ROOT/scripts/$support_file" "$TEAM_SCRIPTS_DIR/"
+done
 
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
 # idempotent and merges only the missing agent-browser entry in Pi's MCP config.
@@ -49,6 +59,22 @@ echo "  prompts   -> $PROMPT_DIR"
 echo "  lead skill -> $SKILL_DIR"
 echo "  OCR skill  -> $OCR_SKILL_DIR"
 echo "  support   -> $TEAM_SCRIPTS_DIR"
+export PASEO_TEAM_SCRIPTS_DIR="$TEAM_SCRIPTS_DIR"
+PROFILE_FILE="${PASEO_TEAM_PROFILE_FILE:-$HOME/.profile}"
+touch "$PROFILE_FILE"
+PROFILE_VALUE="$(printf '%q' "$TEAM_SCRIPTS_DIR")"
+PROFILE_TMP="${PROFILE_FILE}.$$"
+awk -v value="$PROFILE_VALUE" '
+  BEGIN { replaced = 0 }
+  /^export PASEO_TEAM_SCRIPTS_DIR=/ {
+    if (!replaced) { print "export PASEO_TEAM_SCRIPTS_DIR=" value; replaced = 1 }
+    next
+  }
+  { print }
+  END { if (!replaced) print "\nexport PASEO_TEAM_SCRIPTS_DIR=" value }
+' "$PROFILE_FILE" > "$PROFILE_TMP"
+mv "$PROFILE_TMP" "$PROFILE_FILE"
+echo "  support env -> PASEO_TEAM_SCRIPTS_DIR=$TEAM_SCRIPTS_DIR (new shells; source $PROFILE_FILE)"
 echo ""
 echo "Next steps:"
 echo "  1. The installer checked/installed agent-browser CLI, Chrome runtime, skill and Pi MCP config."
