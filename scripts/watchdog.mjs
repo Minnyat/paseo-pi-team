@@ -134,7 +134,9 @@ export async function collectWatchdogSnapshot(options = {}) {
   }
 
   const agents = Array.isArray(listed) ? listed : [];
-  const running = agents.filter((agent) => agent?.status === "running").slice(0, options.maxAgents ?? 100);
+  const allRunning = agents.filter((agent) => agent?.status === "running");
+  const maxAgents = Math.max(1, Math.floor(options.maxAgents ?? 100));
+  const running = allRunning.slice(0, maxAgents);
   const inspected = new Array(running.length);
   let cursor = 0;
   async function worker() {
@@ -155,7 +157,7 @@ export async function collectWatchdogSnapshot(options = {}) {
     inspectError: "watchdog global deadline exceeded before inspect completed",
   });
   const classified = classifyStaleAgents(complete, options);
-  const partial = complete.some((agent) => agent.inspectOk !== true);
+  const partial = allRunning.length > running.length || complete.some((agent) => agent.inspectOk !== true);
   return {
     generatedAt: new Date(options.now ?? Date.now()).toISOString(),
     staleAfterMs: Math.max(1000, options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS),

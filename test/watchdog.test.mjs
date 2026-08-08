@@ -45,6 +45,19 @@ assert.equal(DEFAULT_GLOBAL_DEADLINE_MS, 30_000);
   assert.equal(peak, 2, "watchdog inspect concurrency is bounded");
   assert.equal(result.agents.length, 6);
   assert.equal(result.partial, false);
+
+  const capped = await (await import("../scripts/watchdog.mjs")).collectWatchdogSnapshot({
+    maxAgents: 2,
+    globalDeadlineMs: 2_000,
+    commandTimeoutMs: 500,
+    maxAttempts: 1,
+    runPaseoJson: async (args) => args[0] === "ls"
+      ? Array.from({ length: 3 }, (_, index) => ({ id: `agent-${index}`, status: "running" }))
+      : { Status: "running", UpdatedAt: "2026-08-08T11:00:00.000Z", PendingPermissions: [] },
+    now,
+  });
+  assert.equal(capped.agents.length, 2);
+  assert.equal(capped.partial, true, "maxAgents cap is reported as partial");
 }
 
 console.log("watchdog tests passed");
