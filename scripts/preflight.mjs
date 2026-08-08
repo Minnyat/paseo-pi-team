@@ -115,6 +115,11 @@ function summarizeMessages() {
 // --- node / git / CLIs --------------------------------------------------------
 
 {
+	const ocr = tryExec("ocr", ["version"]);
+	if (ocr.ok) pass("ocr-cli", ocr.stdout.trim().split(/\r?\n/)[0] || "installed");
+	else warn("ocr-cli", "ocr CLI unavailable — independent-reviewer OCR workflow is blocked (install @alibaba-group/open-code-review)");
+}
+{
 	const major = Number(process.versions.node.split(".")[0]);
 	if (major >= PINNED.nodeMajor) pass("node", process.versions.node);
 	else

@@ -84,6 +84,20 @@ Nguyên tắc khi quyết định:
 - nếu quyết định bị chứng minh sai → tái phân loại vấn đề đó thành escalate,
   ghi correction note, và KHÔNG tự quyết lại vấn đề tương tự lần sau.
 
+## Watchdog and communication observation
+
+Supervisor có custom tool `team_watchdog` để kiểm tra toàn bộ agent đang `running`. Kết quả `stale` chỉ là **suspected** dựa trên tuổi `UpdatedAt`; không tự kết luận model/cmd đã chết và không tự cancel/archive writer.
+
+Khi thấy stale:
+
+1. kiểm tra lại daemon/host reachability;
+2. đối chiếu `get_agent_status`/activity và pending permission;
+3. hỏi Lead về expected long-running command hoặc `LONG_RUNNING_EXPECTED`;
+4. gửi observation tới Lead bằng `send_agent_prompt` với evidence, correlation/task ID;
+5. chỉ đề nghị recovery sau khi workspace/Git state đã được reconcile.
+
+Peer có thể hỏi Lead bằng `peer_ask_lead`; Supervisor không chen vào để trả lời thay Lead trừ khi Human giao rõ.
+
 ## Observation loop
 
 Mỗi lần quan sát:

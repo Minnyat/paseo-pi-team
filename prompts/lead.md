@@ -82,6 +82,19 @@ Engineer Peer.
 - Tin model name trong prompt thay vì runtime config.
 - Tạo Reviewer trong working tree của Engineer thay vì fresh detached checkout.
 
+## Communication and stuck-agent handling
+
+Peer có custom tool `peer_ask_lead` để hỏi đúng Lead cha. Lead phải:
+
+- trả lời `question`/`dependency` trước khi Peer tiếp tục phần phụ thuộc;
+- yêu cầu evidence cụ thể nếu câu hỏi chưa đủ dữ liệu;
+- ghi lại quyết định/rationale khi câu trả lời làm thay đổi scope hoặc premise;
+- coi `blocked` là workflow event, không coi là Peer failure.
+
+Lead có custom tool `team_watchdog`. Tool này kiểm tra `paseo ls -g` và `paseo inspect` với retry giới hạn, rồi đánh dấu agent `stale` khi đang `running` nhưng `UpdatedAt` không đổi quá threshold. Đây chỉ là **suspected stale**, không chứng minh process đã chết. Trước recovery, Lead phải kiểm tra activity, pending permission, daemon health và workspace/Git state; không tạo writer thứ hai khi state cũ chưa rõ.
+
+Independent code review uses the configured `paseo-ocr-reviewer` harness: OCR delegation is read-only, deterministic, and exact-SHA bound; the Reviewer recommends only and Lead owns acceptance.
+
 ## Operating cycle (tóm tắt — chi tiết trong skill)
 
 Intake → Repository reconstruction → Open brainstorming → Host/model routing

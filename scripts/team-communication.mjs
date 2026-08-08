@@ -1,0 +1,105 @@
+#!/usr/bin/env node
+// Reliable, parent-scoped Peer -> Lead communication.
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { retryWithBackoff } from "./reliability.mjs";
+
+export const MESSAGE_KINDS = Object.freeze(["question", "blocked", "dependency", "progress"]);
+
+export function validatePeerMessage(input) {
+  if (!input || typeof input !== "object") throw new Error("message must be an object");
+  const { kind, message, taskId, correlationId } = input;
+  if (!MESSAGE_KINDS.includes(kind)) throw new Error(`kind must be one of: ${MESSAGE_KINDS.join(", ")}`);
+  if (typeof message !== "string" || message.trim().length === 0) throw new Error("message must be non-empty");
+  if (message.length > 12_000) throw new Error("message exceeds 12000 characters");
+  return {
+    kind,
+    message: message.trim(),
+    taskId: typeof taskId === "string" && taskId.trim() ? taskId.trim() : "unknown",
+    correlationId: typeof correlationId === "string" && correlationId.trim()
+      ? correlationId.trim()
+      : `peer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  };
+}
+
+function resolvePaseoExec() {
+  const override = process.env.PASEO_TEAM_PASEO_EXEC?.trim();
+  if (override) return override.split(/\s+/);
+  if (process.platform !== "win32") return ["paseo"];
+  const pathValue = process.env.PATH ?? "";
+  const pathEntries = pathValue.includes(";") ? pathValue.split(";") : pathValue.split(":");
+  if (process.env.APPDATA) pathEntries.push(join(process.env.APPDATA, "npm"));
+  for (const dir of pathEntries) {
+    for (const name of ["paseo.exe", "paseo.cmd", "paseo.bat"]) {
+      const candidate = join(dir, name);
+      if (!existsSync(candidate)) continue;
+      if (name === "paseo.exe") return [candidate];
+      const entry = join(dirname(candidate), "node_modules", "@getpaseo", "cli", "bin", "paseo");
+      if (existsSync(entry)) return [process.execPath, entry];
+    }
+  }
+  return ["paseo"];
+}
+
+function runPaseo(args, timeoutMs = 20_000) {
+  const [bin, ...prefix] = resolvePaseoExec();
+  try {
+    return { ok: true, data: JSON.parse(execFileSync(bin, [...prefix, ...args, "--json"], {
+      encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], env: process.env, windowsHide: true,
+    })) };
+  } catch (error) {
+    const text = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}\n${error?.message ?? error}`;
+    const wrapped = Object.assign(new Error(text.split("\n")[0]), { code: "CLI_ERROR" });
+    throw wrapped;
+  }
+}
+
+export function parentAgentIdFromInspect(snapshot) {
+  const parent = snapshot?.ParentAgentId ?? snapshot?.parentAgentId ?? snapshot?.labels?.["paseo.parent-agent-id"];
+  return typeof parent === "string" && parent.trim() ? parent.trim() : null;
+}
+
+export async function sendPeerMessage(input, options = {}) {
+  const message = validatePeerMessage(input);
+  const self = process.env.PASEO_AGENT_ID?.trim();
+  if (!self) throw Object.assign(new Error("PASEO_AGENT_ID is missing"), { code: "AGENT_ID_MISSING" });
+  const inspected = await retryWithBackoff(() => runPaseo(["inspect", self]), {
+    maxAttempts: options.maxAttempts ?? 3, baseMs: options.baseMs ?? 250, jitter: 0,
+  });
+  const parent = parentAgentIdFromInspect(inspected.data);
+  if (!parent) throw Object.assign(new Error("Paseo did not expose a parent Lead for this Peer"), { code: "PARENT_LEAD_UNAVAILABLE" });
+  const body = [
+    "PEER_MESSAGE_V1",
+    `KIND: ${message.kind}`,
+    `CORRELATION_ID: ${message.correlationId}`,
+    `TASK_ID: ${message.taskId}`,
+    `FROM_AGENT_ID: ${self}`,
+    "",
+    message.message,
+  ].join("\n");
+  const sent = await retryWithBackoff(() => runPaseo(["send", parent, "--prompt", body, "--no-wait"]), {
+    maxAttempts: options.maxAttempts ?? 3, baseMs: options.baseMs ?? 250, jitter: 0,
+  });
+  return { ok: true, recipient: parent, correlationId: message.correlationId, response: sent.data };
+}
+
+async function main() {
+  const command = process.argv[2];
+  if (command !== "ask-lead") throw new Error("usage: team-communication.mjs ask-lead '<json>'");
+  let input;
+  try {
+    input = JSON.parse(process.argv[3] ?? "{}");
+  } catch (error) {
+    throw new Error(`invalid JSON message: ${String(error?.message ?? error)}`);
+  }
+  console.log(JSON.stringify(await sendPeerMessage(input), null, 2));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(JSON.stringify({ ok: false, code: error.code ?? "PEER_MESSAGE_FAILED", message: error.message }));
+    process.exit(2);
+  });
+}

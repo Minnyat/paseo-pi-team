@@ -54,6 +54,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { classifyRemoteFailure } from "./reliability.mjs";
 import {
 	ROLE_PROVIDERS,
 	THINKING_LEVELS,
@@ -618,12 +619,13 @@ export function resolvePaseoExec() {
  * Run the paseo CLI with a fully-specified argv. No shell on any platform;
  * the secret endpoint value travels inside argv only.
  */
-export function runCli(argv, { timeoutMs = 120000, secret = "" } = {}) {
+export function runCli(argv, { timeoutMs = 120000, secret = "", maxAttempts = 3 } = {}) {
 	const [bin, ...prefix] = resolvePaseoExec();
 	const redact = (text) =>
 		secret
 			? String(text).split(secret).join("<endpoint-value-redacted>")
 			: String(text);
+	for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
 	try {
 		const stdout = execFileSync(bin, [...prefix, ...argv], {
 			encoding: "utf8",
@@ -633,17 +635,24 @@ export function runCli(argv, { timeoutMs = 120000, secret = "" } = {}) {
 			env: process.env,
 			windowsHide: true,
 		});
-		return { ok: true, stdout, status: 0 };
+		return { ok: true, stdout, status: 0, attempts: attempt + 1 };
 	} catch (error) {
-		return {
+		const failure = {
 			ok: false,
 			status: typeof error?.status === "number" ? error.status : 1,
 			stdout: error?.stdout ? redact(error.stdout) : "",
-			error: redact(
-				error?.message ? String(error.message).split("\n")[0] : String(error),
-			),
+			stderr: error?.stderr ? redact(error.stderr) : "",
+			error: redact(error?.message ? String(error.message).split("\n")[0] : String(error)),
 		};
+		const retryable = classifyRemoteFailure(failure) === "retryable";
+		if (!retryable || attempt + 1 >= Math.max(1, maxAttempts)) {
+			return { ...failure, attempts: attempt + 1 };
+		}
+		const delayMs = Math.min(2000, 250 * 2 ** attempt);
+		if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
 	}
+	}
+	return { ok: false, status: 1, stdout: "", error: "retry exhausted", attempts: maxAttempts };
 }
 
 // ---------------------------------------------------------------------------
@@ -851,7 +860,19 @@ function main() {
 		timeoutMs = parsedWait === null ? 0 : parsedWait + 60000;
 	}
 
-	const result = runCli(argv, { secret: hostInfo.endpoint, timeoutMs });
+	const retryableReadCommand = new Set([
+		"health",
+		"providers",
+		"models",
+		"workspaces",
+		"agents",
+		"status",
+	]).has(command);
+	const result = runCli(argv, {
+		secret: hostInfo.endpoint,
+		timeoutMs,
+		maxAttempts: retryableReadCommand ? 3 : 1,
+	});
 	const payload = basePayload(command, hostInfo);
 	if (!result.ok) {
 		payload.ok = false;

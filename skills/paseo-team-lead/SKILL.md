@@ -205,7 +205,9 @@ ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime ide
 
 ## Monitoring
 
-Use `mcp` to call `get_agent_status` and `get_agent_activity`.
+Use `team_watchdog` for a bounded observation pass over running agents. It retries only transient Paseo transport errors and returns `stale` as a suspicion based on `UpdatedAt`, not as proof of process death.
+
+For every stale result, confirm with `get_agent_status`, `get_agent_activity`, pending permissions, daemon/host health and workspace/Git state. A long-running build/test/cmd is valid when the Peer or brief marked it expected; do not cancel or replace it based on timestamp alone.
 
 Do not repeatedly interrupt a healthy worker.
 
@@ -214,7 +216,10 @@ Use `send_agent_prompt` only for:
 - newly discovered constraints;
 - correction findings;
 - dependency resolution;
-- scope clarification.
+- scope clarification;
+- answering a `peer_ask_lead` question/blocker/dependency message.
+
+Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the current Peer’s `paseo.parent-agent-id` and sends a structured `PEER_MESSAGE_V1`. It cannot target an arbitrary agent. Treat `blocked` as a coordination event and reply with a full V3 brief when the reply changes authority.
 
 ## Review
 
@@ -225,16 +230,30 @@ After implementation:
    last format/test run, `CANDIDATE_SHA`, `BRANCH`, `PUSHED_REMOTE`, and
    `WORKTREE_CLEAN: yes`. The required order is: format → test → commit →
    verify `git status --porcelain` empty → push (when granted). A dirty
-   candidate is automatically refused by the independent reviewer (issue #3)
-   and must be corrected in the same Engineer session before review.
+   candidate is automatically refused by the independent reviewer and must be
+   corrected in the same Engineer session before review.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
    `DISPOSITION: independent-reviewer`) in a **fresh workspace** checked out
-   at the exact candidate SHA — not the engineer's own working tree.
-3. Require assigned and observed SHA in its report.
-4. Do not accept review of a different SHA. Do not instruct the reviewer to
-   skip whitespace-only dirty-state checks by default (issue #3).
-5. Return findings to the original Engineer (as a full brief, so write
-   authority is re-granted for the correction turn).
+   at the exact candidate SHA — not the Engineer's own working tree. Route it
+   with `MODEL_CLASS: REVIEW_HIGH` and load `paseo-ocr-reviewer`.
+3. Require the Reviewer to run `git rev-parse HEAD`, `git status --porcelain`,
+   and `ocr version`, then verify `observed HEAD == ASSIGNED_CANDIDATE_SHA`.
+   Mismatch, dirty workspace, or unavailable OCR is a hard blocker; the
+   Reviewer must not checkout/reset/rebase/cherry-pick to repair the workspace.
+4. The Reviewer invokes OCR delegation mode (`ocr delegate preview` followed
+   by `ocr delegate rule`) for the supplied `REVIEW_BASE_SHA` →
+   `REVIEW_CANDIDATE_SHA` range. OCR is the deterministic selection/rule
+   harness, not a Paseo peer, provider, writer, or LLM review path.
+5. Require every OCR `reviewable_files` item to end as `reviewed` or
+   `skipped:<concrete reason>`, with total/reviewed/skipped/coverage evidence.
+   Require structured findings and a recommendation of only `PASS`,
+   `CHANGES_REQUIRED`, or `BLOCKED`; the Reviewer has no acceptance authority.
+6. Lead decides candidate acceptance. If changes are required, return findings
+   to the original Engineer (as a full V3 brief so write authority is re-granted).
+   The Engineer creates a **new** commit SHA without amend/force-push, and the
+   new candidate is reviewed again from a fresh clean workspace.
+7. Preserve the existing one-writer, fresh-reviewer-workspace, exact-SHA, Lead
+   acceptance, and Human merge/deploy invariants.
 
 ## Completion
 

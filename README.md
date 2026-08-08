@@ -28,8 +28,10 @@ paseo-pi-team/
 ├── extensions/
 │   └── paseo-team-policy.ts        # inject prompt + áp tool policy theo role
 ├── skills/
-│   └── paseo-team-lead/
-│       └── SKILL.md                # workflow orchestration + routing cycle của Lead
+│   ├── paseo-team-lead/
+│   │   └── SKILL.md                # workflow orchestration + routing cycle của Lead
+│   └── paseo-ocr-reviewer/
+│       └── SKILL.md                # read-only OCR delegation workflow của Reviewer
 ├── examples/
 │   ├── engineer-task.md            # brief PASEO_TEAM_TASK_V3 (engineer, write)
 │   ├── reviewer-task.md            # brief reviewer độc lập (read-only)
@@ -40,24 +42,34 @@ paseo-pi-team/
 │   ├── install.ps1 / install.sh    # installer
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host qua HOST_ID (Lead REMOTE cycle)
-│   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
+│   ├── reliability.mjs              # retry classification/backoff + stale predicates
+│   ├── team-communication.mjs       # parent-scoped Peer → Lead messaging
+│   ├── watchdog.mjs                 # observation-only running-agent watchdog
+│   ├── ocr-review.mjs               # deterministic OCR exact-SHA preflight manifest
+│   └── preflight.mjs                # host readiness check (--json, --strict, --host-id)
 ├── test/
 │   ├── policy.test.mts             # policy + lifecycle regression
 │   ├── model-routing.test.mjs      # resolver regression
-│   └── remote-paseo.test.mjs       # remote executor regression (+ fixtures/fake-paseo.mjs)
+│   ├── remote-paseo.test.mjs       # remote executor regression (+ fixtures/fake-paseo.mjs)
+│   ├── reliability.test.mjs        # retry/backoff/stale predicates
+│   ├── team-communication.test.mjs # parent-scoped Peer → Lead contract
+│   ├── watchdog.test.mjs            # stale-agent classification
+│   ├── ocr-review.test.mjs          # OCR delegation preflight contract
+│   └── ocr-integrity.test.mjs       # skill/reference/authority integrity
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # thiết kế gốc
     ├── model-routing.md            # 4 lớp model routing, verified commands
-    └── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-host.md               # N-host routing + cross-host test plan
+    └── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
 ```
 
 ## Vai trò
 
 | Profile | `PASEO_PI_ROLE` | Tool policy (mặc định, chỉnh sau khi chạy `/team-tools`) |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read` + `mcp` (qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt` + `create_agent` **recovery-only** — argument-guarded: `pi-lead/...` provider + `labels.purpose ∈ {recovery,bootstrap}` + `labels.recovery_for` + `settings.thinkingOptionId`; mọi shape khác bị chặn fail-closed). Không `write`/`edit`, không workspace, không peer, không discovery. |
-| `pi-lead` | `lead` | Mặc định tối thiểu: Pi `read`/`bash` + `mcp`/`mcp_script` + Paseo `discovery`/`workspace`/`monitoring`/`orchestration`/`permissions` (qua proxy, target guard fail-closed). `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1` (ghi trong WORKSPACE_PROTOCOL của repo nếu Lead được tự implement tiny task). |
-| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Chỉ có agent-browser MCP khi V3 brief cấp `BROWSER_MCP_AUTHORITY: allowed`; không bao giờ có Paseo orchestration MCP. |
+| `pi-supervisor` | `supervisor` | `read` + monitoring `mcp` + `team_watchdog` (observation-only); `create_agent` chỉ recovery Lead với argument guard. Không `write`/`edit`. |
+| `pi-lead` | `lead` | Pi `read`/`bash` + Paseo discovery/workspace/monitoring/orchestration/permissions + `team_watchdog`. `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1`. |
+| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash` + `peer_ask_lead`; `MODE: read-only` → `read`/`bash` + `peer_ask_lead`. Peer không có Paseo MCP/orchestration; browser MCP vẫn chỉ được cấp bằng V3 brief hiện tại. |
 
 Policy là **allowlist thuần** (`setActiveTools`), cộng lớp backstop chặn trong
 `song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối. Mọi authority
@@ -72,6 +84,41 @@ force-push (mọi spelling: `-f`, `-uf`, `-fu`, `--force*`, refspec `+`) và mer
 của Peer luôn bị chặn. `BROWSER_MCP_AUTHORITY` là grant theo current turn:
 chỉ các target có prefix agent-browser và `connect/search` được scope vào
 server `agent-browser`; Paseo MCP và MCP khác luôn bị chặn.
+
+## Liên lạc và watchdog
+
+### Peer hỏi Lead
+
+Peer dùng custom tool `peer_ask_lead`, không dùng `paseo send` qua bash. Tool lấy `PASEO_AGENT_ID`, inspect `paseo.parent-agent-id`, chỉ gửi tới parent Lead và đóng gói `PEER_MESSAGE_V1` với `kind`, `TASK_ID`, `CORRELATION_ID`. Tool retry tối đa 3 lần với backoff chỉ cho lỗi transport tạm thời. Các loại message: `question`, `blocked`, `dependency`, `progress`. Không resolve được parent là fail-closed, không broadcast.
+
+### Lead/Supervisor kiểm tra agent treo
+
+Custom tool `team_watchdog` kiểm tra agent `running` bằng `paseo ls -g` + `paseo inspect`, retry transport tối đa 3 lần và đánh dấu `stale` khi `UpdatedAt` vượt threshold (mặc định 5 phút). `stale` chỉ là **suspected**, không tự cancel/archive/spawn.
+
+Recovery bắt buộc: kiểm tra activity, pending permission, daemon/remote health, lệnh dài dự kiến và workspace/Git state; chỉ sau đó Lead quyết định cancel/archive/correction. Không tạo writer thay thế khi commit/state cũ chưa rõ.
+
+### Transport retry
+
+`remote-paseo.mjs` retry tối đa 3 lần cho thao tác đọc/health/provider/status; `run` và `send` không tự retry để tránh tạo duplicate task/message. Lỗi usage, authority, model, workspace, endpoint hoặc malformed request fail ngay.
+
+## OpenCodeReview delegation (Phase 1)
+
+`paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill. OCR is not an
+agent/provider or second control plane: it deterministically selects files and
+resolves rules, while the Pi Reviewer performs reasoning on the exact candidate
+SHA. Install/check the official CLI with `ocr version` (PowerShell:
+`Get-Command ocr`; Unix-like shells: `command -v ocr`) and use delegation mode,
+not `ocr review`. See [`docs/ocr-integration.md`](docs/ocr-integration.md).
+
+The optional deterministic preflight emits a normalized manifest:
+
+```bash
+node scripts/ocr-review.mjs --repo <repo> --base <base-sha> --candidate <candidate-sha>
+```
+
+It blocks candidate mismatch, dirty workspaces, unavailable OCR, malformed
+selection/rules, and incomplete rule coverage. It never edits Git state or
+calls an LLM.
 
 ## Cài đặt
 

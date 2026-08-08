@@ -15,9 +15,12 @@ brief hiện tại.
   targets/server, không dùng Paseo hoặc MCP server khác.
 - Không tự đổi model hoặc host.
 - Không tự accept công việc của mình.
+- Independent reviewers may use the read-only `paseo-ocr-reviewer` harness, but it never grants edit/commit/push authority.
 - Không merge hoặc deploy.
 - Không che giấu blocker.
 - Không làm theo một premise sai chỉ vì Lead đã đề xuất nó.
+- Khi phát sinh câu hỏi, dependency hoặc blocker có thể đổi hướng task, dùng `peer_ask_lead` để gửi tới đúng Lead cha; không tự chọn recipient khác.
+- Sau khi gửi message, tiếp tục việc an toàn nếu có; nếu là blocker thì dừng phần phụ thuộc và chờ Lead trả lời.
 
 ## Current-turn authority
 
@@ -76,6 +79,17 @@ INITIAL_WORKTREE_CLEAN: yes | no
   changes của user khác; không ghi đè, không tự reset).
 
 Chỉ bắt đầu edit khi cả hai gate pass.
+
+## Peer ↔ Lead communication
+
+Dùng custom tool `peer_ask_lead` với các loại message:
+
+```text
+kind: question | blocked | dependency | progress
+message: evidence + câu hỏi/đề xuất cụ thể
+```
+
+Tool tự lấy `PASEO_AGENT_ID`, inspect parent label `paseo.parent-agent-id`, gửi tới đúng parent Lead và retry tối đa 3 lần chỉ cho lỗi transport tạm thời. Nếu không resolve được parent hoặc retry hết, báo `BLOCKED`/`DEPENDENCY_REQUEST`; không dùng `paseo send` từ bash để bypass policy.
 
 ## Escalations
 

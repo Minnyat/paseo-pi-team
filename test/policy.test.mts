@@ -17,6 +17,7 @@ import {
 	parsePeerMode,
 	parseTaskBrief,
 	peerMcpBlockReason,
+	teamToolBlockReason,
 	peerGitAuthority,
 	policyFor,
 	policyWithAuthority,
@@ -850,7 +851,7 @@ for (const [code, why] of [
 // --- policyFor --------------------------------------------------------------
 
 const peerRO = policyFor("peer", "read-only");
-assert.deepEqual(peerRO.allow, ["read", "bash"]);
+assert.deepEqual(peerRO.allow, ["read", "bash", "peer_ask_lead"]);
 assert.ok(peerRO.deny.includes("write") && peerRO.deny.includes("edit"));
 assert.ok(
 	peerRO.deny.includes("mcp") && peerRO.deny.includes("mcp_script"),
@@ -862,7 +863,7 @@ assert.ok(
 );
 
 const peerW = policyFor("peer", "write");
-assert.deepEqual(peerW.allow, ["read", "write", "edit", "bash"]);
+assert.deepEqual(peerW.allow, ["read", "write", "edit", "bash", "peer_ask_lead"]);
 assert.ok(
 	ALL_PASEO_TOOLS.every((t) => peerW.deny.includes(t)),
 	"peer write still denies all paseo tools",
@@ -871,6 +872,7 @@ assert.ok(
 	peerW.deny.includes("mcp") && peerW.deny.includes("mcp_script"),
 	"peer write still denies the MCP proxy tools",
 );
+assert.ok(!peerW.deny.includes("peer_ask_lead"), "peer communication remains available in write mode");
 
 const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
 delete process.env.PASEO_TEAM_LEAD_WRITE;
@@ -976,6 +978,11 @@ assert.match(
 );
 assert.match(denyReason("peer", "read-only", "mcp"), /MCP proxy/);
 assert.match(denyReason("peer", "write", "mcp_script"), /MCP proxy/);
+assert.match(teamToolBlockReason("lead", "peer_ask_lead", null) ?? "", /restricted/);
+assert.match(teamToolBlockReason("peer", "peer_ask_lead", null) ?? "", /valid current V3/);
+assert.equal(teamToolBlockReason("peer", "peer_ask_lead", parseTaskBrief(v3WriteBrief)), null);
+assert.equal(teamToolBlockReason("supervisor", "team_watchdog", null), null);
+assert.match(teamToolBlockReason("peer", "team_watchdog", parseTaskBrief(v3WriteBrief)) ?? "", /Lead and Supervisor/);
 
 // --- callsPaseoCli ----------------------------------------------------------
 

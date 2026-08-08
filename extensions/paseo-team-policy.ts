@@ -34,6 +34,7 @@ import {
 	isToolCallEventType,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -94,11 +95,75 @@ export const LEAD_ALLOWED_MCP_TARGETS: string[] = [
 	...PASEO_TOOLS.permissions,
 ];
 
-const PI_READ_ONLY = ["read", "bash"];
-const PI_WRITE = ["read", "write", "edit", "bash"];
-
 /** pi-mcp-adapter proxy tools — Paseo tools are reached through the `mcp` tool. */
 const MCP_TOOLS = ["mcp", "mcp_script"];
+const PEER_COMMUNICATION_TOOL = "peer_ask_lead";
+const TEAM_WATCHDOG_TOOL = "team_watchdog";
+const PI_READ_ONLY = ["read", "bash", PEER_COMMUNICATION_TOOL];
+const PI_WRITE = ["read", "write", "edit", "bash", PEER_COMMUNICATION_TOOL];
+
+function supportScriptPath(name: string): string {
+	const configured = process.env.PASEO_TEAM_SCRIPTS_DIR?.trim();
+	const candidates = configured
+		? [join(configured, name)]
+		: [
+				join(dirname(fileURLToPath(import.meta.url)), "paseo-team-scripts", name),
+				join(dirname(fileURLToPath(import.meta.url)), "../scripts", name),
+			];
+		const found = candidates.find((candidate) => existsSync(candidate));
+	if (!found) throw new Error(`Paseo team support script is missing: ${name}`);
+	return found;
+}
+
+function runSupportScript(name: string, args: string[], signal?: AbortSignal): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
+	return new Promise((resolve, reject) => {
+		execFile(
+			process.execPath,
+			[supportScriptPath(name), ...args],
+			{ encoding: "utf8", timeout: 30_000, windowsHide: true, env: process.env, signal },
+			(error, stdout, stderr) => {
+				if (error && !stdout && !stderr) reject(error);
+				else resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), code: error ? 1 : 0, killed: Boolean(error?.killed) });
+			},
+		);
+	});
+}
+
+function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
+	if (typeof pi.registerTool !== "function") return;
+	pi.registerTool({
+		name: PEER_COMMUNICATION_TOOL,
+		label: "peer_ask_lead",
+		description: "Send a question, blocker, dependency request, or progress update to this Peer’s parent Lead only.",
+		parameters: {
+			type: "object",
+			properties: {
+				kind: { type: "string", enum: ["question", "blocked", "dependency", "progress"] },
+				message: { type: "string", minLength: 1, maxLength: 12000 },
+				taskId: { type: "string" },
+				correlationId: { type: "string" },
+			},
+			required: ["kind", "message"],
+			additionalProperties: false,
+		} as any,
+		async execute(_id, params, signal, _onUpdate, _ctx) {
+			if (r !== "peer") return { content: [{ type: "text", text: "peer_ask_lead is available only to Peer agents." }], details: undefined, isError: true };
+			const result = await runSupportScript("team-communication.mjs", ["ask-lead", JSON.stringify(params)], signal);
+			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
+		},
+	});
+	pi.registerTool({
+		name: TEAM_WATCHDOG_TOOL,
+		label: "team_watchdog",
+		description: "Inspect running Paseo agents and report suspected stale agents. Observation only; never cancels or replaces agents.",
+		parameters: { type: "object", properties: { staleAfterMs: { type: "integer", minimum: 1000, maximum: 86400000 }, maxAgents: { type: "integer", minimum: 1, maximum: 200 } }, additionalProperties: false } as any,
+		async execute(_id, params, signal, _onUpdate, _ctx) {
+			if (r !== "lead" && r !== "supervisor") return { content: [{ type: "text", text: "team_watchdog is available only to Lead or Supervisor agents." }], details: undefined, isError: true };
+			const result = await runSupportScript("watchdog.mjs", [JSON.stringify(params ?? {})], signal);
+			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
+		},
+	});
+}
 
 /**
  * agent-browser MCP names are normalized by pi-mcp-adapter. Keep this prefix
@@ -187,7 +252,10 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 		case "lead":
 			return {
 				allow: [
-					...(leadWriteEnabled() ? PI_WRITE : PI_READ_ONLY),
+					...(leadWriteEnabled() ? PI_WRITE : PI_READ_ONLY).filter(
+						(tool) => tool !== PEER_COMMUNICATION_TOOL,
+					),
+					TEAM_WATCHDOG_TOOL,
 					...LEAD_ALLOWED_MCP_TARGETS,
 					...MCP_TOOLS,
 				],
@@ -195,7 +263,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 			};
 		case "supervisor":
 			return {
-				allow: ["read", "mcp", ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
+				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
 				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
@@ -1008,6 +1076,23 @@ function extraTools(): string[] {
 		.filter(Boolean);
 }
 
+export function teamToolBlockReason(
+	role: TeamRole,
+	toolName: string,
+	brief: ParsedTaskBrief | null,
+): string | null {
+	if (toolName === PEER_COMMUNICATION_TOOL) {
+		if (role !== "peer") return "peer_ask_lead is restricted to Peer agents.";
+		if (!brief || brief.version !== 3 || brief.malformed.length > 0) {
+			return "peer_ask_lead requires a valid current V3 task brief.";
+		}
+	}
+	if (toolName === TEAM_WATCHDOG_TOOL && role !== "lead" && role !== "supervisor") {
+		return "team_watchdog is restricted to Lead and Supervisor agents.";
+	}
+	return null;
+}
+
 function currentPolicy(r: TeamRole): Policy {
 	return policyWithAuthority(r, currentPeerMode(), currentBrief);
 }
@@ -1096,6 +1181,7 @@ export default function (pi: ExtensionAPI) {
 		return;
 	}
 	const r: TeamRole = activeRole;
+	registerTeamTools(pi, r);
 
 	console.log(
 		`[paseo-team] role=${r} peerMode=${currentPeerMode()} policy=${describePolicy(currentPolicy(r))}`,
@@ -1139,6 +1225,8 @@ export default function (pi: ExtensionAPI) {
 					"Direct agent-browser MCP tool is denied because BROWSER_MCP_AUTHORITY is not allowed in the current V3 brief.",
 			};
 		}
+		const teamBlockReason = teamToolBlockReason(r, event.toolName, currentBrief);
+		if (teamBlockReason) return { block: true, reason: teamBlockReason };
 		if (policy.deny.includes(event.toolName)) {
 			if (
 				r === "peer" &&
