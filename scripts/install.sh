@@ -37,7 +37,10 @@ cp -f "$ROLE_PACK_ROOT/scripts/reliability.mjs" "$ROLE_PACK_ROOT/scripts/watchdo
 
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
 # idempotent and merges only the missing agent-browser entry in Pi's MCP config.
-node "$ROLE_PACK_ROOT/scripts/browser-setup.mjs" --install --pi-home "$PI_HOME"
+if ! node "$ROLE_PACK_ROOT/scripts/browser-setup.mjs" --install --pi-home "$PI_HOME"; then
+  echo "[paseo-team] agent-browser setup failed" >&2
+  exit 1
+fi
 
 echo ""
 echo "[paseo-team] Installed:"

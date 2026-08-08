@@ -303,9 +303,11 @@ OPEN_QUESTIONS:
 RECOMMENDATION: PASS | CHANGES_REQUIRED | BLOCKED
 
 Derivation:
-- coverage/harness/workspace invariant failure → `BLOCKED`;
+- coverage/harness/workspace invariant failure, skipped files, incomplete rule mapping, or any `STATUS: PARTIAL` → `BLOCKED`;
 - any `BLOCKER` or `REQUIRED` finding → `CHANGES_REQUIRED`;
-- only `SUGGESTION`, `QUESTION`, or `NIT` findings → `PASS`.
+- only `SUGGESTION`, `QUESTION`, or `NIT` findings with `STATUS: COMPLETE` and 100% coverage → `PASS`.
+
+`PARTIAL` is never eligible to derive `PASS`; incomplete evidence is fail-closed.
 
 HANDOFF:
 ```

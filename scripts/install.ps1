@@ -27,6 +27,10 @@ New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.paseo-pi-team" | Ou
 
 Copy-Item (Join-Path $RolePackRoot "extensions\paseo-team-policy.ts") (Join-Path $extDir "paseo-team-policy.ts") -Force
 Copy-Item (Join-Path $RolePackRoot "prompts\*.md") $promptDir -Force
+# Replace skill directories deterministically; Copy-Item -Recurse otherwise
+# merges stale files and can create nested directories on repeated installs.
+if (Test-Path $skillDir) { Remove-Item -Recurse -Force $skillDir }
+if (Test-Path $ocrSkillDir) { Remove-Item -Recurse -Force $ocrSkillDir }
 Copy-Item -Recurse -Force (Join-Path $RolePackRoot "skills\paseo-team-lead") $skillDir
 Copy-Item -Recurse -Force (Join-Path $RolePackRoot "skills\paseo-ocr-reviewer") $ocrSkillDir
 if (Test-Path $teamScriptsDir) { Remove-Item -Recurse -Force $teamScriptsDir }
@@ -35,7 +39,10 @@ Copy-Item (Join-Path $RolePackRoot "scripts\reliability.mjs"), (Join-Path $RoleP
 
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
 # idempotent and merges only the missing agent-browser entry in Pi's MCP config.
-node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") --install --pi-home $PiHome
+& node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") --install --pi-home $PiHome
+if ($LASTEXITCODE -ne 0) {
+  throw "agent-browser setup failed with exit code $LASTEXITCODE"
+}
 
 Write-Host ""
 Write-Host "[paseo-team] Installed:"

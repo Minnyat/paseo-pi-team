@@ -57,4 +57,10 @@ if (argv[0] === "inspect") {
 	process.exit(0);
 }
 
-console.log(JSON.stringify({ argv: shown }));
+if (process.env.FAKE_PASEO_LEAK_ENDPOINT === "1") {
+	const hostIdx = argv.indexOf("--host");
+	const endpoint = hostIdx >= 0 ? argv[hostIdx + 1] : "";
+	console.log(JSON.stringify({ endpoint, argv: shown }));
+} else {
+	console.log(JSON.stringify({ argv: shown }));
+}

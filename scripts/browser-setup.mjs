@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
+	statSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -21,6 +22,9 @@ import { dirname, join, resolve } from "node:path";
 
 export const AGENT_BROWSER_PACKAGE = "agent-browser";
 export const AGENT_BROWSER_MCP_SERVER = "agent-browser";
+const CONFIG_LOCK_RETRIES = 50;
+const CONFIG_LOCK_WAIT_MS = 100;
+const CONFIG_LOCK_STALE_MS = 5 * 60 * 1000;
 
 export function browserMcpConfig() {
 	return {
@@ -149,6 +153,41 @@ function readJson(path) {
 	return value;
 }
 
+function waitSync(milliseconds) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function withConfigLock(configPath, fn) {
+	const lockPath = `${configPath}.lock`;
+	let acquired = false;
+	for (let attempt = 0; attempt < CONFIG_LOCK_RETRIES; attempt++) {
+		try {
+			mkdirSync(lockPath);
+			writeFileSync(join(lockPath, "owner"), `${process.pid}\n`, "utf8");
+			acquired = true;
+			break;
+		} catch (error) {
+			if (error?.code !== "EEXIST") throw error;
+			waitSync(CONFIG_LOCK_WAIT_MS);
+			try {
+				// Only remove a lock we can prove is stale via its mtime. A
+				// directory lock makes the read/merge/write critical section
+				// mutually exclusive across installer processes.
+				const lockStat = statSync(lockPath);
+				if (Date.now() - lockStat.mtimeMs > CONFIG_LOCK_STALE_MS) rmSync(lockPath, { recursive: true, force: true });
+			} catch {
+				// It was removed by the owner; retry acquisition.
+			}
+		}
+	}
+	if (!acquired) throw new Error(`timed out waiting for MCP config lock: ${lockPath}`);
+	try {
+		return fn();
+	} finally {
+		rmSync(lockPath, { recursive: true, force: true });
+	}
+}
+
 function writeJsonAtomic(path, value) {
 	mkdirSync(dirname(path), { recursive: true });
 	const temp = `${path}.${process.pid}.tmp`;
@@ -273,6 +312,9 @@ export function installAgentBrowser({
 		);
 	}
 	const targetSkillFile = join(resolvedSkill, "SKILL.md");
+	// Replace, rather than merge, so removed files from a newer CLI cannot be
+	// masked by stale files left by an older installation.
+	rmSync(resolvedSkill, { recursive: true, force: true });
 	mkdirSync(resolvedSkill, { recursive: true });
 	cpSync(skillSource, resolvedSkill, { recursive: true, force: true });
 	if (!skillIsInstalled(targetSkillFile))
@@ -289,12 +331,15 @@ export function installAgentBrowser({
 	if (existingConfig) {
 		actions.push(`MCP server ${AGENT_BROWSER_MCP_SERVER} already configured`);
 	} else {
-		const before = readJson(resolvedConfig);
-		const after = mergeAgentBrowserMcpConfig(before);
-		if (after !== before) {
-			writeJsonAtomic(resolvedConfig, after);
-			actions.push(`added MCP server ${AGENT_BROWSER_MCP_SERVER}`);
-		}
+		mkdirSync(dirname(resolvedConfig), { recursive: true });
+		withConfigLock(resolvedConfig, () => {
+			const before = readJson(resolvedConfig);
+			const after = mergeAgentBrowserMcpConfig(before);
+			if (after !== before) {
+				writeJsonAtomic(resolvedConfig, after);
+				actions.push(`added MCP server ${AGENT_BROWSER_MCP_SERVER}`);
+			}
+		});
 	}
 
 	return {

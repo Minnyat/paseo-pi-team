@@ -52,7 +52,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { classifyRemoteFailure } from "./reliability.mjs";
 import {
@@ -562,7 +562,7 @@ function findOnPath(name) {
 }
 
 /** Parse the npm .cmd shim for the real `node ... entry.js` invocation. */
-function resolveCmdEntry(shimPath) {
+export function resolveCmdEntry(shimPath) {
 	let text;
 	try {
 		text = readFileSync(shimPath, "utf8");
@@ -570,9 +570,11 @@ function resolveCmdEntry(shimPath) {
 		return undefined;
 	}
 	// npm shims end with: "%_prog%" "%dp0%\node_modules\@scope\pkg\dist\index.js" %*
-	const match = text.match(/"([^"]*%dp0%[^"]*\.js)"/);
+	const match = text.match(/"([^"]*(?:%~dp0|%dp0%)[^"]*\.js)"/i);
 	if (match?.[1]) {
-		const entry = match[1].replace(/%dp0%/gi, dirname(shimPath));
+		const entry = match[1]
+			.replace(/%~dp0|%dp0%/gi, dirname(shimPath))
+			.replace(/[\\/]/g, sep);
 		if (existsSync(entry)) return entry;
 	}
 	// Last resort: the conventional layout next to the shim.
@@ -635,7 +637,7 @@ export function runCli(argv, { timeoutMs = 120000, secret = "", maxAttempts = 3 
 			env: process.env,
 			windowsHide: true,
 		});
-		return { ok: true, stdout, status: 0, attempts: attempt + 1 };
+		return { ok: true, stdout: redact(stdout), status: 0, attempts: attempt + 1 };
 	} catch (error) {
 		const failure = {
 			ok: false,
@@ -659,9 +661,14 @@ export function runCli(argv, { timeoutMs = 120000, secret = "", maxAttempts = 3 
 // Output envelope
 // ---------------------------------------------------------------------------
 
+class EmitExit extends Error {}
+
 function emit(payload, exitCode) {
-	console.log(JSON.stringify(payload, null, 2));
-	process.exit(exitCode);
+	// stdout may contain a large JSON response. Setting exitCode lets Node drain
+	// the stream instead of terminating synchronously via process.exit().
+	process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+	process.exitCode = exitCode;
+	throw new EmitExit();
 }
 
 const COMMANDS = new Set([
@@ -751,7 +758,8 @@ function main() {
 	}
 	if (parsed.help) {
 		console.log(HELP);
-		process.exit(0);
+		process.exitCode = 0;
+		return;
 	}
 	const command = parsed._[0];
 	if (!command || !COMMANDS.has(command)) {
@@ -851,13 +859,16 @@ function main() {
 	}
 
 	// run --wait-timeout can legitimately exceed the default 120s subprocess
-	// timeout: scale the child timeout to the requested duration (+60s
-	// buffer). Unparseable durations are left to paseo to reject — the child
-	// runs with no timeout in that case so paseo's own validation is the arbiter.
+	// timeout: scale the child timeout to the requested duration (+60s buffer).
+	// An invalid duration is a wrapper usage error; it must never disable the
+	// subprocess timeout by becoming `0`.
 	let timeoutMs = 120000;
 	if (command === "run" && typeof parsed.waitTimeout === "string") {
 		const parsedWait = parseDurationMs(parsed.waitTimeout);
-		timeoutMs = parsedWait === null ? 0 : parsedWait + 60000;
+		if (parsedWait === null || !Number.isFinite(parsedWait) || parsedWait <= 0) {
+			emit({ ok: false, code: "USAGE", message: `--wait-timeout must be a positive duration (got "${parsed.waitTimeout}")` }, 1);
+		}
+		timeoutMs = parsedWait + 60000;
 	}
 
 	const retryableReadCommand = new Set([
@@ -905,5 +916,9 @@ function main() {
 }
 
 if (isMain()) {
-	main();
+	try {
+		main();
+	} catch (error) {
+		if (!(error instanceof EmitExit)) throw error;
+	}
 }

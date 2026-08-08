@@ -10,6 +10,7 @@ const leadSkill = read("skills/paseo-team-lead/SKILL.md");
 const leadPrompt = read("prompts/lead.md");
 const peerPrompt = read("prompts/peer.md");
 const brief = read("examples/reviewer-task.md");
+const installPs1 = read("scripts/install.ps1");
 
 assert.match(ocrSkill, /name: paseo-ocr-reviewer/);
 assert.match(leadSkill, /load `paseo-ocr-reviewer`/);
@@ -23,6 +24,8 @@ assert.match(ocrSkill, /COVERAGE_RATE/);
 assert.match(ocrSkill, /ocr delegate preview/);
 assert.match(ocrSkill, /ocr delegate rule/);
 assert.match(ocrSkill, /RECOMMENDATION: PASS \| CHANGES_REQUIRED \| BLOCKED/);
+assert.match(ocrSkill, /STATUS: PARTIAL.*BLOCKED/s);
+assert.match(ocrSkill, /`PARTIAL` is never eligible to derive `PASS`/);
 assert.match(ocrSkill, /DISPOSITION: BLOCKER \| REQUIRED \| SUGGESTION \| QUESTION \| NIT/);
 assert.match(ocrSkill, /DISCOVERED:/);
 assert.match(ocrSkill, /EXCLUDED_FILES:/);
@@ -30,6 +33,8 @@ assert.match(ocrSkill, /REVIEW_WORKSPACE_CHANGED_DURING_REVIEW/);
 assert.match(ocrSkill, /OCR_VERSION_UNSUPPORTED/);
 assert.match(ocrSkill, /MANIFEST_DIGEST:/);
 assert.doesNotMatch(ocrSkill, /apply critical fixes|fix automatically|review and fix/i);
+assert.match(installPs1, /Remove-Item -Recurse -Force \$ocrSkillDir/);
+assert.match(installPs1, /\$LASTEXITCODE -ne 0/);
 assert.match(ocrSkill, /MUST NOT:[\s\S]*edit product code[\s\S]*commit[\s\S]*push[\s\S]*merge[\s\S]*deploy/);
 
 // OCR metadata stays outside the V3 authority marker block.

@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,10 +14,12 @@ import {
 	parseArgs,
 	parseDurationMs,
 	readPrompt,
+	resolveCmdEntry,
 	resolveHost,
 	splitAgentRef,
 	validateFlags,
 	validateRunProvider,
+	runCli,
 	validateThinking,
 } from "../scripts/remote-paseo.mjs";
 import { loadClusterConfig } from "../scripts/model-routing.mjs";
@@ -31,6 +33,17 @@ const WRAPPER = join(ROOT, "scripts", "remote-paseo.mjs");
 const FAKE = join(ROOT, "test", "fixtures", "fake-paseo.mjs");
 
 const ENDPOINT = "https://app.paseo.sh/#offer=testtoken123";
+
+// npm-generated Windows shims use `%~dp0`, not only the legacy `%dp0%` form.
+{
+	const shimDir = mkdtempSync(join(tmpdir(), "paseo-cmd-shim-"));
+	const entry = join(shimDir, "node_modules", "@getpaseo", "cli", "dist", "index.js");
+	mkdirSync(join(shimDir, "node_modules", "@getpaseo", "cli", "dist"), { recursive: true });
+	writeFileSync(entry, "// fixture\n");
+	const shim = join(shimDir, "paseo.cmd");
+	writeFileSync(shim, `@IF EXIST "%~dp0\\node_modules\\@getpaseo\\cli\\dist\\index.js" (\n  "%~dp0\\node_modules\\@getpaseo\\cli\\dist\\index.js" %*\n)\n`);
+	assert.equal(resolveCmdEntry(shim), process.platform === "win32" ? entry.replaceAll("/", "\\") : entry);
+}
 
 const CLUSTER = {
 	version: 1,
@@ -791,6 +804,22 @@ const EP = "https://app.paseo.sh/#offer=tok";
 }
 
 {
+	const t = "successful CLI output is redacted at the wrapper boundary";
+	const home = makeHome();
+	const previous = process.env.FAKE_PASEO_LEAK_ENDPOINT;
+	process.env.FAKE_PASEO_LEAK_ENDPOINT = "1";
+	try {
+		const r = runWrapper(["providers", "--host-id", "mac-review"], { home, extraEnv: { FAKE_PASEO_LEAK_ENDPOINT: "1" } });
+		assert.equal(r.code, 0, t);
+		assert.ok(!r.stdout.includes(ENDPOINT), t);
+		assert.ok(r.stdout.includes("<endpoint-value-redacted>"), t);
+	} finally {
+		if (previous === undefined) delete process.env.FAKE_PASEO_LEAK_ENDPOINT;
+		else process.env.FAKE_PASEO_LEAK_ENDPOINT = previous;
+	}
+}
+
+{
 	const t = "e2e: dry-run redacts endpoint and never executes";
 	const r = runWrapper(["providers", "--host-id", "mac-review", "--dry-run"]);
 	assert.equal(r.code, 0, t);
@@ -817,6 +846,18 @@ const EP = "https://app.paseo.sh/#offer=tok";
 		"--prompt",
 		"x",
 	]);
+	assert.equal(r.code, 1, t);
+	assert.equal(r.json.code, "USAGE", t);
+}
+
+{
+	const t = "invalid wait timeout is rejected before the CLI and never becomes unbounded";
+	const home = makeHome();
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1", "--prompt", "x",
+		"--wait-timeout", "not-a-duration",
+	], { home });
 	assert.equal(r.code, 1, t);
 	assert.equal(r.json.code, "USAGE", t);
 }

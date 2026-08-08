@@ -25,8 +25,8 @@ if (args.includes("preview")) {
   console.log(JSON.stringify({
     schema_version: "1",
     mode: "range",
-    from: "base",
-    to: "candidate",
+    from: process.env.OCR_FIXTURE_FROM ?? "base",
+    to: process.env.OCR_FIXTURE_TO ?? "candidate",
     merge_base: process.env.OCR_FIXTURE_MERGE_BASE ?? "0000000000000000000000000000000000000000",
     total_files: zero ? 0 : 1,
     reviewable_count: zero ? 0 : 1,
@@ -43,7 +43,7 @@ if (args.includes("rule")) {
   }
   console.log(JSON.stringify({
     schema_version: "1",
-    groups: [{ group_id: 1, source: "default", pattern: "*.js", files: [file], rule: "Check correctness and regressions." }],
+    groups: [{ group_id: 1, source: "default", pattern: "*.js", files: [file, ...(process.env.OCR_FIXTURE_EXTRA_RULE_FILE ? [process.env.OCR_FIXTURE_EXTRA_RULE_FILE] : [])], rule: "Check correctness and regressions." }],
   }));
   process.exit(0);
 }

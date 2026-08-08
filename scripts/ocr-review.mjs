@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const OCR_SUPPORTED_VERSION = "1.8.10";
@@ -81,9 +81,11 @@ function resolveNpmShim(shimPath) {
   } catch {
     return undefined;
   }
-  const match = text.match(/"([^\"]*%dp0%[^\"]*\.js)"/i);
+  const match = text.match(/"([^\"]*(?:%~dp0|%dp0%)[^\"]*\.js)"/i);
   if (!match?.[1]) return undefined;
-  const entry = match[1].replace(/%dp0%/gi, dirname(shimPath));
+  const entry = match[1]
+    .replace(/%~dp0|%dp0%/gi, dirname(shimPath))
+    .replace(/[\\/]/g, sep);
   return existsSync(entry) ? entry : undefined;
 }
 
@@ -144,7 +146,8 @@ function parseStructuredOutput(result, commandCode, invalidCode, label, normaliz
     try {
       return normalizeText(result.stdout);
     } catch (error) {
-      fail("OCR_OUTPUT_SCHEMA_UNSUPPORTED", `${label} returned unsupported output`, { parseError: String(error?.message ?? error) });
+      if (error instanceof OcrReviewError) throw error;
+      fail(invalidCode, `${label} returned malformed output`, { parseError: String(error?.message ?? error) });
     }
   }
 }
@@ -198,13 +201,27 @@ export function parsePreviewText(text) {
   const to = lines.find((line) => line.trim().startsWith("- to:"))?.split(":").slice(1).join(":").trim();
   const mergeBase = lines.find((line) => line.trim().startsWith("- merge_base:"))?.split(":").slice(1).join(":").trim();
   if (!mode) fail("PREVIEW_INVALID", "preview text did not contain mode");
+  const declared = lines.join("\n").match(/^# Files \((\d+) reviewable \/ (\d+) total\)$/m);
   const entries = [];
   for (const line of lines) {
     const match = line.match(/^\s*(?:~~)?- `([^`]+)` \[([^\]]+)\] \+(\d+)\/-([0-9]+)(?: \(excluded: ([^)]+)\))?(?:~~)?\s*$/);
-    if (!match) continue;
-    entries.push({ path: match[1], status: match[2], insertions: Number(match[3]), deletions: Number(match[4]), ...(match[5] ? { exclude_reason: match[5] } : {}) });
+    if (match) {
+      entries.push({ path: match[1], status: match[2], insertions: Number(match[3]), deletions: Number(match[4]), ...(match[5] ? { exclude_reason: match[5] } : {}) });
+      continue;
+    }
+    // File entries are indented bullets in the supported Markdown format.
+    // An indented bullet that cannot be parsed is malformed output, not an
+    // empty selection. Fail closed before downstream rule resolution.
+    if (/^\s{2,}(?:~~)?-\s+/.test(line)) {
+      fail("PREVIEW_INVALID", "preview contained a malformed file entry", { line: line.trim().slice(0, 300) });
+    }
   }
-  return { schema_version: "1", mode, ...(from ? { from } : {}), ...(to ? { to } : {}), ...(mergeBase ? { merge_base: mergeBase } : {}), reviewable_files: entries.filter((entry) => !entry.exclude_reason), excluded_files: entries.filter((entry) => Boolean(entry.exclude_reason)) };
+  const reviewableFiles = entries.filter((entry) => !entry.exclude_reason);
+  const excludedFiles = entries.filter((entry) => Boolean(entry.exclude_reason));
+  if (declared && (Number(declared[1]) !== reviewableFiles.length || Number(declared[2]) !== entries.length)) {
+    fail("PREVIEW_INVALID", "preview file counts do not match parsed entries", { declaredReviewable: Number(declared[1]), declaredTotal: Number(declared[2]), parsedReviewable: reviewableFiles.length, parsedTotal: entries.length });
+  }
+  return { schema_version: "1", mode, ...(from ? { from } : {}), ...(to ? { to } : {}), ...(mergeBase ? { merge_base: mergeBase } : {}), reviewable_files: reviewableFiles, excluded_files: excludedFiles };
 }
 
 export function normalizePreview(raw) {
@@ -230,6 +247,18 @@ export function normalizePreview(raw) {
       ...(typeof entry.exclude_reason === "string" && entry.exclude_reason ? { exclude_reason: entry.exclude_reason } : {}),
     };
   });
+  const declaredReviewable = raw.reviewable_count ?? raw.reviewable_files_count;
+  const declaredExcluded = raw.excluded_count ?? raw.excluded_files_count;
+  const declaredTotal = raw.total_files;
+  for (const [field, value] of [["reviewable_count", declaredReviewable], ["excluded_count", declaredExcluded], ["total_files", declaredTotal]]) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 0)) fail("PREVIEW_INVALID", `${field} must be a non-negative integer`);
+  }
+  if (declaredReviewable !== undefined && declaredReviewable !== reviewable.length) fail("PREVIEW_INVALID", "preview reviewable count does not match files", { declared: declaredReviewable, observed: reviewable.length });
+  if (declaredExcluded !== undefined && declaredExcluded !== excluded.length) fail("PREVIEW_INVALID", "preview excluded count does not match files", { declared: declaredExcluded, observed: excluded.length });
+  if (declaredTotal !== undefined && declaredTotal !== reviewable.length + excluded.length) fail("PREVIEW_INVALID", "preview total count does not match files", { declared: declaredTotal, observed: reviewable.length + excluded.length });
+  if (reviewable.length === 0 && excluded.length === 0 && declaredReviewable === undefined && declaredExcluded === undefined && declaredTotal === undefined) {
+    fail("PREVIEW_INVALID", "empty preview must include declared file counts");
+  }
   return {
     mode,
     ...(typeof raw.from === "string" ? { from: raw.from } : {}),
@@ -295,7 +324,8 @@ function validateRuleCoverage(reviewableFiles, groups) {
   const selected = new Set(reviewableFiles.map((entry) => entry.path));
   const mapped = new Set(groups.flatMap((group) => group.files));
   const missing = [...selected].filter((path) => !mapped.has(path));
-  if (missing.length > 0) fail("RULES_INVALID", "rule output omitted reviewable files", { missing });
+  const unrelated = [...mapped].filter((path) => !selected.has(path));
+  if (missing.length > 0 || unrelated.length > 0) fail("RULES_INVALID", "rule output does not exactly match reviewable files", { missing, unrelated });
 }
 
 function readGitState(repo, candidate) {
@@ -351,6 +381,7 @@ function main(options) {
     return { schema: "paseo.ocr-review-verification/v1", candidate_sha: verified.head, candidate_tree_sha: verified.tree, clean: verified.clean };
   }
   git(options.repo, ["rev-parse", "--verify", `${options.base}^{commit}`], "GIT_REF_INVALID", `review base is not a valid commit: ${options.base}`);
+  const actualMergeBase = git(options.repo, ["merge-base", options.base, options.candidate], "GIT_REF_INVALID", "could not calculate Git merge-base");
 
   const ocr = resolveOcrExec();
   const versionResult = runCommand(["version"], { cwd: options.repo, executable: ocr, timeoutMs: 30_000 });
@@ -367,7 +398,10 @@ function main(options) {
   const previewResult = runCommand(["delegate", "preview", "--repo", options.repo, "--from", options.base, "--to", options.candidate], { cwd: options.repo, executable: ocr, timeoutMs: 120_000 });
   const preview = normalizePreview(parseStructuredOutput(previewResult, "PREVIEW_FAILED", "PREVIEW_INVALID", "OCR preview", parsePreviewText));
   if (preview.mode !== "range") fail("PREVIEW_INVALID", `expected range preview, got ${preview.mode}`);
+  if (preview.from !== options.base) fail("PREVIEW_INVALID", "preview.from does not equal requested base", { expected: options.base, observed: preview.from });
+  if (preview.to !== options.candidate) fail("PREVIEW_INVALID", "preview.to does not equal requested candidate", { expected: options.candidate, observed: preview.to });
   if (!preview.merge_base || !/^[0-9a-f]{40}$/i.test(preview.merge_base)) fail("PREVIEW_INVALID", "range preview did not provide a full merge_base SHA");
+  if (preview.merge_base !== actualMergeBase) fail("PREVIEW_INVALID", "preview.merge_base does not equal Git merge-base", { expected: actualMergeBase, observed: preview.merge_base });
 
   let ruleGroups = [];
   if (preview.reviewable_files.length > 0) {

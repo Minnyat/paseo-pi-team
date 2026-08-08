@@ -56,6 +56,8 @@ function runWrapper(repo, base, candidate, extraEnv = {}) {
     PASEO_TEAM_OCR_EXEC: `"${NODE}" "${FAKE_OCR}"`,
     OCR_FIXTURE_FILE: "src/reviewed.js",
     OCR_FIXTURE_MERGE_BASE: base,
+    OCR_FIXTURE_FROM: base,
+    OCR_FIXTURE_TO: candidate,
     ...extraEnv,
   };
   const result = spawnSync(
@@ -92,6 +94,10 @@ assert.deepEqual(normalizePreview({
 assert.throws(
   () => normalizePreview({ mode: "range", reviewable_files: [] }),
   (error) => error.code === "PREVIEW_INVALID" && error.message.includes("schema_version"),
+);
+assert.throws(
+  () => parsePreviewText("# Files (1 reviewable / 1 total)\n- mode: range\n- from: base\n- to: candidate\n- merge_base: " + "a".repeat(40) + "\n  - malformed file entry"),
+  (error) => error.code === "PREVIEW_INVALID" && error.message.includes("file entry"),
 );
 assert.throws(
   () => normalizeRules({ schema_version: "1", groups: [{ group_id: 1, files: ["src/a.js"] }] }),
@@ -254,7 +260,27 @@ for (const mode of ["preview-malformed", "rules-malformed"]) {
   const { repo, base, candidate } = makeRepo();
   const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: mode });
   assert.equal(result.status, 2, mode);
-  assert.equal(result.json.code, mode === "preview-malformed" ? "OCR_OUTPUT_SCHEMA_UNSUPPORTED" : "RULES_INVALID");
+  assert.equal(result.json.code, mode === "preview-malformed" ? "PREVIEW_INVALID" : "RULES_INVALID");
+}
+
+// Range binding is exact and merge_base must be Git's actual merge base.
+for (const [env, expectedCode] of [
+  [{ OCR_FIXTURE_FROM: "0" }, "PREVIEW_INVALID"],
+  [{ OCR_FIXTURE_TO: "0" }, "PREVIEW_INVALID"],
+  [{ OCR_FIXTURE_MERGE_BASE: "0".repeat(40) }, "PREVIEW_INVALID"],
+]) {
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, env);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, expectedCode);
+}
+
+// Rule output may not introduce unrelated repository files.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_EXTRA_RULE_FILE: "README.md" });
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "RULES_INVALID");
 }
 
 console.log("ocr-review tests passed");
