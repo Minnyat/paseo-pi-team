@@ -12,6 +12,7 @@ const peerPrompt = read("prompts/peer.md");
 const brief = read("examples/reviewer-task.md");
 const installPs1 = read("scripts/install.ps1");
 const installSh = read("scripts/install.sh");
+const ocrSetup = read("scripts/ocr-setup.mjs");
 
 assert.match(ocrSkill, /name: paseo-ocr-reviewer/);
 assert.match(leadSkill, /load `paseo-ocr-reviewer`/);
@@ -40,9 +41,14 @@ assert.match(installPs1, /\$LASTEXITCODE -ne 0/);
 assert.match(installPs1, /remote-paseo\.mjs/);
 assert.match(installPs1, /model-routing\.mjs/);
 assert.match(installPs1, /PASEO_TEAM_SCRIPTS_DIR/);
+assert.match(installPs1, /ocr-setup\.mjs/);
 assert.match(installSh, /remote-paseo\.mjs/);
 assert.match(installSh, /model-routing\.mjs/);
 assert.match(installSh, /PASEO_TEAM_SCRIPTS_DIR/);
+assert.match(installSh, /ocr-setup\.mjs/);
+assert.match(ocrSetup, /@alibaba-group\/open-code-review/);
+assert.match(ocrSetup, /1\.8\.10/);
+assert.match(ocrSetup, /OCR_INSTALL_FAILED/);
 assert.match(ocrSkill, /MUST NOT:[\s\S]*edit product code[\s\S]*commit[\s\S]*push[\s\S]*merge[\s\S]*deploy/);
 
 // OCR metadata stays outside the V3 authority marker block.

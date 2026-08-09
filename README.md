@@ -104,10 +104,13 @@ Recovery bắt buộc: kiểm tra activity, pending permission, daemon/remote he
 
 ## OpenCodeReview delegation (Phase 1)
 
-`paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill. OCR is not an
+`paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill. The
+installer automatically installs and verifies the pinned OCR CLI
+`@alibaba-group/open-code-review@1.8.10`; OCR is not an
 agent/provider or second control plane: it deterministically selects files and
 resolves rules, while the Pi Reviewer performs reasoning on the exact candidate
-SHA. Install/check the official CLI with `ocr version` (PowerShell:
+SHA. The installer runs `scripts/ocr-setup.mjs` to install/verify the pinned CLI;
+check it manually with `ocr version` (PowerShell:
 `Get-Command ocr`; Unix-like shells: `command -v ocr`) and use delegation mode,
 not `ocr review`. See [`docs/ocr-integration.md`](docs/ocr-integration.md).
 
@@ -145,7 +148,8 @@ Script copy:
 
 Installer tự kiểm tra `agent-browser --version`, `agent-browser doctor --offline --quick`,
 bundled skill (`agent-browser skills path agent-browser`) và các MCP config chuẩn.
-Nếu thiếu, nó cài `npm install -g agent-browser`, chạy `agent-browser install`
+Nếu thiếu, installer sẽ cài OCR `@alibaba-group/open-code-review@1.8.10`,
+`npm install -g agent-browser`, chạy `agent-browser install`
 (`--with-deps` trên Linux), copy skill, rồi merge entry `agent-browser` vào
 `~/.pi/agent/mcp.json` mà không ghi đè server khác. Chạy lại installer là an toàn.
 

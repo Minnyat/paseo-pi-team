@@ -49,6 +49,10 @@ foreach ($supportFile in $teamSupportFiles) {
 
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
 # idempotent and merges only the missing agent-browser entry in Pi's MCP config.
+& node (Join-Path $RolePackRoot "scripts\ocr-setup.mjs")
+if ($LASTEXITCODE -ne 0) {
+  throw "OCR setup failed with exit code $LASTEXITCODE"
+}
 & node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") --install --pi-home $PiHome
 if ($LASTEXITCODE -ne 0) {
   throw "agent-browser setup failed with exit code $LASTEXITCODE"
@@ -65,9 +69,8 @@ Write-Host "  support   -> $teamScriptsDir"
 Write-Host "  support env -> PASEO_TEAM_SCRIPTS_DIR=$teamScriptsDir (new processes)"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. The installer checked/installed agent-browser CLI, Chrome runtime, skill and Pi MCP config."
-Write-Host "  2. Check OCR first: Get-Command ocr; ocr version"
-Write-Host "     If missing, install the tested delegation CLI: npm install -g @alibaba-group/open-code-review@1.8.10"
+Write-Host "  1. The installer checked/installed OCR v1.8.10, agent-browser CLI, Chrome runtime, skill and Pi MCP config."
+Write-Host "  2. Verify OCR if needed: Get-Command ocr; ocr version"
 Write-Host "  3. Install the MCP adapter (PINNED version - Paseo tools depend on it):"
 Write-Host "     pi install npm:pi-mcp-adapter@2.19.0"
 Write-Host "  4. Merge config/paseo.providers.example.json into ~/.paseo/config.json"

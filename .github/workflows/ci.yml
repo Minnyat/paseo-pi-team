@@ -50,6 +50,7 @@ jobs:
           node test/team-communication.test.mjs
           node test/browser-setup.test.mjs
           node test/installer-contract.test.mjs
+          node test/ocr-setup.test.mjs
           node test/ocr-review.test.mjs
           node test/ocr-integrity.test.mjs
           node test/paseo-contract.test.mjs
@@ -64,6 +65,7 @@ jobs:
           node --check scripts/team-communication.mjs
           node --check scripts/browser-setup.mjs
           node --check scripts/ocr-review.mjs
+          node --check scripts/ocr-setup.mjs
           node --check test/fixtures/fake-paseo.mjs
           node --check test/fixtures/fake-ocr.mjs
 

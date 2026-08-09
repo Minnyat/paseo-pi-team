@@ -8,6 +8,11 @@ an OCR agent/provider.
 
 ## Prerequisites
 
+The role-pack installers automatically install and verify the pinned OCR CLI
+`@alibaba-group/open-code-review@1.8.10`. If you are not using an installer,
+install it manually with the command in the next section. The wrapper still
+fails closed on missing or unsupported versions.
+
 - Git `>= 2.41` (current upstream requirement);
 - Node.js/npm when installing the npm distribution;
 - Pi and Paseo configured for this role pack;
@@ -32,7 +37,7 @@ Windows PowerShell: ocr version
 Unix-like shell:    ocr version
 ```
 
-If it is unavailable, use the official npm distribution:
+If it is unavailable and you are not running the role-pack installer, use the official npm distribution:
 
 ```bash
 npm install -g @alibaba-group/open-code-review@1.8.10
