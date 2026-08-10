@@ -116,9 +116,11 @@ UNRESOLVED_RISKS:
   - U1 cơ chế Lead-spawn-remote-agent hiện là `paseo --host` qua bash của
     Lead; chưa live-test 2 host (multi-Lead mặc định cho quan hệ lâu dài).
   - U3 Paseo Hub federation chưa khảo sát — không chặn kiến trúc hiện tại.
-  - runtimeInfo của provider tương lai không fill → verifyObserved
-    fail-closed sang MODEL_RESOLUTION_MISMATCH (đúng hướng, nhưng có thể
-    nhiễu nếu Paseo đổi snapshot).
+  - runtimeInfo của provider tương lai không fill → orchestration layer phải
+    bounded-poll trước; hết startup deadline trả
+    STARTUP_IDENTITY_UNAVAILABLE và không archive. Sau khi identity xuất hiện,
+    verifyObserved vẫn fail-closed sang MODEL_RESOLUTION_MISMATCH nếu lệch hoặc
+    không thể xác minh.
   - Bash guards là heuristic (ghi rõ trong code), không phải sandbox.
 
 MIGRATION_STEPS:

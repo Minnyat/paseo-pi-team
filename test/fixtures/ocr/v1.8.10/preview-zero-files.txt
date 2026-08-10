@@ -1,0 +1,10 @@
+# Files (0 reviewable / 1 total)
+
+- mode: range
+- from: 26e280b7ce9eb87db77d5f29545f7c304bbca592
+- to: 9e94ff6e69d81005718329a75cadfc58a3c78ab2
+- merge_base: 26e280b7ce9eb87db77d5f29545f7c304bbca592
+- total_insertions: 1
+- total_deletions: 1
+
+~~- `data.txt` [modified] +1/-1 (excluded: unsupported_ext)~~

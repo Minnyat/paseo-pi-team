@@ -41,7 +41,8 @@ trần.
 1. **Filter hard constraints** — loại host thiếu capability bắt buộc
    (writer scope cần `git-write`; cross-host review cần candidate
    `PUSHED_REMOTE` reachable từ reviewer host).
-2. **Daemon reachable** — với host remote: `paseo status --host $ENV --json`
+2. **Daemon reachable** — với host remote:
+   `node scripts/remote-paseo.mjs health --host-id <id>`
    (không reachable → `HOST_ROUTE_UNAVAILABLE`, KHÔNG rơi về host khác
    ngầm nhiên; chuyển host phải là routing decision được ghi lại).
 3. **Repository availability** — repo/project tồn tại trên host (workspace
@@ -59,24 +60,41 @@ trần.
 MCP server được inject vào pi agent **luôn trỏ daemon local** của agent đó
 (xác minh bằng source Paseo 0.2.5: `daemon.mcp.injectIntoAgents` tạo mcp
 config ở `createPiMcpConfigFile` với URL daemon của chính daemon cha).
-Vì vậy với host remote, Lead dùng **chính Paseo CLI qua bash**:
+`--host` là option của Paseo CLI, KHÔNG phải argument của MCP tool — nên với
+host remote, Lead KHÔNG dùng MCP mà dùng **wrapper `scripts/remote-paseo.mjs`**
+(Lead skill bắt buộc tách LOCAL_CREATE_CYCLE / REMOTE_CREATE_CYCLE).
+
+Wrapper nhận `HOST_ID` từ cluster file, tự resolve `endpointEnv`, validate
+provider/model/thinking, chạy Paseo CLI với `--host` (không shell-quoting
+thủ công), và trả JSON envelope có gắn `hostId` — endpoint value không bao
+giờ xuất hiện trong output hay error:
 
 ```bash
 # Endpoint value NẰM TRONG ENV (ví dụ PASEO_HOST_B), cluster file chỉ tên:
-paseo status  --host "$PASEO_HOST_B" --json
-paseo provider ls --host "$PASEO_HOST_B" --json
-paseo provider models pi-peer --host "$PASEO_HOST_B" --json
-paseo run     --host "$PASEO_HOST_B" -d \
-  --provider "pi-peer/<pi-provider>/<model-id>" --thinking <level> \
-  --workspace <wks-id> --title "<title>" "<prompt>"
+node scripts/remote-paseo.mjs health --host-id <id>
+node scripts/remote-paseo.mjs providers --host-id <id>
+node scripts/remote-paseo.mjs models --host-id <id> --provider pi-peer
+node scripts/remote-paseo.mjs workspaces --host-id <id>
+node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> \
+  --isolation local|worktree --title <t>
+node scripts/remote-paseo.mjs run --host-id <id> \
+  --provider pi-peer/<pi-provider>/<model-id> --thinking <level> \
+  --workspace <wks-id> --title <t> --brief <task-file>
+node scripts/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>
+node scripts/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>
+node scripts/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>
+node scripts/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>
 ```
+
+Đủ chi tiết: `node scripts/remote-paseo.mjs --help`.
 
 CLI chấp nhận `host:port`, socket/pipe, `tcp://host:port?ssl=true&password=...`
 hoặc pairing offer URL (xem `paseo run --help`). Credential của endpoint sống
-trong env, không trong file.
+trong env, không trong file. Lưu ý: `paseo status` KHÔNG có `--host` — reachability
+remote dùng `remote-paseo.mjs health` (chạy `paseo ls --host ... --json`).
 
 > Lưu ý bảo mật policy: policy extension chặn Peer dùng `paseo` CLI từ
-> bash (heuristic) và cho Lead quyền `bash`. Lead dùng CLI cho remote được
+> bash (heuristic) và cho Lead quyền `bash`. Lead dùng wrapper cho remote được
 > coi là đường orchestration chính thức — vẫn qua control plane Paseo, không
 > phải control plane thứ hai.
 
@@ -105,9 +123,12 @@ clone/fetch tới đúng SHA.
   trạng thái writer cũ chưa rõ (có thể đã commit). Quy trình: đánh dấu
   HOST_ROUTE_UNAVAILABLE, chờ daemon quay lại, đối chiếu `git log`/`status`
   của workspace trên host đó, mới quyết định recreate + carry-over.
-- **Writer không phản hồi** → Lead check qua `--host` trước khi tuyên bố
-  mất; nếu daemon sống mà agent kẹt → cancel_agent/archive_agent trên đúng
-  daemon đó rồi handoff scope (commit SHA cuối cùng = progress checkpoint).
+- **Writer không phản hồi** → Lead check qua
+  `node scripts/remote-paseo.mjs health --host-id <id>` trước khi tuyên bố
+  mất; nếu daemon sống mà agent kẹt →
+  `node scripts/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>`
+  rồi archive (`archive --agent-ref ...`) và handoff scope (commit SHA cuối
+  cùng = progress checkpoint).
 - **Endpoint env mất** → strict preflight FAIL (warn trong non-strict);
   routing tới host đó là BLOCKED, không suy đoán endpoint từ lịch sử.
 
@@ -119,7 +140,7 @@ re-review CHƯA hoàn tất. Khi chạy đủ, ghi kết quả vào PR/issue li�
 
 1. `node scripts/preflight.mjs` PASS trên cả hai host (riêng biệt).
 2. Host A: đặt `PASEO_HOST_B=tcp://<ip>:6767?ssl=true&password=...`;
-   `paseo status --host "$PASEO_HOST_B" --json` reachable;
+   `node scripts/remote-paseo.mjs health --host-id <host-b-id>` reachable;
    `node scripts/preflight.mjs --strict --host-id <host-b-id>` PASS (remote
    inventory đúng host — cache theo hostId).
 3. Host B cài role pack; routes của host B khác host A (đúng mục đích: N host

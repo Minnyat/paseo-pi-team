@@ -41,10 +41,34 @@ jobs:
         run: node test/policy.test.mts
       - name: model-routing tests
         run: node test/model-routing.test.mjs
-      - name: preflight + resolver syntax check
+      - name: pure role-pack tests
+        shell: bash
+        run: |
+          node test/remote-paseo.test.mjs
+          node test/reliability.test.mjs
+          node test/watchdog.test.mjs
+          node test/team-communication.test.mjs
+          node test/browser-setup.test.mjs
+          node test/installer-contract.test.mjs
+          node test/ocr-setup.test.mjs
+          node test/ocr-review.test.mjs
+          node test/ocr-integrity.test.mjs
+          node test/paseo-contract.test.mjs
+      - name: syntax checks
+        shell: bash
         run: |
           node --check scripts/preflight.mjs
           node --check scripts/model-routing.mjs
+          node --check scripts/remote-paseo.mjs
+          node --check scripts/reliability.mjs
+          node --check scripts/watchdog.mjs
+          node --check scripts/team-communication.mjs
+          node --check scripts/browser-setup.mjs
+          node --check scripts/ocr-review.mjs
+          node --check scripts/ocr-setup.mjs
+          node --check scripts/team-scripts-path.mjs
+          node --check test/fixtures/fake-paseo.mjs
+          node --check test/fixtures/fake-ocr.mjs
 
   # Live remote Paseo checks stay manual (they need two real hosts); this CI
   # only gates the pure tests. Typecheck needs the pi-coding-agent package

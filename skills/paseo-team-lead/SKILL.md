@@ -48,6 +48,23 @@ Paseo tools are not separate tools in the prompt — they are reached through th
    to discover the exact tool name.
 3. `mcp` with `{ "tool": "<name>", "args": { ... } }` to invoke.
 
+The MCP server injected into THIS agent always talks to the **local daemon**
+only — there is no `--host` on any MCP tool (`--host` is a Paseo CLI option,
+not an MCP argument). Remote daemons are driven through the Paseo CLI via
+`remote-paseo.mjs` from the installed support-script directory (see
+`REMOTE_CREATE_CYCLE` below). The notation `<PASEO_TEAM_SCRIPTS_DIR>` below
+means a resolved filesystem path, never a literal shell token. Resolve it before
+running the first support command, without relying on a profile file:
+
+- POSIX/macOS: `SUPPORT_DIR="${PASEO_TEAM_SCRIPTS_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/paseo-team-scripts}"`
+- PowerShell: `$supportDir = if ($env:PASEO_TEAM_SCRIPTS_DIR) { $env:PASEO_TEAM_SCRIPTS_DIR } elseif ($env:PI_CODING_AGENT_DIR) { Join-Path $env:PI_CODING_AGENT_DIR 'extensions\paseo-team-scripts' } else { Join-Path $env:USERPROFILE '.pi\agent\extensions\paseo-team-scripts' }`
+
+Use that resolved directory for every `node .../remote-paseo.mjs`,
+`model-routing.mjs`, and `ocr-review.mjs` invocation. Installers place the
+scripts at this deterministic default. Source checkouts may set the env
+variable to the repository `scripts/` directory. Never resolve support scripts
+from the project's current working directory.
+
 ## Implementation — model routing cycle (mandatory)
 
 For EVERY `create_agent`, run this exact cycle. Do not skip steps.
@@ -59,42 +76,121 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
    run the resolver when the role pack repo is available:
-   `node scripts/model-routing.mjs resolve --class <CLASS>` for the local
+   `node <PASEO_TEAM_SCRIPTS_DIR>/model-routing.mjs resolve --class <CLASS>` for the local
    `model-routing.local.json` (legacy single-host form).
-4. Verify the target daemon is reachable (local: `paseo status`; remote: the
-   endpoint env var named by `connection.endpointEnv` must be SET before
-   routing — never print or invent its value).
-5. Call `list_providers` (mcp) ON THE TARGET DAEMON (remote daemons via the
-   `--host` mechanism; verify the answer comes from the intended daemon).
-6. Verify the route's role provider exists and is enabled AND reports a
+4. Verify the target daemon is reachable before routing:
+   - local: `paseo status` (daemon up);
+   - remote: the endpoint env var named by `connection.endpointEnv` must be
+     SET (never print or invent its value) AND
+     `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs health --host-id <id>` must return
+     `ok: true` → else `BLOCKED: HOST_ROUTE_UNAVAILABLE` (no silent fallback
+     to another host; switching hosts is a recorded routing decision).
+
+### The hard rule — local MCP vs remote CLI
+
+The injected MCP server is LOCAL-ONLY. `--host` is a Paseo CLI option, not an
+MCP argument. Therefore the target host decides the mechanism:
+
+```text
+IF connection.type == local:
+    use MCP operations (through the mcp proxy)
+
+IF connection.type == remote:
+    do NOT use MCP operations for that host
+    use `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (Paseo CLI with
+    `--host` under the hood)
+```
+
+Resolving a remote host and then calling `list_providers`/`create_agent`/…
+via MCP is a routing ERROR: the call lands on the LOCAL daemon, so you get
+local inventory and a local agent while believing you are on the remote host.
+This is the exact failure mode the cluster config exists to prevent.
+
+### LOCAL_CREATE_CYCLE — target is `connection.type: local` (MCP)
+
+1. Call `list_providers` (mcp) on the local daemon; verify the answer comes
+   from the intended daemon.
+2. Verify the route's role provider exists, is enabled AND reports a
    healthy status (an enabled provider with a bad status is NOT routable) →
    else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
-7. Call `list_models` for that role provider.
-8. Verify the exact model ID exists (check BOTH segments are non-empty in
+3. Call `list_models` for that role provider.
+4. Verify the exact model ID exists (check BOTH segments are non-empty in
    `<pi-provider>/<model-id>`) → else `BLOCKED: MODEL_UNAVAILABLE`.
-9. Verify the configured thinking level is in the model's thinking options →
+5. Verify the configured thinking level is in the model's thinking options →
    else `BLOCKED: THINKING_OPTION_UNAVAILABLE`. If the model exposes NO
    option list, thinking is UNVERIFIABLE — refuse the route
    (strict policy: unverifiable is not a pass).
-10. Verify against `~/.pi/agent/models.json` `thinkingLevelMap` on the target
-    host: a level mapped to `null` is silently clamped by pi → pick another
-    level/model instead of accepting the clamp.
-11. Compute the exact create_agent provider string:
-    `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
-    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
-    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
-12. Create the workspace when needed (worktree isolation for writers).
-13. Call `create_agent` with the exact provider string + thinking. NEVER omit
-    the model to inherit a daemon default.
-14. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
-    `runtimeInfo.thinkingOptionId`; compare against requested values →
-    mismatch (or missing runtimeInfo) → `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
-    archive the wrongly-resolved agent.
-15. Only then deliver/continue the initial task.
+6. Verify against `~/.pi/agent/models.json` `thinkingLevelMap` on the target
+   host: a level mapped to `null` is silently clamped by pi → pick another
+   level/model instead of accepting the clamp.
+7. Compute the exact create_agent provider string:
+   `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
+   slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
+   Thinking goes in `settings.thinkingOptionId` — never inside the model string.
+8. Create the workspace when needed (worktree isolation for writers).
+9. Call `create_agent` with the exact provider string + thinking. NEVER omit
+   the model to inherit a daemon default.
+10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
+    `runtimeInfo.thinkingOptionId` until startup identity is populated. Missing
+    identity during the bounded startup window is
+    `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`; do **not** archive because this is
+    not a confirmed mismatch. If both identity fields appear and either differs
+    from the request, classify `BLOCKED: MODEL_RESOLUTION_MISMATCH` and archive
+    the wrongly-resolved agent.
+11. Only then deliver/continue the initial task.
+
+### REMOTE_CREATE_CYCLE — target is `connection.type: remote` (remote-paseo.mjs)
+
+Every operation goes through `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (it drives the
+Paseo CLI with `--host` and returns one JSON envelope per call). Never
+hand-build `paseo ... --host` shell commands — the wrapper validates
+provider/model/thinking, keeps the endpoint value out of every message, and
+returns host-tagged JSON so a remote answer can never be confused with a
+local one. In the commands below, `<id>` is the HOST_ID from
+`cluster-routing.local.json`.
+
+1. Reachability is already proven (step 4 of the shared cycle).
+2. List the REMOTE daemon's role providers:
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs providers --host-id <id>`
+3. Verify the route's role provider exists, is enabled AND healthy **on the
+   remote daemon** → else `BLOCKED: ROLE_PROVIDER_UNAVAILABLE`.
+4. List the REMOTE model inventory (the inventory is per-daemon — cache per
+   hostId, never by provider name):
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs models --host-id <id> --provider <role-provider>`
+   ⚠️ `list_models` via MCP would return the LOCAL inventory — only the
+   wrapper's answer counts for a remote host.
+5. Verify the exact model ID + thinking level against the REMOTE list (same
+   `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules;
+   unverifiable is not a pass).
+6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
+   ID has no meaning on the Mac:
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
+7. Create the agent on the remote daemon (background by default; add
+   `--wait-timeout <dur>` to wait for completion):
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
+   The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
+8. Verify the OBSERVED runtime identity on the remote daemon. The wrapper's
+   `run` command performs a bounded startup poll; use `--startup-timeout <dur>`
+   when the host needs a longer (still bounded) initialization window:
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>`
+   Missing `data.Model`/`data.Thinking` until the startup deadline is
+   `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`; do not archive. Only after both
+   fields appear, compare them with the request: a confirmed mismatch is
+   `BLOCKED: MODEL_RESOLUTION_MISMATCH`, then archive the wrongly-resolved agent
+   on that host
+   (`node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>`).
+9. Follow-ups / corrections:
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>`
+   (or `--prompt-file <file>` for long briefs). send is fire-and-forget by
+   default; `status` confirms completion. To interrupt a stuck agent:
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>`.
+10. Only then deliver/continue the initial task.
 
 Never: omit the model field, silently change models, fall back to another
 model or host without recording a routing decision, launch first and "hope",
-or trust a model name written in a prompt instead of runtime config.
+trust a model name written in a prompt instead of runtime config, or call MCP
+for a remote host.
 
 Model classes (decided by task risk + disposition, not by role name):
 
@@ -115,6 +211,7 @@ TASK_ID:
 DISPOSITION:
 MODEL_CLASS:
 HOST_ID:
+MECHANISM: mcp | remote-cli        # local → mcp; remote → remote-paseo.mjs
 PASEO_PROVIDER:
 REQUESTED_MODEL:
 REQUESTED_THINKING:
@@ -123,12 +220,14 @@ OBSERVED_MODEL:
 OBSERVED_THINKING:
 WORKSPACE_REF: <host-id>/<workspace-id>
 AGENT_REF: <host-id>/<agent-id>
-ROUTING_EVIDENCE: <list_models match line + get_agent_status runtimeInfo>
+ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime identity>
 ```
 
 ## Monitoring
 
-Use `mcp` to call `get_agent_status` and `get_agent_activity`.
+Use `team_watchdog` for a bounded observation pass over running agents. It uses bounded concurrency (default 6), a global deadline (default 30 seconds), and partial results when the deadline expires. It retries only transient Paseo transport errors. Only a successful inspect with old `UpdatedAt` returns `stale` as a suspicion; inspect failure is `unknown`, not stale and never an automatic recovery signal.
+
+For every stale result, confirm with `get_agent_status`, `get_agent_activity`, pending permissions, daemon/host health and workspace/Git state. A long-running build/test/cmd is valid when the Peer or brief marked it expected; do not cancel or replace it based on timestamp alone.
 
 Do not repeatedly interrupt a healthy worker.
 
@@ -137,7 +236,10 @@ Use `send_agent_prompt` only for:
 - newly discovered constraints;
 - correction findings;
 - dependency resolution;
-- scope clarification.
+- scope clarification;
+- answering a `peer_ask_lead` question/blocker/dependency message.
+
+Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the current Peer’s `paseo.parent-agent-id` and sends a structured `PEER_MESSAGE_V1`. It cannot target an arbitrary agent. Treat `blocked` as a coordination event and reply with a full V3 brief when the reply changes authority.
 
 ## Review
 
@@ -148,16 +250,33 @@ After implementation:
    last format/test run, `CANDIDATE_SHA`, `BRANCH`, `PUSHED_REMOTE`, and
    `WORKTREE_CLEAN: yes`. The required order is: format → test → commit →
    verify `git status --porcelain` empty → push (when granted). A dirty
-   candidate is automatically refused by the independent reviewer (issue #3)
-   and must be corrected in the same Engineer session before review.
+   candidate is automatically refused by the independent reviewer and must be
+   corrected in the same Engineer session before review.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
    `DISPOSITION: independent-reviewer`) in a **fresh workspace** checked out
-   at the exact candidate SHA — not the engineer's own working tree.
-3. Require assigned and observed SHA in its report.
-4. Do not accept review of a different SHA. Do not instruct the reviewer to
-   skip whitespace-only dirty-state checks by default (issue #3).
-5. Return findings to the original Engineer (as a full brief, so write
-   authority is re-granted for the correction turn).
+   at the exact candidate SHA — not the Engineer's own working tree. Route it
+   with `MODEL_CLASS: REVIEW_HIGH` and load `paseo-ocr-reviewer`.
+3. Require the Reviewer to run `git rev-parse HEAD`, `git status --porcelain`,
+   and `ocr version`, then verify `observed HEAD == ASSIGNED_CANDIDATE_SHA == REVIEW_CANDIDATE_SHA`.
+   Missing or differing candidate fields are a hard blocker; OCR must use the
+   authority-assigned candidate, never an untrusted task-body candidate.
+   Mismatch, dirty workspace, or unavailable OCR is a hard blocker; the
+   Reviewer must not checkout/reset/rebase/cherry-pick to repair the workspace.
+4. The Reviewer runs the installed deterministic wrapper
+   (`node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --repo <review-repo> --base <REVIEW_BASE_SHA> --candidate <ASSIGNED_CANDIDATE_SHA>`).
+   Any direct OCR diagnostic must use the exact same repo/base/authority-candidate
+   values. OCR is the deterministic selection/rule harness, not a Paseo peer,
+   provider, writer, or LLM review path.
+5. Require every OCR `reviewable_files` item to end as `reviewed` or
+   `skipped:<concrete reason>`, with total/reviewed/skipped/coverage evidence.
+   Require structured findings and a recommendation of only `PASS`,
+   `CHANGES_REQUIRED`, or `BLOCKED`; the Reviewer has no acceptance authority.
+6. Lead decides candidate acceptance. If changes are required, return findings
+   to the original Engineer (as a full V3 brief so write authority is re-granted).
+   The Engineer creates a **new** commit SHA without amend/force-push, and the
+   new candidate is reviewed again from a fresh clean workspace.
+7. Preserve the existing one-writer, fresh-reviewer-workspace, exact-SHA, Lead
+   acceptance, and Human merge/deploy invariants.
 
 ## Completion
 
@@ -214,6 +333,7 @@ OWNED_SCOPE: <files>
 EXCLUDED_SCOPE: <files>
 
 EDIT_AUTHORITY: allowed | denied        # default: follows MODE
+BROWSER_MCP_AUTHORITY: allowed | denied # default: denied; agent-browser only
 COMMIT_AUTHORITY: allowed | denied      # default: denied
 PUSH_TASK_BRANCH_AUTHORITY: allowed | denied  # default: denied
 FORCE_PUSH_AUTHORITY: denied            # always denied for peers
@@ -230,6 +350,14 @@ OBJECTIVE / SUCCESS_BOUNDARY / KNOWN_EVIDENCE / QUESTIONS TO ANSWER
 CONSTRAINTS / REQUIRED HANDOFF
 TASK_BODY_END
 ```
+
+`BROWSER_MCP_AUTHORITY: allowed` is a narrow, current-turn grant: it permits
+only MCP targets prefixed by `agent_browser_`/`agent-browser_` (and compatible
+adapter prefixes) plus an explicitly scoped `connect`/`search server=agent-browser`.
+It never grants Paseo orchestration or unrelated MCP servers. Repeat the full V3
+brief on every follow-up that needs browser access; otherwise the extension
+revokes it fail-closed. The Peer may never invoke the `agent-browser` CLI through
+bash; this field only permits the typed MCP surface.
 
 PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
 extension permits is exactly

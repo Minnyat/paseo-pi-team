@@ -28,8 +28,10 @@ paseo-pi-team/
 ├── extensions/
 │   └── paseo-team-policy.ts        # inject prompt + áp tool policy theo role
 ├── skills/
-│   └── paseo-team-lead/
-│       └── SKILL.md                # workflow orchestration + routing cycle của Lead
+│   ├── paseo-team-lead/
+│   │   └── SKILL.md                # workflow orchestration + routing cycle của Lead
+│   └── paseo-ocr-reviewer/
+│       └── SKILL.md                # read-only OCR delegation workflow của Reviewer
 ├── examples/
 │   ├── engineer-task.md            # brief PASEO_TEAM_TASK_V3 (engineer, write)
 │   ├── reviewer-task.md            # brief reviewer độc lập (read-only)
@@ -39,23 +41,36 @@ paseo-pi-team/
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installer
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
-│   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
+│   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host qua HOST_ID (Lead REMOTE cycle)
+│   ├── reliability.mjs              # retry classification/backoff + stale predicates
+│   ├── team-communication.mjs       # parent-scoped Peer → Lead messaging
+│   ├── watchdog.mjs                 # observation-only running-agent watchdog
+│   ├── ocr-review.mjs               # deterministic OCR exact-SHA preflight manifest
+│   ├── team-scripts-path.mjs        # durable support-script path resolver
+│   └── preflight.mjs                # host readiness check (--json, --strict, --host-id)
 ├── test/
 │   ├── policy.test.mts             # policy + lifecycle regression
-│   └── model-routing.test.mjs      # resolver regression
+│   ├── model-routing.test.mjs      # resolver regression
+│   ├── remote-paseo.test.mjs       # remote executor regression (+ fixtures/fake-paseo.mjs)
+│   ├── reliability.test.mjs        # retry/backoff/stale predicates
+│   ├── team-communication.test.mjs # parent-scoped Peer → Lead contract
+│   ├── watchdog.test.mjs            # stale-agent classification
+│   ├── ocr-review.test.mjs          # OCR delegation preflight contract
+│   └── ocr-integrity.test.mjs       # skill/reference/authority integrity
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # thiết kế gốc
     ├── model-routing.md            # 4 lớp model routing, verified commands
-    └── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-host.md               # N-host routing + cross-host test plan
+    └── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
 ```
 
 ## Vai trò
 
 | Profile | `PASEO_PI_ROLE` | Tool policy (mặc định, chỉnh sau khi chạy `/team-tools`) |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read` + `mcp` (qua proxy: `list_agents`, `get_agent_status`, `get_agent_activity`, `send_agent_prompt` + `create_agent` **recovery-only** — argument-guarded: `pi-lead/...` provider + `labels.purpose ∈ {recovery,bootstrap}` + `labels.recovery_for` + `settings.thinkingOptionId`; mọi shape khác bị chặn fail-closed). Không `write`/`edit`, không workspace, không peer, không discovery. |
-| `pi-lead` | `lead` | Mặc định tối thiểu: Pi `read`/`bash` + `mcp`/`mcp_script` + Paseo `discovery`/`workspace`/`monitoring`/`orchestration`/`permissions` (qua proxy, target guard fail-closed). `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1` (ghi trong WORKSPACE_PROTOCOL của repo nếu Lead được tự implement tiny task). |
-| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash`. `MODE: read-only` (mặc định, fail-closed) → `read`/`bash`. Không bao giờ có `mcp` hoặc Paseo orchestration tools. |
+| `pi-supervisor` | `supervisor` | `read` + monitoring `mcp` + `team_watchdog` (observation-only); `create_agent` chỉ recovery Lead với argument guard. Không `write`/`edit`. |
+| `pi-lead` | `lead` | Pi `read`/`bash` + Paseo discovery/workspace/monitoring/orchestration/permissions + `team_watchdog`. `write`/`edit` chỉ khi `PASEO_TEAM_LEAD_WRITE=1`. |
+| `pi-peer` | `peer` | `MODE: write` → `read`/`write`/`edit`/`bash` + `peer_ask_lead`; `MODE: read-only` → `read`/`bash` + `peer_ask_lead`. Peer không có Paseo MCP/orchestration; browser MCP vẫn chỉ được cấp bằng V3 brief hiện tại. |
 
 Policy là **allowlist thuần** (`setActiveTools`), cộng lớp backstop chặn trong
 `song song` `tool_call`. Không phải sandbox bảo mật tuyệt đối. Mọi authority
@@ -67,7 +82,50 @@ prompt và là lổ hổng injection). `git commit`/`git push` qua bash của Pe
 chặn trừ khi V3 brief cấp `*_AUTHORITY: allowed`; push authority là
 **branch-scoped** (duy nhất `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`);
 force-push (mọi spelling: `-f`, `-uf`, `-fu`, `--force*`, refspec `+`) và merge
-của Peer luôn bị chặn.
+của Peer luôn bị chặn. `BROWSER_MCP_AUTHORITY` là grant theo current turn:
+chỉ các target có prefix agent-browser và `connect/search` được scope vào
+server `agent-browser`; agent-browser CLI qua bash luôn bị chặn. Paseo MCP và
+MCP khác luôn bị chặn.
+
+## Liên lạc và watchdog
+
+### Peer hỏi Lead
+
+Peer dùng custom tool `peer_ask_lead`, không dùng `paseo send` qua bash. Tool lấy `PASEO_AGENT_ID`, inspect `paseo.parent-agent-id`, chỉ gửi tới parent Lead và đóng gói `PEER_MESSAGE_V1` với `kind`, `TASK_ID`, `CORRELATION_ID`. Inspect có retry tối đa 3 lần với backoff chỉ cho lỗi transport tạm thời; `send` không retry vì delivery ambiguity có thể tạo duplicate. Các loại message: `question`, `blocked`, `dependency`, `progress`. Không resolve được parent là fail-closed, không broadcast.
+
+### Lead/Supervisor kiểm tra agent treo
+
+Custom tool `team_watchdog` kiểm tra agent `running` bằng `paseo ls -g` + `paseo inspect` với bounded concurrency (mặc định 6), global deadline (mặc định 30 giây), partial result khi hết hạn và retry transport tối đa 3 lần. Chỉ inspect thành công với `UpdatedAt` quá threshold (mặc định 5 phút) mới được đánh dấu `stale`/**suspected**; inspect thất bại là **unknown**, không tự cancel/archive/spawn.
+
+Recovery bắt buộc: kiểm tra activity, pending permission, daemon/remote health, lệnh dài dự kiến và workspace/Git state; chỉ sau đó Lead quyết định cancel/archive/correction. Không tạo writer thay thế khi commit/state cũ chưa rõ.
+
+### Transport retry
+
+`remote-paseo.mjs` retry tối đa 3 lần cho thao tác đọc/health/provider/status; `run` và `send` không tự retry để tránh tạo duplicate task/message. Lỗi usage, authority, model, workspace, endpoint hoặc malformed request fail ngay.
+
+## OpenCodeReview delegation (Phase 1)
+
+`paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill. The
+installer automatically installs and verifies the pinned OCR CLI
+`@alibaba-group/open-code-review@1.8.10`; OCR is not an
+agent/provider or second control plane: it deterministically selects files and
+resolves rules, while the Pi Reviewer performs reasoning on the exact candidate
+SHA. The installer runs `scripts/ocr-setup.mjs` to install/verify the pinned CLI;
+check it manually with `ocr version` (PowerShell:
+`Get-Command ocr`; Unix-like shells: `command -v ocr`) and use delegation mode,
+not `ocr review`. See [`docs/ocr-integration.md`](docs/ocr-integration.md).
+
+The optional deterministic preflight emits a normalized manifest:
+
+```bash
+node scripts/ocr-review.mjs --repo <repo> --base <base-sha> --candidate <candidate-sha>
+```
+
+It pins OCR `1.8.10`, probes `delegate preview/rule` capabilities, and blocks
+candidate mismatch, dirty/mutated workspaces, unavailable/unsupported OCR,
+malformed selection/rules, and incomplete rule coverage. Its manifest includes
+candidate-tree/workspace entry-exit state and deterministic digests. It never
+edits Git state or calls an LLM.
 
 ## Cài đặt
 
@@ -83,7 +141,44 @@ Script copy:
 
 - `extensions/paseo-team-policy.ts` → `~/.pi/agent/extensions/`
 - `prompts/*.md` → `~/.pi/agent/extensions/prompts/`
-- `skills/paseo-team-lead/` → `~/.pi/agent/skills/`
+- `skills/paseo-team-lead/` → `~/.pi/agent/skills/paseo-team-lead/`
+- `agent-browser` CLI + Chrome runtime (nếu thiếu), bundled skill → `~/.pi/agent/skills/agent-browser/`
+- MCP entry `agent-browser: { command: "agent-browser", args: ["mcp"] }` → `~/.pi/agent/mcp.json` nếu chưa có ở các config chuẩn
+
+### agent-browser browser MCP
+
+Installer tự kiểm tra `agent-browser --version`, `agent-browser doctor --offline --quick`,
+bundled skill (`agent-browser skills path agent-browser`) và các MCP config chuẩn.
+Nếu thiếu, installer sẽ cài OCR `@alibaba-group/open-code-review@1.8.10`,
+`npm install -g agent-browser`, chạy `agent-browser install`
+(`--with-deps` trên Linux), copy skill, rồi merge entry `agent-browser` vào
+`~/.pi/agent/mcp.json` mà không ghi đè server khác. Chạy lại installer là an toàn.
+
+Lead cấp quyền cho Peer bằng field trong V3 brief:
+
+```text
+BROWSER_MCP_AUTHORITY: allowed
+```
+
+Mặc định là `denied`; quyền không lưu qua turn. Khi được cấp, Peer chỉ được
+search/connect server `agent-browser` và gọi target prefix `agent_browser_` /
+`agent-browser_` (cùng các prefix chuẩn hóa tương thích), không được dùng Paseo
+MCP hoặc server khác. `node scripts/preflight.mjs --json` có các check CLI,
+Chrome/runtime, skill và MCP entry.
+
+### Paseo inspect contract test
+
+Vì `peer_ask_lead` và watchdog phụ thuộc các field JSON do Paseo expose,
+repo có contract test chạy với daemon thật. Test này không chạy trong CI thông
+thường vì cần một agent đang tồn tại; chạy explicit với agent ID đã chọn:
+
+```bash
+PASEO_CONTRACT_AGENT_ID=<real-agent-id> node test/paseo-contract.test.mjs
+```
+
+Test kiểm tra agent xuất hiện trong `paseo ls -g --json` và các field
+`Id`, `Status`, `UpdatedAt`, `PendingPermissions`, `ParentAgentId` trong
+`paseo inspect --json`. Field thiếu hoặc schema đổi sẽ fail rõ ràng.
 
 ### Bắt buộc: pi-mcp-adapter (pinned)
 
@@ -139,6 +234,17 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
    chiếu `get_agent_status` runtimeInfo — lệch thì
    `BLOCKED: MODEL_RESOLUTION_MISMATCH`, không fallback. Lead (không phải Peer)
    sở hữu observed routing evidence.
+5. **Host remote**: MCP inject vào agent luôn trỏ daemon LOCAL — `--host` là
+   option CLI, không phải argument MCP. Lead dùng
+   `<PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (installer copies the support
+   scripts to `~/.pi/agent/extensions/paseo-team-scripts`; the environment
+   variable is an optional override (the deterministic default is used after
+   shell/daemon restart); it reads cluster file theo HOST_ID,
+   chạy Paseo CLI
+   `--host`, không in endpoint, trả JSON envelope có hostId) cho mọi thao tác
+   remote: `health/providers/models/workspaces/workspace-create/run/status/
+   send/cancel/archive` — xem `docs/multi-host.md` và Lead skill
+   (LOCAL_CREATE_CYCLE vs REMOTE_CREATE_CYCLE).
 
 ### Compatibility matrix (đã verify 2026-08-04)
 
@@ -231,6 +337,7 @@ stripping bật sẵn):
 ```bash
 node test/policy.test.mts          # policy + per-turn lifecycle regression
 node test/model-routing.test.mjs   # routing resolver regression
+node test/remote-paseo.test.mjs    # remote executor regression (fake CLI)
 ```
 
 Smoke-test load extension không cần LLM (in mode):

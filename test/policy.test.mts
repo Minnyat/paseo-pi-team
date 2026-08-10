@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import {
 	ALL_PASEO_TOOLS,
+	browserMcpAllowed,
+	callsAgentBrowserCli,
 	callsPaseoCli,
 	classifyMcpInput,
 	denyReason,
@@ -14,9 +16,12 @@ import {
 	mcpScriptBlockReason,
 	parsePeerMode,
 	parseTaskBrief,
+	peerMcpBlockReason,
+	teamToolBlockReason,
 	peerGitAuthority,
 	policyFor,
 	policyWithAuthority,
+	isAgentBrowserMcpTarget,
 	resolvePeerMode,
 } from "../extensions/paseo-team-policy.ts";
 
@@ -33,6 +38,7 @@ const v2WriteBrief = [
 	"EDIT_AUTHORITY: allowed",
 	"COMMIT_AUTHORITY: allowed",
 	"PUSH_TASK_BRANCH_AUTHORITY: allowed",
+	"BROWSER_MCP_AUTHORITY: allowed",
 ].join("\n");
 
 {
@@ -120,6 +126,7 @@ const v3WriteBrief = [
 	"EDIT_AUTHORITY: allowed",
 	"COMMIT_AUTHORITY: allowed",
 	"PUSH_TASK_BRANCH_AUTHORITY: allowed",
+	"BROWSER_MCP_AUTHORITY: allowed",
 	"FORCE_PUSH_AUTHORITY: denied",
 	"PASEO_TEAM_TASK_V3_END",
 	"TASK_BODY_BEGIN",
@@ -280,6 +287,76 @@ assert.equal(
 	resolvePeerMode(parseTaskBrief("PASEO_TEAM_TASK_V2\nMODE: bogus")),
 	"read-only",
 	"brief with invalid MODE → read-only",
+);
+
+// --- browser MCP authority -----------------------------------------------------
+
+assert.equal(isAgentBrowserMcpTarget("agent_browser_open"), true);
+assert.equal(isAgentBrowserMcpTarget("mcp__agent-browser__snapshot"), true);
+assert.equal(isAgentBrowserMcpTarget("open"), false);
+assert.equal(isAgentBrowserMcpTarget("paseo_list_agents"), false);
+assert.equal(
+	callsAgentBrowserCli("agent-browser open https://example.com"),
+	true,
+);
+assert.equal(
+	callsAgentBrowserCli("npx -y agent-browser open https://example.com"),
+	true,
+);
+assert.equal(callsAgentBrowserCli("npm exec -- agent-browser cookies"), true);
+assert.equal(callsAgentBrowserCli("pnpm exec agent-browser state"), true);
+assert.equal(callsAgentBrowserCli("./node_modules/.bin/agent-browser debug"), true);
+assert.equal(callsAgentBrowserCli("echo agent-browser open"), true);
+assert.equal(callsAgentBrowserCli("npm test"), false);
+assert.equal(browserMcpAllowed(parseTaskBrief(v3WriteBrief)), true);
+assert.equal(
+	browserMcpAllowed(
+		parseTaskBrief(
+			"PASEO_TEAM_TASK_V3_BEGIN\nMODE: read-only\nPASEO_TEAM_TASK_V3_END",
+		),
+	),
+	false,
+);
+assert.equal(browserMcpAllowed(null), false);
+assert.equal(
+	peerMcpBlockReason(
+		{ tool: "agent_browser_snapshot" },
+		parseTaskBrief(v3WriteBrief),
+	),
+	null,
+);
+assert.match(
+	peerMcpBlockReason(
+		{ tool: "paseo_list_agents" },
+		parseTaskBrief(v3WriteBrief),
+	) ?? "",
+	/agent-browser/,
+);
+assert.match(
+	peerMcpBlockReason({ tool: "agent_browser_snapshot" }, null) ?? "",
+	/not authorized/,
+);
+assert.equal(
+	peerMcpBlockReason(
+		{ connect: "agent-browser" },
+		parseTaskBrief(v3WriteBrief),
+	),
+	null,
+);
+assert.match(
+	peerMcpBlockReason({}, parseTaskBrief(v3WriteBrief)) ?? "",
+	/meta operation/,
+);
+assert.match(
+	peerMcpBlockReason({ connect: "paseo" }, parseTaskBrief(v3WriteBrief)) ?? "",
+	/agent-browser/,
+);
+assert.match(
+	peerMcpBlockReason(
+		{ search: "agent browser snapshot" },
+		parseTaskBrief(v3WriteBrief),
+	) ?? "",
+	/server=agent-browser/,
 );
 
 // --- peerGitAuthority ----------------------------------------------------------
@@ -777,7 +854,7 @@ for (const [code, why] of [
 // --- policyFor --------------------------------------------------------------
 
 const peerRO = policyFor("peer", "read-only");
-assert.deepEqual(peerRO.allow, ["read", "bash"]);
+assert.deepEqual(peerRO.allow, ["read", "bash", "peer_ask_lead"]);
 assert.ok(peerRO.deny.includes("write") && peerRO.deny.includes("edit"));
 assert.ok(
 	peerRO.deny.includes("mcp") && peerRO.deny.includes("mcp_script"),
@@ -789,7 +866,7 @@ assert.ok(
 );
 
 const peerW = policyFor("peer", "write");
-assert.deepEqual(peerW.allow, ["read", "write", "edit", "bash"]);
+assert.deepEqual(peerW.allow, ["read", "write", "edit", "bash", "peer_ask_lead"]);
 assert.ok(
 	ALL_PASEO_TOOLS.every((t) => peerW.deny.includes(t)),
 	"peer write still denies all paseo tools",
@@ -798,6 +875,7 @@ assert.ok(
 	peerW.deny.includes("mcp") && peerW.deny.includes("mcp_script"),
 	"peer write still denies the MCP proxy tools",
 );
+assert.ok(!peerW.deny.includes("peer_ask_lead"), "peer communication remains available in write mode");
 
 const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
 delete process.env.PASEO_TEAM_LEAD_WRITE;
@@ -903,6 +981,11 @@ assert.match(
 );
 assert.match(denyReason("peer", "read-only", "mcp"), /MCP proxy/);
 assert.match(denyReason("peer", "write", "mcp_script"), /MCP proxy/);
+assert.match(teamToolBlockReason("lead", "peer_ask_lead", null) ?? "", /restricted/);
+assert.match(teamToolBlockReason("peer", "peer_ask_lead", null) ?? "", /valid current V3/);
+assert.equal(teamToolBlockReason("peer", "peer_ask_lead", parseTaskBrief(v3WriteBrief)), null);
+assert.equal(teamToolBlockReason("supervisor", "team_watchdog", null), null);
+assert.match(teamToolBlockReason("peer", "team_watchdog", parseTaskBrief(v3WriteBrief)) ?? "", /Lead and Supervisor/);
 
 // --- callsPaseoCli ----------------------------------------------------------
 
@@ -1107,12 +1190,42 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 		"authority does not leak to the next unbriefed turn",
 	);
 
-	// Correction via real Paseo send (peer receives prompt without header):
-	// mcp proxy always blocked for peers.
+	// A valid current brief grants only agent-browser MCP, never Paseo MCP.
+	await before({ prompt: v3WriteBrief, systemPrompt: "base" });
+	assert.equal(
+		(
+			await toolCall({
+				toolName: "mcp",
+				input: { tool: "agent_browser_snapshot" },
+			})
+		)?.block,
+		undefined,
+	);
 	assert.match(
 		(await toolCall({ toolName: "mcp", input: { tool: "list_agents" } }))
 			?.reason ?? "",
-		/MCP proxy/,
+		/agent-browser/,
+	);
+	assert.match(
+		(
+			await toolCall({
+				toolName: "bash",
+				input: { command: "agent-browser open https://example.com" },
+			})
+		)?.reason ?? "",
+		/Peer cannot run agent-browser CLI through bash/,
+	);
+
+	// Correction via real Paseo send without a full brief revokes browser access.
+	await before({ prompt: "thanks, one more thing", systemPrompt: "base" });
+	assert.match(
+		(
+			await toolCall({
+				toolName: "mcp",
+				input: { tool: "agent_browser_snapshot" },
+			})
+		)?.reason ?? "",
+		/MCP proxy|not authorized/,
 	);
 
 	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;

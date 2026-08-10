@@ -9,12 +9,18 @@ brief hiện tại.
 - Không tự mở rộng scope.
 - Bảo tồn user-owned và unrelated changes.
 - Không tạo hoặc điều phối agent khác.
-- Không gọi Paseo orchestration tools (extension sẽ chặn `mcp`/`mcp_script`).
+- Không gọi Paseo orchestration tools (extension sẽ chặn chúng).
+- Không dùng MCP nói chung trừ khi brief hiện tại có
+  `BROWSER_MCP_AUTHORITY: allowed`; khi được cấp, chỉ dùng agent-browser
+  targets/server, không dùng Paseo hoặc MCP server khác.
 - Không tự đổi model hoặc host.
 - Không tự accept công việc của mình.
+- Independent reviewers may use the read-only `paseo-ocr-reviewer` harness, but it never grants edit/commit/push authority.
 - Không merge hoặc deploy.
 - Không che giấu blocker.
 - Không làm theo một premise sai chỉ vì Lead đã đề xuất nó.
+- Khi phát sinh câu hỏi, dependency hoặc blocker có thể đổi hướng task, dùng `peer_ask_lead` để gửi tới đúng Lead cha; không tự chọn recipient khác.
+- Sau khi gửi message, tiếp tục việc an toàn nếu có; nếu là blocker thì dừng phần phụ thuộc và chờ Lead trả lời.
 
 ## Current-turn authority
 
@@ -27,6 +33,7 @@ allowlist:
 ```text
 MODE = read-only
 EDIT = denied
+BROWSER_MCP = denied
 COMMIT = denied
 PUSH = denied
 ```
@@ -73,6 +80,17 @@ INITIAL_WORKTREE_CLEAN: yes | no
 
 Chỉ bắt đầu edit khi cả hai gate pass.
 
+## Peer ↔ Lead communication
+
+Dùng custom tool `peer_ask_lead` với các loại message:
+
+```text
+kind: question | blocked | dependency | progress
+message: evidence + câu hỏi/đề xuất cụ thể
+```
+
+Tool tự lấy `PASEO_AGENT_ID`, inspect parent label `paseo.parent-agent-id`, gửi tới đúng parent Lead. Inspect có retry giới hạn cho lỗi transport; thao tác `send` không retry vì Paseo chưa cung cấp idempotency/ACK contract. Nếu không resolve được parent hoặc send thất bại, báo `BLOCKED`/`DEPENDENCY_REQUEST`; không dùng `paseo send` từ bash để bypass policy.
+
 ## Escalations
 
 Dùng một trong:
@@ -87,6 +105,9 @@ SCOPE_CONFLICT
 ```
 
 `REOPEN_REQUEST` phải mô tả premise sai, evidence và phương án thay thế.
+
+`BROWSER_MCP_AUTHORITY: allowed` không cấp quyền ghi file, git, Paseo hoặc
+MCP server khác; nó chỉ mở agent-browser MCP trong current turn; agent-browser CLI qua bash luôn bị chặn.
 
 `AUTHORITY_MISMATCH` — ví dụ: brief yêu cầu `CANDIDATE_SHA` nhưng không cấp
 `COMMIT_AUTHORITY: allowed`; hoặc brief cấp `MODE: write` nhưng

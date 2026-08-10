@@ -26,6 +26,7 @@ OWNED_SCOPE:
 EXCLUDED_SCOPE:
 
 EDIT_AUTHORITY: allowed | denied
+BROWSER_MCP_AUTHORITY: allowed | denied
 COMMIT_AUTHORITY: allowed | denied
 PUSH_TASK_BRANCH_AUTHORITY: allowed | denied
 FORCE_PUSH_AUTHORITY: denied
@@ -74,7 +75,9 @@ Field semantics:
 - `ASSIGNED_CANDIDATE_SHA` — chỉ bắt buộc cho `independent-reviewer`;
   reviewer phải refuse review nếu `HEAD != ASSIGNED_CANDIDATE_SHA`.
 - `EXPECTED_BASE_SHA` — writer phải xác nhận base SHA trước khi edit.
-- `EDIT_AUTHORITY: denied` chặn write/edit kể cả khi `MODE: write`
+- `EDIT_AUTHORITY: denied` chặn write/edit kể cả khi `MODE: write`;
+  `BROWSER_MCP_AUTHORITY: allowed` chỉ cấp agent-browser MCP cho đúng turn;
+  để trống hoặc `denied` thì Peer không được dùng browser MCP/CLI.
   (enforced bởi extension).
 - `CANDIDATE_SHA` trong output chỉ có nghĩa khi `COMMIT_AUTHORITY: allowed`.
 - `PUSH_TASK_BRANCH_AUTHORITY: allowed` là branch-scoped: extension chỉ cho

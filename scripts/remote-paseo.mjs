@@ -1,0 +1,1091 @@
+#!/usr/bin/env node
+// remote-paseo.mjs — remote-host executor for the paseo-pi-team role pack.
+//
+// The MCP server injected into a pi agent ALWAYS points at that agent's LOCAL
+// daemon (verified against Paseo 0.2.5 source: daemon.mcp.injectIntoAgents
+// builds the mcp config with the parent daemon's own URL). So a Lead that
+// needs to create/observe agents on ANOTHER daemon cannot use the mcp proxy —
+// it must drive the Paseo CLI with `--host <endpoint>`. This wrapper is that
+// bridge. The Lead calls the wrapper, never hand-builds shell commands.
+//
+// Why a wrapper instead of raw bash:
+//   - the endpoint VALUE lives in an env var; only the NAME appears anywhere;
+//   - provider/model/thinking are validated BEFORE a single CLI call;
+//   - argv is passed without a shell on Windows (node.exe spawns the real CLI
+//     entry), so arbitrary prose prompts survive quoting;
+//   - every result is a stable JSON envelope tagged with the hostId, so the
+//     Lead can never confuse a remote answer with a local one.
+//
+// Usage:
+//   node scripts/remote-paseo.mjs <command> [options] [--cluster <path>] [--dry-run]
+//
+//   health           --host-id <id>                     reachability (paseo ls)
+//   providers        --host-id <id>                     paseo provider ls
+//   models           --host-id <id> --provider <role>   paseo provider models
+//   workspaces       --host-id <id>                     paseo workspace ls
+//   workspace-create --host-id <id> --path <p> [--isolation local|worktree]
+//                    [--title <t>] [--project <id>]
+//   agents           --host-id <id> [--all]             paseo ls -g
+//   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
+//                    --thinking <level> [--workspace <wks>] [--title <t>]
+//                    [--prompt <text> | --brief <file>] [--wait-timeout <dur>]
+//   status           --agent-ref <host-id>/<agent-id>   paseo inspect
+//   cancel           --agent-ref <host-id>/<agent-id>   paseo stop
+//   archive          --agent-ref <host-id>/<agent-id>   paseo archive
+//   send             --agent-ref <host-id>/<agent-id>
+//                    [--prompt <text> | --prompt-file <file>] [--wait]
+//
+// Env:
+//   PASEO_TEAM_HOME         config dir (default ~/.paseo-pi-team) — same as
+//                           model-routing.mjs / preflight.mjs
+//   PASEO_TEAM_PASEO_EXEC   test/debug hook: full command line of a
+//                           paseo-compatible executable (e.g. "node ./fake.mjs")
+//
+// Output: one JSON envelope on stdout, e.g.
+//   { ok: true, command: "models", hostId: "mac-review", endpointEnv: "PASEO_MAC_REVIEW",
+//     endpointSet: true, data: [...] }
+//   { ok: false, code: "ENDPOINT_ENV_MISSING", message: "...", hostId: "mac-review",
+//     endpointEnv: "PASEO_MAC_REVIEW" }
+//
+// Exit codes: 0 ok · 1 usage/config/env error · 2 paseo CLI runtime error.
+// The endpoint VALUE is never printed, logged or embedded in errors.
+
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { classifyRemoteFailure } from "./reliability.mjs";
+import {
+	ROLE_PROVIDERS,
+	THINKING_LEVELS,
+	RoutingError,
+	cmdPercentExpansionRisk,
+	composeProviderModel,
+	loadClusterConfig,
+	splitProviderModel,
+	validateRemoteEndpoint,
+} from "./model-routing.mjs";
+
+// ---------------------------------------------------------------------------
+// Structured error
+// ---------------------------------------------------------------------------
+
+export const REMOTE_ERROR_CODES = Object.freeze([
+	"USAGE",
+	"STARTUP_IDENTITY_UNAVAILABLE",
+	"AGENT_REF_UNAVAILABLE",
+	"MODEL_RESOLUTION_MISMATCH",
+	"CLUSTER_CONFIG_INVALID",
+	"HOST_NOT_FOUND",
+	"LOCAL_HOST_UNSUPPORTED",
+	"ENDPOINT_ENV_MISSING",
+	"ENDPOINT_UNSAFE",
+	"CLI_ERROR",
+	"PROMPT_TOO_LONG",
+]);
+
+export class RemoteError extends Error {
+	/**
+	 * @param {string} code one of REMOTE_ERROR_CODES
+	 * @param {string} message human-readable explanation (never secrets)
+	 * @param {Record<string, unknown>} [details]
+	 */
+	constructor(code, message, details = {}) {
+		super(`${code}: ${message}`);
+		this.name = "RemoteError";
+		this.code = code;
+		this.details = details;
+	}
+}
+
+const usageError = (message) => new RemoteError("USAGE", message);
+
+// ---------------------------------------------------------------------------
+// Arg parsing
+// ---------------------------------------------------------------------------
+
+const BOOLEAN_FLAGS = new Set([
+	"--all",
+	"--background",
+	"--dry-run",
+	"--global",
+	"--json",
+	"--wait",
+	"--no-wait",
+]);
+
+export const DEFAULT_STARTUP_IDENTITY_TIMEOUT_MS = 10000;
+export const MAX_STARTUP_IDENTITY_TIMEOUT_MS = 120000;
+export const STARTUP_IDENTITY_POLL_INTERVAL_MS = 250;
+export const MAX_STARTUP_IDENTITY_ATTEMPTS = 512;
+
+function toCamelCase(flag) {
+	const parts = flag.replace(/^--/, "").split("-");
+	let out = parts[0];
+	for (let i = 1; i < parts.length; i++) {
+		const part = parts[i];
+		if (part) out += part[0].toUpperCase() + part.slice(1);
+	}
+	return out;
+}
+
+/**
+ * Parse `--flag value` args into a camelCase options object; bare values land
+ * in `_`. A flag whose value is missing (or that is followed by another flag)
+ * is recorded as boolean `true` — validateFlags() then rejects it when the
+ * flag requires a value, so a typo can never silently drop an option.
+ */
+export function parseArgs(argv) {
+	const out = { _: [] };
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "-h" || arg === "--help") {
+			out.help = true;
+			continue;
+		}
+		if (arg.startsWith("--")) {
+			const key = toCamelCase(arg);
+			const next = argv[i + 1];
+			if (
+				BOOLEAN_FLAGS.has(arg) ||
+				next === undefined ||
+				next.startsWith("--")
+			) {
+				out[key] = true;
+			} else {
+				out[key] = next;
+				i++;
+			}
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			throw usageError(`unknown flag "${arg}"`);
+		}
+		out._.push(arg);
+	}
+	return out;
+}
+
+// Per-command flag allowlist (camelCase keys — the parse output). Anything
+// outside the set is a typo — rejected fail-closed so a misspelled option
+// cannot silently change which workspace/provider/agent a remote command
+// targets.
+const COMMAND_FLAG_KEYS = {
+	health: ["hostId"],
+	providers: ["hostId"],
+	models: ["hostId", "provider"],
+	workspaces: ["hostId"],
+	"workspace-create": ["hostId", "path", "isolation", "title", "project"],
+	agents: ["hostId", "all"],
+	run: [
+		"hostId",
+		"provider",
+		"thinking",
+		"workspace",
+		"title",
+		"prompt",
+		"brief",
+		"waitTimeout",
+		"startupTimeout",
+		"background",
+	],
+	status: ["agentRef"],
+	cancel: ["agentRef"],
+	archive: ["agentRef"],
+	send: ["agentRef", "prompt", "promptFile", "wait", "noWait"],
+};
+
+const GLOBAL_FLAG_KEYS = new Set(["cluster", "dryRun", "json", "help"]);
+const BOOLEAN_KEYS = new Set([...BOOLEAN_FLAGS].map(toCamelCase));
+
+/**
+ * Fail-closed flag validation against the command's allowlist: unknown flags
+ * and value-flags missing their value are rejected.
+ */
+export function validateFlags(command, out) {
+	const allowed = new Set([
+		...(COMMAND_FLAG_KEYS[command] ?? []),
+		...GLOBAL_FLAG_KEYS,
+	]);
+	for (const key of Object.keys(out)) {
+		if (key === "_") continue;
+		if (!allowed.has(key)) {
+			throw usageError(`flag "--${key}" is not valid for command "${command}"`);
+		}
+		if (out[key] === true && !BOOLEAN_KEYS.has(key)) {
+			throw usageError(`flag "--${key}" requires a value`);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Host resolution from the cluster contract (single source of truth)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a remote host entry from the controller-local cluster config.
+ * The endpoint VALUE is only ever returned internally; every thrown error
+ * mentions the env-var NAME, never the value.
+ */
+export function resolveHost(cluster, hostId, options = {}) {
+	const platform = options.platform ?? process.platform;
+	const host = cluster?.hosts?.[hostId];
+	if (!host) {
+		throw new RemoteError(
+			"HOST_NOT_FOUND",
+			`cluster routing config has no host "${hostId}" (known: ${Object.keys(cluster?.hosts ?? {}).join(", ") || "none"})`,
+			{ hostId },
+		);
+	}
+	if (host.connection.type !== "remote") {
+		throw new RemoteError(
+			"LOCAL_HOST_UNSUPPORTED",
+			`host "${hostId}" is connection.type=local — the MCP server injected into this agent already talks to that daemon. Use MCP operations (list_providers/create_agent/...) for local; the remote wrapper only drives REMOTE daemons.`,
+			{ hostId },
+		);
+	}
+	const envName = host.connection.endpointEnv;
+	const value = envName ? process.env[envName] : undefined;
+	if (!envName || typeof value !== "string" || value.trim() === "") {
+		throw new RemoteError(
+			"ENDPOINT_ENV_MISSING",
+			`endpoint env ${envName ?? "<missing endpointEnv>"} is not set for host "${hostId}". Set it persistently (e.g. setx / [Environment]::SetEnvironmentVariable), restart the controller process, and re-check — a session-local export is invisible to an already-running controller.`,
+			{ hostId, endpointEnv: envName },
+		);
+	}
+	if (!validateRemoteEndpoint(value)) {
+		throw new RemoteError(
+			"ENDPOINT_UNSAFE",
+			`endpoint env ${envName} has an unexpected shape (expected a paseo pairing-offer URL or tcp:// target) — refusing to use it.`,
+			{ hostId, endpointEnv: envName },
+		);
+	}
+	if (platform === "win32" && cmdPercentExpansionRisk(value)) {
+		throw new RemoteError(
+			"ENDPOINT_UNSAFE",
+			`endpoint env ${envName} contains 2+ "%" characters — unsafe with cmd.exe %VAR% expansion on Windows controllers. Use a pairing offer URL or run the controller on a non-cmd host.`,
+			{ hostId, endpointEnv: envName },
+		);
+	}
+	return { hostId, host, endpointEnv: envName, endpoint: value };
+}
+
+/**
+ * Split `<host-id>/<agent-id>` at the FIRST slash (agent ids are UUIDs — they
+ * never contain slashes). Pure string split; no cluster validation here so
+ * buildArgv can stay cluster-free. Validation against the cluster happens in
+ * parseAgentRef (the main() path).
+ */
+export function splitAgentRef(ref) {
+	if (typeof ref !== "string" || ref.trim() === "") {
+		throw usageError("--agent-ref <host-id>/<agent-id> is required");
+	}
+	const slash = ref.indexOf("/");
+	if (slash <= 0 || slash === ref.length - 1) {
+		throw usageError(`--agent-ref must be <host-id>/<agent-id> (got "${ref}")`);
+	}
+	const hostId = ref.slice(0, slash).trim();
+	const agentId = ref.slice(slash + 1).trim();
+	if (!hostId || !agentId) {
+		throw usageError("--agent-ref has an empty host-id or agent-id segment");
+	}
+	return { hostId, agentId };
+}
+
+/**
+ * Parse `<host-id>/<agent-id>` (composite AGENT_REF) and resolve the host.
+ * The host prefix must resolve to a REMOTE host in the cluster config — a
+ * ref pointing at the local host is rejected (use MCP for local agents).
+ */
+export function parseAgentRef(ref, cluster, options = {}) {
+	const { hostId, agentId } = splitAgentRef(ref);
+	const host = resolveHost(cluster, hostId, options);
+	return { hostId, agentId, ...host };
+}
+
+// ---------------------------------------------------------------------------
+// Run-option validation (provider / thinking / prompt)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate the FULL create_agent provider string
+ * `<role-provider>/<pi-provider>/<model-id>`. Paseo splits at the FIRST slash
+ * only, so model ids may contain further slashes. Returns the canonical form.
+ */
+export function validateRunProvider(provider) {
+	if (typeof provider !== "string" || provider.trim() === "") {
+		throw usageError(
+			"--provider <role-provider>/<pi-provider>/<model-id> is required",
+		);
+	}
+	let roleProvider, model;
+	try {
+		({ provider: roleProvider, model } = splitProviderModel(provider));
+		// The model part must itself be <pi-provider>/<model-id> — both sides
+		// non-empty — or the route is unverifiable.
+		splitProviderModel(model);
+	} catch (error) {
+		if (error instanceof RoutingError) {
+			throw usageError(
+				`--provider must be <role-provider>/<pi-provider>/<model-id> (got "${provider}")`,
+			);
+		}
+		throw error;
+	}
+	if (!ROLE_PROVIDERS.includes(roleProvider)) {
+		throw usageError(
+			`role provider "${roleProvider}" is not a durable role profile (${ROLE_PROVIDERS.join(", ")})`,
+		);
+	}
+	return {
+		roleProvider,
+		model,
+		provider: composeProviderModel(roleProvider, model),
+	};
+}
+
+export function validateThinking(thinking) {
+	if (typeof thinking !== "string" || !THINKING_LEVELS.includes(thinking)) {
+		throw usageError(
+			`--thinking must be one of ${THINKING_LEVELS.join(" | ")} (got "${thinking}")`,
+		);
+	}
+	return thinking;
+}
+
+/** Max prompt length for a single argv element (Windows CreateProcess limit). */
+export const MAX_PROMPT_LENGTH = 20000;
+
+/**
+ * Parse a paseo duration string ("30s", "2m", "1h", "500ms", "90") to ms.
+ * Returns null when unparseable.
+ */
+export function parseDurationMs(value) {
+	const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/.exec(String(value).trim());
+	if (!match) return null;
+	const mult = { ms: 1, s: 1000, m: 60000, h: 3600000 }[match[2] ?? "s"];
+	return Number(match[1]) * mult;
+}
+
+function sleepSync(ms) {
+	if (ms <= 0) return;
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function parseCliJson(result) {
+	if (!result?.ok) return null;
+	try {
+		return JSON.parse(result.stdout);
+	} catch {
+		return null;
+	}
+}
+
+function unwrapStatusPayload(data) {
+	if (Array.isArray(data)) return data[0] ?? null;
+	return data?.data ?? data;
+}
+
+function identityValue(value) {
+	return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+export function extractRuntimeIdentity(data) {
+	const runtime =
+		data?.snapshot?.runtimeInfo ??
+		data?.snapshot?.RuntimeInfo ??
+		data?.runtimeInfo ??
+		data?.RuntimeInfo ??
+		data?.data?.snapshot?.runtimeInfo ??
+		data?.data?.runtimeInfo ??
+		data?.data ??
+		data;
+	return {
+		model: identityValue(runtime?.model ?? runtime?.Model),
+		thinking: identityValue(
+			runtime?.thinkingOptionId ??
+			runtime?.ThinkingOptionId ??
+			runtime?.thinking ??
+			runtime?.Thinking,
+		),
+	};
+}
+
+/**
+ * Poll a newly-created background agent until its runtime identity is ready.
+ * Missing identity is a startup condition, not a mismatch. Only an explicit
+ * model/thinking value that differs from the request is a confirmed mismatch.
+ */
+export function waitForRuntimeIdentity({
+	status,
+	requested,
+	timeoutMs = DEFAULT_STARTUP_IDENTITY_TIMEOUT_MS,
+	intervalMs = STARTUP_IDENTITY_POLL_INTERVAL_MS,
+	now = () => performance.now(),
+	sleep = sleepSync,
+	maxAttempts = MAX_STARTUP_IDENTITY_ATTEMPTS,
+}) {
+	const boundedTimeoutMs = Math.min(
+		MAX_STARTUP_IDENTITY_TIMEOUT_MS,
+		Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0,
+	);
+	const boundedIntervalMs = Number.isFinite(intervalMs) ? Math.max(0, intervalMs) : 0;
+	const boundedMaxAttempts = Number.isFinite(maxAttempts)
+		? Math.max(1, Math.floor(maxAttempts))
+		: MAX_STARTUP_IDENTITY_ATTEMPTS;
+	const deadline = now() + boundedTimeoutMs;
+	let attempts = 0;
+	let last = null;
+	while (attempts < boundedMaxAttempts) {
+		const remainingMs = Math.max(0, deadline - now());
+		if (attempts > 0 && remainingMs <= 0) break;
+		attempts++;
+		const result = status({ attempt: attempts, remainingMs });
+		last = result;
+		const data = unwrapStatusPayload(parseCliJson(result));
+		const observed = extractRuntimeIdentity(data);
+		if (observed.model !== null && observed.thinking !== null) {
+			if (observed.model !== requested.model || observed.thinking !== requested.thinking) {
+				return { state: "mismatch", attempts, observed, result };
+			}
+			return { state: "ready", attempts, observed, result };
+		}
+		const remainingAfterStatus = Math.max(0, deadline - now());
+		if (remainingAfterStatus <= 0) break;
+		sleep(Math.min(boundedIntervalMs, remainingAfterStatus));
+	}
+	return { state: "unavailable", attempts, result: last };
+}
+
+export function readPrompt(opts) {
+	const hasPrompt = typeof opts.prompt === "string" && opts.prompt.length > 0;
+	const hasBrief = typeof opts.brief === "string" && opts.brief.length > 0;
+	if (hasPrompt && hasBrief) {
+		throw usageError("pass either --prompt or --brief, not both");
+	}
+	let prompt = "";
+	if (hasBrief) {
+		if (!existsSync(opts.brief)) {
+			throw usageError(`--brief file not found: ${opts.brief}`);
+		}
+		prompt = readFileSync(opts.brief, "utf8");
+	} else if (hasPrompt) {
+		prompt = opts.prompt;
+	}
+	prompt = prompt.trim();
+	if (!prompt) {
+		throw usageError(
+			"a non-empty prompt is required (--prompt <text> or --brief <file>)",
+		);
+	}
+	if (prompt.length > MAX_PROMPT_LENGTH) {
+		throw new RemoteError(
+			"PROMPT_TOO_LONG",
+			`prompt is ${prompt.length} chars (max ${MAX_PROMPT_LENGTH}) — the value travels as one Windows command-line argument; split the task or use a shorter brief`,
+			{ promptLength: prompt.length, max: MAX_PROMPT_LENGTH },
+		);
+	}
+	return prompt;
+}
+
+// ---------------------------------------------------------------------------
+// Paseo CLI argv construction
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the exact paseo CLI argv for a remote command. `endpoint` is the
+ * secret endpoint VALUE — it must never leave this function except inside the
+ * argv handed to the subprocess (and the `--dry-run` display, redacted).
+ */
+export function buildArgv(command, opts, endpoint) {
+	const ep = ["--host", endpoint];
+	switch (command) {
+		case "health":
+			return ["ls", ...ep, "--json"];
+		case "providers":
+			return ["provider", "ls", ...ep, "--json"];
+		case "models": {
+			if (typeof opts.provider !== "string" || opts.provider.trim() === "") {
+				throw usageError("models requires --provider <role-provider>");
+			}
+			return ["provider", "models", opts.provider.trim(), ...ep, "--json"];
+		}
+		case "workspaces":
+			return ["workspace", "ls", ...ep, "--json"];
+		case "workspace-create": {
+			if (typeof opts.path !== "string" || opts.path.trim() === "") {
+				throw usageError(
+					"workspace-create requires --path <path-on-remote-host> (a remote workspace from the controller's cwd makes no sense)",
+				);
+			}
+			const argv = ["workspace", "create", ...ep];
+			argv.push("--path", opts.path.trim());
+			if (typeof opts.isolation === "string" && opts.isolation.trim() !== "") {
+				argv.push("--isolation", opts.isolation.trim());
+			}
+			if (typeof opts.title === "string" && opts.title.trim() !== "") {
+				argv.push("--title", opts.title.trim());
+			}
+			if (typeof opts.project === "string" && opts.project.trim() !== "") {
+				argv.push("--project", opts.project.trim());
+			}
+			argv.push("--json");
+			return argv;
+		}
+		case "agents": {
+			const argv = ["ls", ...ep, "-g", "--json"];
+			if (opts.all) argv.splice(1, 0, "-a");
+			return argv;
+		}
+		case "run": {
+			const { provider } = validateRunProvider(opts.provider);
+			validateThinking(opts.thinking);
+			if (typeof opts.workspace !== "string" || opts.workspace.trim() === "") {
+				throw usageError(
+					"run requires --workspace <id> — the remote workspace id from `workspaces`/`workspace-create` (a remote agent without a workspace would run in the controller's cwd)",
+				);
+			}
+			const prompt = readPrompt(opts);
+			const argv = [
+				"run",
+				...ep,
+				"--provider",
+				provider,
+				"--thinking",
+				opts.thinking,
+			];
+			if (typeof opts.workspace === "string" && opts.workspace.trim() !== "") {
+				argv.push("--workspace", opts.workspace.trim());
+			}
+			if (typeof opts.title === "string" && opts.title.trim() !== "") {
+				argv.push("--title", opts.title.trim());
+			}
+			const waitTimeout =
+				typeof opts.waitTimeout === "string" && opts.waitTimeout.trim() !== "";
+			if (opts.background && waitTimeout) {
+				throw usageError(
+					"pass either --background (default) or --wait-timeout <dur>, not both",
+				);
+			}
+			argv.push(waitTimeout ? "--wait-timeout" : "-d");
+			if (waitTimeout) argv.push(opts.waitTimeout.trim());
+			argv.push("--json");
+			argv.push(prompt);
+			return argv;
+		}
+		case "status": {
+			const { agentId } = splitAgentRef(opts.agentRef);
+			return ["inspect", agentId, ...ep, "--json"];
+		}
+		case "cancel": {
+			const { agentId } = splitAgentRef(opts.agentRef);
+			return ["stop", agentId, ...ep, "--json"];
+		}
+		case "archive": {
+			const { agentId } = splitAgentRef(opts.agentRef);
+			return ["archive", agentId, ...ep, "--json"];
+		}
+		case "send": {
+			const { agentId } = splitAgentRef(opts.agentRef);
+			const argv = ["send", agentId, ...ep];
+			const hasPrompt =
+				typeof opts.prompt === "string" && opts.prompt.length > 0;
+			const hasPromptFile =
+				typeof opts.promptFile === "string" && opts.promptFile.length > 0;
+			if (hasPrompt && hasPromptFile) {
+				throw usageError("pass either --prompt or --prompt-file, not both");
+			}
+			if (hasPromptFile) {
+				if (!existsSync(opts.promptFile)) {
+					throw usageError(`--prompt-file not found: ${opts.promptFile}`);
+				}
+				argv.push("--prompt-file", opts.promptFile);
+			} else if (hasPrompt) {
+				if (opts.prompt.length > MAX_PROMPT_LENGTH) {
+					throw new RemoteError(
+						"PROMPT_TOO_LONG",
+						`prompt is ${opts.prompt.length} chars (max ${MAX_PROMPT_LENGTH}) — use --prompt-file <file> for long messages`,
+						{ promptLength: opts.prompt.length, max: MAX_PROMPT_LENGTH },
+					);
+				}
+				argv.push("--prompt", opts.prompt);
+			} else {
+				throw usageError(
+					"send requires --prompt <text> or --prompt-file <file>",
+				);
+			}
+			if (opts.wait !== true) argv.push("--no-wait");
+			argv.push("--json");
+			return argv;
+		}
+		default:
+			throw usageError(`unknown command "${command}"`);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CLI executable resolution (no shell on Windows)
+// ---------------------------------------------------------------------------
+
+function splitCommandLine(commandLine) {
+	const parts = [];
+	let current = "";
+	let inQuotes = false;
+	for (const ch of commandLine) {
+		if (ch === '"') {
+			inQuotes = !inQuotes;
+			continue;
+		}
+		if (/\s/.test(ch) && !inQuotes) {
+			if (current) {
+				parts.push(current);
+				current = "";
+			}
+			continue;
+		}
+		current += ch;
+	}
+	if (current) parts.push(current);
+	return parts;
+}
+
+function findOnPath(name) {
+	for (const dir of (process.env.PATH ?? "").split(
+		process.platform === "win32" ? ";" : ":",
+	)) {
+		if (!dir) continue;
+		const candidate = join(dir, name);
+		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/** Parse the npm .cmd shim for the real `node ... entry.js` invocation. */
+export function resolveCmdEntry(shimPath) {
+	let text;
+	try {
+		text = readFileSync(shimPath, "utf8");
+	} catch {
+		return undefined;
+	}
+	// npm shims end with: "%_prog%" "%dp0%\node_modules\@scope\pkg\dist\index.js" %*
+	const match = text.match(/"([^"]*(?:%~dp0|%dp0%)[^"]*\.js)"/i);
+	if (match?.[1]) {
+		const entry = match[1]
+			.replace(/%~dp0|%dp0%/gi, dirname(shimPath))
+			.replace(/[\\/]/g, sep);
+		if (existsSync(entry)) return entry;
+	}
+	// Last resort: the conventional layout next to the shim.
+	const conventional = join(
+		dirname(shimPath),
+		"node_modules",
+		"@getpaseo",
+		"cli",
+		"dist",
+		"index.js",
+	);
+	return existsSync(conventional) ? conventional : undefined;
+}
+
+/**
+ * Resolve `[bin, ...prefixArgs]` to execute. On Windows, `.cmd` shims cannot
+ * be spawned with argv (EINVAL), so we locate the shim, read its real node
+ * entry, and spawn node.exe directly — argv fidelity without cmd.exe quoting.
+ * PASEO_TEAM_PASEO_EXEC overrides everything (test/debug hook).
+ */
+export function resolvePaseoExec() {
+	const override = process.env.PASEO_TEAM_PASEO_EXEC?.trim();
+	if (override) {
+		const parts = splitCommandLine(override);
+		if (parts.length === 0) {
+			throw new RemoteError("USAGE", "PASEO_TEAM_PASEO_EXEC is set but empty");
+		}
+		return parts;
+	}
+	if (process.platform !== "win32") return ["paseo"];
+	const exe = findOnPath("paseo.exe");
+	if (exe) return [exe];
+	const shim = findOnPath("paseo.cmd") ?? findOnPath("paseo.bat");
+	if (shim) {
+		const entry = resolveCmdEntry(shim);
+		if (entry) return [process.execPath, entry];
+	}
+	// Fallback: let the spawn fail with the real error (child_process will
+	// surface ENOENT / EINVAL); the wrapper maps it to a clear CLI_ERROR.
+	return ["paseo"];
+}
+
+/**
+ * Run the paseo CLI with a fully-specified argv. No shell on any platform;
+ * the secret endpoint value travels inside argv only.
+ */
+export function runCli(argv, { timeoutMs = 120000, secret = "", maxAttempts = 3 } = {}) {
+	const [bin, ...prefix] = resolvePaseoExec();
+	const redact = (text) =>
+		secret
+			? String(text).split(secret).join("<endpoint-value-redacted>")
+			: String(text);
+	for (let attempt = 0; attempt < Math.max(1, maxAttempts); attempt++) {
+	try {
+		const stdout = execFileSync(bin, [...prefix, ...argv], {
+			encoding: "utf8",
+			timeout: timeoutMs,
+			maxBuffer: 16 * 1024 * 1024,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: process.env,
+			windowsHide: true,
+		});
+		return { ok: true, stdout: redact(stdout), status: 0, attempts: attempt + 1 };
+	} catch (error) {
+		const failure = {
+			ok: false,
+			status: typeof error?.status === "number" ? error.status : 1,
+			stdout: error?.stdout ? redact(error.stdout) : "",
+			stderr: error?.stderr ? redact(error.stderr) : "",
+			error: redact(error?.message ? String(error.message).split("\n")[0] : String(error)),
+		};
+		const retryable = classifyRemoteFailure(failure) === "retryable";
+		if (!retryable || attempt + 1 >= Math.max(1, maxAttempts)) {
+			return { ...failure, attempts: attempt + 1 };
+		}
+		const delayMs = Math.min(2000, 250 * 2 ** attempt);
+		if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+	}
+	}
+	return { ok: false, status: 1, stdout: "", error: "retry exhausted", attempts: maxAttempts };
+}
+
+// ---------------------------------------------------------------------------
+// Output envelope
+// ---------------------------------------------------------------------------
+
+class EmitExit extends Error {}
+
+function emit(payload, exitCode) {
+	// stdout may contain a large JSON response. Setting exitCode lets Node drain
+	// the stream instead of terminating synchronously via process.exit().
+	process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+	process.exitCode = exitCode;
+	throw new EmitExit();
+}
+
+const COMMANDS = new Set([
+	"health",
+	"providers",
+	"models",
+	"workspaces",
+	"workspace-create",
+	"agents",
+	"run",
+	"status",
+	"cancel",
+	"archive",
+	"send",
+]);
+
+const HELP = `remote-paseo.mjs — drive a REMOTE Paseo daemon from the controller (Lead).
+
+The MCP server injected into this agent only talks to the LOCAL daemon. For a
+remote host (connection.type: "remote" in cluster-routing.local.json) use this
+wrapper; it resolves the endpoint env var, validates everything, and never
+prints the endpoint value.
+
+Commands:
+  health           --host-id <id>
+  providers        --host-id <id>
+  models           --host-id <id> --provider <role-provider>
+  workspaces       --host-id <id>
+  workspace-create --host-id <id> --path <path> [--isolation local|worktree]
+                   [--title <t>] [--project <id>]
+  agents           --host-id <id> [--all]
+  run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
+                   --thinking <level> --workspace <wks-id> [--title <t>]
+                   [--prompt <text> | --brief <file>] [--wait-timeout <dur>]
+                   [--startup-timeout <dur>]
+  status           --agent-ref <host-id>/<agent-id>
+  cancel           --agent-ref <host-id>/<agent-id>
+  archive          --agent-ref <host-id>/<agent-id>
+  send             --agent-ref <host-id>/<agent-id>
+                   [--prompt <text> | --prompt-file <file>] [--wait]
+
+Common:
+  --cluster <path>   cluster routing config (default ~/.paseo-pi-team/cluster-routing.local.json)
+  --dry-run          print the paseo argv (endpoint redacted) without executing
+  --help             this help
+
+Output: one JSON envelope on stdout (ok, command, hostId, endpointEnv,
+endpointSet, data). Exit: 0 ok · 1 usage/config/env · 2 CLI runtime error.`;
+
+// ---------------------------------------------------------------------------
+// CLI entry
+// ---------------------------------------------------------------------------
+
+/** Compare canonical filesystem paths so macOS /var aliases work. */
+export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
+	if (!entry) return false;
+	try {
+		return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+	} catch {
+		return false;
+	}
+}
+
+function basePayload(command, hostInfo) {
+	const payload = { ok: true, command };
+	if (hostInfo) {
+		payload.hostId = hostInfo.hostId;
+		payload.endpointEnv = hostInfo.endpointEnv;
+		payload.endpointSet = true;
+	}
+	return payload;
+}
+
+function main() {
+	let parsed;
+	try {
+		parsed = parseArgs(process.argv.slice(2));
+	} catch (error) {
+		emit(
+			{
+				ok: false,
+				code: "USAGE",
+				message: error.message,
+				details: error.details,
+			},
+			1,
+		);
+	}
+	if (parsed.help) {
+		console.log(HELP);
+		process.exitCode = 0;
+		return;
+	}
+	const command = parsed._[0];
+	if (!command || !COMMANDS.has(command)) {
+		emit(
+			{
+				ok: false,
+				code: "USAGE",
+				message: `expected one of: ${[...COMMANDS].join(", ")} (got "${command ?? "<none>"}")`,
+			},
+			1,
+		);
+	}
+	try {
+		validateFlags(command, parsed);
+	} catch (error) {
+		emit(
+			{
+				ok: false,
+				code: error.code ?? "USAGE",
+				message: error.message,
+				...(error.details ?? {}),
+			},
+			1,
+		);
+	}
+
+	let cluster;
+	try {
+		cluster = loadClusterConfig(parsed.cluster);
+	} catch (error) {
+		const details = error instanceof RoutingError ? error.details : {};
+		emit(
+			{
+				ok: false,
+				code: "CLUSTER_CONFIG_INVALID",
+				message: error instanceof RoutingError ? error.message : String(error),
+				details,
+				clusterPath: parsed.cluster,
+			},
+			1,
+		);
+	}
+
+	let hostInfo = null;
+	try {
+		if (
+			command === "status" ||
+			command === "cancel" ||
+			command === "archive" ||
+			command === "send"
+		) {
+			// Agent-ref commands resolve the host from the ref prefix.
+			const { hostId, agentId, endpoint, endpointEnv } = parseAgentRef(
+				parsed.agentRef,
+				cluster,
+			);
+			parsed.agentId = agentId;
+			hostInfo = { hostId, endpointEnv, endpoint };
+		} else {
+			hostInfo = resolveHost(cluster, parsed.hostId);
+		}
+	} catch (error) {
+		emit(
+			{
+				ok: false,
+				code: error.code ?? "ERROR",
+				message: error.message,
+				...(error.details ?? {}),
+			},
+			1,
+		);
+	}
+
+	let argv;
+	try {
+		argv = buildArgv(command, parsed, hostInfo.endpoint);
+	} catch (error) {
+		emit(
+			{
+				ok: false,
+				code: error.code ?? "USAGE",
+				message: error.message,
+				...(error.details ?? {}),
+			},
+			1,
+		);
+	}
+
+	if (parsed.dryRun) {
+		const redactedArgv = argv.map((a) =>
+			a === hostInfo.endpoint ? `<redacted:${hostInfo.endpointEnv}>` : a,
+		);
+		emit(
+			{ ...basePayload(command, hostInfo), dryRun: true, argv: redactedArgv },
+			0,
+		);
+	}
+
+	// run --wait-timeout can legitimately exceed the default 120s subprocess
+	// timeout: scale the child timeout to the requested duration (+60s buffer).
+	// An invalid duration is a wrapper usage error; it must never disable the
+	// subprocess timeout by becoming `0`.
+	let timeoutMs = 120000;
+	if (command === "run" && typeof parsed.waitTimeout === "string") {
+		const parsedWait = parseDurationMs(parsed.waitTimeout);
+		if (parsedWait === null || !Number.isFinite(parsedWait) || parsedWait <= 0) {
+			emit({ ok: false, code: "USAGE", message: `--wait-timeout must be a positive duration (got "${parsed.waitTimeout}")` }, 1);
+		}
+		timeoutMs = parsedWait + 60000;
+	}
+	let startupTimeoutMs = DEFAULT_STARTUP_IDENTITY_TIMEOUT_MS;
+	if (command === "run" && typeof parsed.startupTimeout === "string") {
+		const parsedStartup = parseDurationMs(parsed.startupTimeout);
+		if (
+			parsedStartup === null ||
+			!Number.isFinite(parsedStartup) ||
+			parsedStartup <= 0 ||
+			parsedStartup > MAX_STARTUP_IDENTITY_TIMEOUT_MS
+		) {
+			emit({ ok: false, code: "USAGE", message: `--startup-timeout must be a positive duration no greater than ${MAX_STARTUP_IDENTITY_TIMEOUT_MS}ms (got "${parsed.startupTimeout}")` }, 1);
+		}
+		startupTimeoutMs = parsedStartup;
+	}
+
+	const retryableReadCommand = new Set([
+		"health",
+		"providers",
+		"models",
+		"workspaces",
+		"agents",
+		"status",
+	]).has(command);
+	const result = runCli(argv, {
+		secret: hostInfo.endpoint,
+		timeoutMs,
+		maxAttempts: retryableReadCommand ? 3 : 1,
+	});
+	const payload = basePayload(command, hostInfo);
+	if (!result.ok) {
+		payload.ok = false;
+		payload.code = "CLI_ERROR";
+		payload.message =
+			result.error ||
+			`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
+		if (result.stdout) payload.data = result.stdout;
+		emit(payload, 2);
+	}
+
+	if (command === "run") {
+		let parsedOut;
+		try {
+			parsedOut = JSON.parse(result.stdout);
+		} catch {
+			parsedOut = { raw: result.stdout };
+		}
+		payload.data = parsedOut;
+		if (!parsedOut || typeof parsedOut.agentId !== "string" || parsedOut.agentId.trim() === "") {
+			payload.ok = false;
+			payload.code = "AGENT_REF_UNAVAILABLE";
+			payload.message = "remote run did not return an agent id; agent was not archived because its lifecycle identity is unavailable";
+			emit(payload, 2);
+		}
+		if (parsedOut && typeof parsedOut.agentId === "string") {
+			payload.agentRef = `${hostInfo.hostId}/${parsedOut.agentId}`;
+			const statusRef = `${hostInfo.hostId}/${parsedOut.agentId}`;
+			const requested = validateRunProvider(parsed.provider);
+			const identity = waitForRuntimeIdentity({
+				requested: {
+					model: requested.model,
+					thinking: parsed.thinking,
+				},
+				status: ({ remainingMs }) => runCli(buildArgv("status", { agentRef: statusRef }, hostInfo.endpoint), {
+					secret: hostInfo.endpoint,
+					timeoutMs: Math.max(1, Math.floor(Math.min(120000, remainingMs || 1))),
+					maxAttempts: 1,
+				}),
+				timeoutMs: startupTimeoutMs,
+			});
+			payload.startupIdentity = {
+				state: identity.state,
+				attempts: identity.attempts,
+				...(identity.observed ? { observed: identity.observed } : {}),
+				...(identity.state === "unavailable" && identity.result
+					? { lastStatus: identity.result }
+					: {}),
+			};
+			if (identity.state === "unavailable") {
+				payload.ok = false;
+				payload.code = "STARTUP_IDENTITY_UNAVAILABLE";
+				payload.message = "runtime identity was not available within the startup timeout; agent was not archived";
+				emit(payload, 2);
+			}
+			if (identity.state === "mismatch") {
+				const archive = runCli(buildArgv("archive", { agentRef: statusRef }, hostInfo.endpoint), {
+					secret: hostInfo.endpoint,
+					timeoutMs: 120000,
+					maxAttempts: 1,
+				});
+				payload.ok = false;
+				payload.code = "MODEL_RESOLUTION_MISMATCH";
+				payload.message = archive.ok
+					? "observed runtime identity differs from the requested route; confirmed mismatching agent was archived"
+					: "observed runtime identity differs from the requested route; archive attempt failed and the agent may still be active";
+				payload.archive = {
+					ok: archive.ok,
+					attempts: archive.attempts,
+					...(archive.status !== undefined ? { status: archive.status } : {}),
+					...(archive.error ? { error: archive.error } : {}),
+				};
+				emit(payload, 2);
+			}
+		}
+	} else {
+		try {
+			payload.data = JSON.parse(result.stdout);
+		} catch {
+			payload.data = { raw: result.stdout };
+		}
+	}
+	emit(payload, 0);
+}
+
+if (isMainModule()) {
+	try {
+		main();
+	} catch (error) {
+		if (!(error instanceof EmitExit)) throw error;
+	}
+}

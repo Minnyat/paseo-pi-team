@@ -20,6 +20,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { inspectAgentBrowser } from "./browser-setup.mjs";
 import {
 	RoutingError,
 	buildProviderInventory,
@@ -113,6 +114,22 @@ function summarizeMessages() {
 
 // --- node / git / CLIs --------------------------------------------------------
 
+{
+	const ocr = tryExec("ocr", ["version"]);
+	if (!ocr.ok) {
+		warn("ocr-cli", "ocr CLI unavailable — independent-reviewer OCR workflow is blocked (install @alibaba-group/open-code-review)");
+	} else {
+		const versionLine = ocr.stdout.trim().split(/\r?\n/)[0] || "";
+		const supported = /^open-code-review v1\.8\.10(?:\b|\s)/i.test(versionLine);
+		if (supported) pass("ocr-cli", versionLine);
+		else warn("ocr-cli", `${versionLine || "installed"} — tested contract is open-code-review v1.8.10; reviewer wrapper will fail closed`);
+		for (const command of ["preview", "rule"]) {
+			const help = tryExec("ocr", ["delegate", command, "--help"]);
+			if (help.ok && help.stdout.includes("--repo") && help.stdout.includes("--from")) pass(`ocr-capability:${command}`, "delegate capability available");
+			else warn(`ocr-capability:${command}`, "delegate capability probe failed — reviewer wrapper will fail closed");
+		}
+	}
+}
 {
 	const major = Number(process.versions.node.split(".")[0]);
 	if (major >= PINNED.nodeMajor) pass("node", process.versions.node);
@@ -209,6 +226,48 @@ let daemonUp = false;
 			warn("mcp-adapter", "installed but version unreadable");
 		else warn("mcp-adapter", `detected ${version}, pinned ${PINNED.adapter}`);
 	}
+}
+
+// --- agent-browser -------------------------------------------------------------
+
+{
+	const browser = inspectAgentBrowser();
+	if (browser.cli) pass("agent-browser-cli", browser.cliVersion || "installed");
+	else
+		fail(
+			"agent-browser-cli",
+			"agent-browser CLI missing → installer should run npm install -g agent-browser",
+		);
+	if (browser.browserRuntime)
+		pass("agent-browser-runtime", "Chrome/runtime ready");
+	else
+		fail(
+			"agent-browser-runtime",
+			"Chrome/runtime missing or doctor failed → run agent-browser install",
+		);
+	if (browser.skill) pass("agent-browser-skill", browser.skillPath);
+	else
+		fail(
+			"agent-browser-skill",
+			`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
+		);
+	if (browser.configReadable && browser.browserMcpEnabled)
+		pass("agent-browser-mcp", browser.configPath);
+	else if (!browser.configReadable)
+		fail(
+			"agent-browser-mcp",
+			`${browser.configPath} is missing or invalid JSON`,
+		);
+	else if (browser.browserMcp)
+		fail(
+			"agent-browser-mcp",
+			`${browser.configPath} contains a disabled agent-browser server`,
+		);
+	else
+		fail(
+			"agent-browser-mcp",
+			`${browser.configPath} has no agent-browser server entry`,
+		);
 }
 
 // --- role-pack installation ---------------------------------------------------
