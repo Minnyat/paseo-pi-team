@@ -12,10 +12,10 @@
 // database, hold API keys, or fall back to another model/host on its own.
 // Paseo remains the only control plane; git SHA remains the artifact anchor.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export const MODEL_CLASSES = Object.freeze([
 	"MONITOR_ECONOMY",
@@ -727,7 +727,9 @@ export function cmdPercentExpansionRisk(value) {
  * @param {{provider?: string, model?: string|null, thinkingOptionId?: string|null}|null|undefined} runtimeInfo
  * @returns {{ok: true, requested: object, observed: object}}
  * @throws {RoutingError} MODEL_RESOLUTION_MISMATCH — also when runtimeInfo is
- *   missing/unverifiable (fail-closed: unverifiable is NOT a pass).
+ *   missing/unverifiable (fail-closed: unverifiable is NOT a pass). The remote
+ *   startup orchestrator must distinguish this final verifier from its bounded
+ *   pre-identity startup-unavailable state before taking lifecycle action.
  */
 export function verifyObserved(requested, runtimeInfo) {
 	const mismatch = (message, observed) =>
@@ -795,17 +797,17 @@ export function verifyObserved(requested, runtimeInfo) {
 // Exit code 0 ok, 1 config error, 2 route unavailable (structured stdout).
 // ---------------------------------------------------------------------------
 
-function isMain() {
-	const entry = process.argv[1];
+/** Compare canonical filesystem paths so macOS /var aliases work. */
+export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
 	if (!entry) return false;
 	try {
-		return import.meta.url === pathToFileURL(entry).href;
+		return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
 	} catch {
 		return false;
 	}
 }
 
-if (isMain()) {
+if (isMainModule()) {
 	const argv = process.argv.slice(2);
 	const command = argv[0];
 	const optArg = (name) => {

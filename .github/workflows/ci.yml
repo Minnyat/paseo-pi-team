@@ -66,6 +66,7 @@ jobs:
           node --check scripts/browser-setup.mjs
           node --check scripts/ocr-review.mjs
           node --check scripts/ocr-setup.mjs
+          node --check scripts/team-scripts-path.mjs
           node --check test/fixtures/fake-paseo.mjs
           node --check test/fixtures/fake-ocr.mjs
 

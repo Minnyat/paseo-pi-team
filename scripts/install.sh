@@ -12,10 +12,11 @@ set -euo pipefail
 
 ROLE_PACK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PI_HOME="${PI_HOME:-$HOME/.pi}"
+AGENT_DIR="${PI_CODING_AGENT_DIR:-$PI_HOME/agent}"
 
-EXT_DIR="$PI_HOME/agent/extensions"
+EXT_DIR="$AGENT_DIR/extensions"
 PROMPT_DIR="$EXT_DIR/prompts"
-SKILLS_DIR="$PI_HOME/agent/skills"
+SKILLS_DIR="$AGENT_DIR/skills"
 SKILL_DIR="$SKILLS_DIR/paseo-team-lead"
 OCR_SKILL_DIR="$SKILLS_DIR/paseo-ocr-reviewer"
 TEAM_SCRIPTS_DIR="$EXT_DIR/paseo-team-scripts"
@@ -26,6 +27,7 @@ TEAM_SUPPORT_FILES=(
   ocr-review.mjs
   remote-paseo.mjs
   model-routing.mjs
+  team-scripts-path.mjs
 )
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
@@ -52,7 +54,11 @@ if ! node "$ROLE_PACK_ROOT/scripts/ocr-setup.mjs"; then
 fi
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
 # idempotent and merges only the missing agent-browser entry in Pi's MCP config.
-if ! node "$ROLE_PACK_ROOT/scripts/browser-setup.mjs" --install --pi-home "$PI_HOME"; then
+BROWSER_SETUP_ARGS=(--install)
+if [[ -z "${PI_CODING_AGENT_DIR:-}" ]]; then
+  BROWSER_SETUP_ARGS+=(--pi-home "$PI_HOME")
+fi
+if ! node "$ROLE_PACK_ROOT/scripts/browser-setup.mjs" "${BROWSER_SETUP_ARGS[@]}"; then
   echo "[paseo-team] agent-browser setup failed" >&2
   exit 1
 fi
@@ -65,21 +71,9 @@ echo "  lead skill -> $SKILL_DIR"
 echo "  OCR skill  -> $OCR_SKILL_DIR"
 echo "  support   -> $TEAM_SCRIPTS_DIR"
 export PASEO_TEAM_SCRIPTS_DIR="$TEAM_SCRIPTS_DIR"
-PROFILE_FILE="${PASEO_TEAM_PROFILE_FILE:-$HOME/.profile}"
-touch "$PROFILE_FILE"
-PROFILE_VALUE="$(printf '%q' "$TEAM_SCRIPTS_DIR")"
-PROFILE_TMP="${PROFILE_FILE}.$$"
-awk -v value="$PROFILE_VALUE" '
-  BEGIN { replaced = 0 }
-  /^export PASEO_TEAM_SCRIPTS_DIR=/ {
-    if (!replaced) { print "export PASEO_TEAM_SCRIPTS_DIR=" value; replaced = 1 }
-    next
-  }
-  { print }
-  END { if (!replaced) print "\nexport PASEO_TEAM_SCRIPTS_DIR=" value }
-' "$PROFILE_FILE" > "$PROFILE_TMP"
-mv "$PROFILE_TMP" "$PROFILE_FILE"
-echo "  support env -> PASEO_TEAM_SCRIPTS_DIR=$TEAM_SCRIPTS_DIR (new shells; source $PROFILE_FILE)"
+echo "  support env -> PASEO_TEAM_SCRIPTS_DIR=$TEAM_SCRIPTS_DIR (current process)"
+echo "  support default -> \${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}/extensions/paseo-team-scripts"
+echo "  env override is optional; no shell profile mutation is required"
 echo ""
 echo "Next steps:"
 echo "  1. The installer checked/installed OCR v1.8.10, agent-browser CLI, Chrome runtime, skill and Pi MCP config."

@@ -54,8 +54,10 @@ match **không** báo lỗi, nên observed-check là bắt buộc.
 Xem `skills/paseo-team-lead/SKILL.md` → "Implementation — model routing
 cycle". Tóm tắt: `MODEL_CLASS` → route local → `list_providers` →
 `list_models` → exact string → `create_agent(provider=..., settings=
-{thinkingOptionId})` → `get_agent_status` → so khớp `runtimeInfo` → lệch thì
-`BLOCKED: MODEL_RESOLUTION_MISMATCH` và archive agent sai.
+{thinkingOptionId})` → `get_agent_status` → bounded poll đến khi `runtimeInfo` xuất hiện → so khớp
+`runtimeInfo`. Identity chưa populate trong timeout là
+`BLOCKED: STARTUP_IDENTITY_UNAVAILABLE` và không archive; chỉ identity đã xuất
+hiện nhưng lệch mới là `BLOCKED: MODEL_RESOLUTION_MISMATCH` và archive agent sai.
 
 ## Transmission format (đã xác minh bằng source Paseo 0.2.5)
 
@@ -118,7 +120,8 @@ CONFIG_INVALID                 route file lỗi schema/đọc được nhưng sa
 ROLE_PROVIDER_UNAVAILABLE      role profile thiếu/vô hiệu trên daemon
 MODEL_UNAVAILABLE              exact model không có trong list_models
 THINKING_OPTION_UNAVAILABLE    thinking level model không offer
-MODEL_RESOLUTION_MISMATCH      observed ≠ requested (hoặc runtimeInfo thiếu)
+STARTUP_IDENTITY_UNAVAILABLE   runtimeInfo chưa xuất hiện trong startup timeout
+MODEL_RESOLUTION_MISMATCH      observed runtime identity ≠ requested
 HOST_ROUTE_UNAVAILABLE         class không có route trên host này
 ```
 

@@ -46,6 +46,7 @@ paseo-pi-team/
 │   ├── team-communication.mjs       # parent-scoped Peer → Lead messaging
 │   ├── watchdog.mjs                 # observation-only running-agent watchdog
 │   ├── ocr-review.mjs               # deterministic OCR exact-SHA preflight manifest
+│   ├── team-scripts-path.mjs        # durable support-script path resolver
 │   └── preflight.mjs                # host readiness check (--json, --strict, --host-id)
 ├── test/
 │   ├── policy.test.mts             # policy + lifecycle regression
@@ -237,7 +238,8 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
    option CLI, không phải argument MCP. Lead dùng
    `<PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs` (installer copies the support
    scripts to `~/.pi/agent/extensions/paseo-team-scripts`; the environment
-   variable is persisted by the installer; it reads cluster file theo HOST_ID,
+   variable is an optional override (the deterministic default is used after
+   shell/daemon restart); it reads cluster file theo HOST_ID,
    chạy Paseo CLI
    `--host`, không in endpoint, trả JSON envelope có hostId) cho mọi thao tác
    remote: `health/providers/models/workspaces/workspace-create/run/status/

@@ -51,9 +51,9 @@
 // The endpoint VALUE is never printed, logged or embedded in errors.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { classifyRemoteFailure } from "./reliability.mjs";
 import {
 	ROLE_PROVIDERS,
@@ -72,6 +72,9 @@ import {
 
 export const REMOTE_ERROR_CODES = Object.freeze([
 	"USAGE",
+	"STARTUP_IDENTITY_UNAVAILABLE",
+	"AGENT_REF_UNAVAILABLE",
+	"MODEL_RESOLUTION_MISMATCH",
 	"CLUSTER_CONFIG_INVALID",
 	"HOST_NOT_FOUND",
 	"LOCAL_HOST_UNSUPPORTED",
@@ -110,6 +113,11 @@ const BOOLEAN_FLAGS = new Set([
 	"--wait",
 	"--no-wait",
 ]);
+
+export const DEFAULT_STARTUP_IDENTITY_TIMEOUT_MS = 10000;
+export const MAX_STARTUP_IDENTITY_TIMEOUT_MS = 120000;
+export const STARTUP_IDENTITY_POLL_INTERVAL_MS = 250;
+export const MAX_STARTUP_IDENTITY_ATTEMPTS = 512;
 
 function toCamelCase(flag) {
 	const parts = flag.replace(/^--/, "").split("-");
@@ -178,6 +186,7 @@ const COMMAND_FLAG_KEYS = {
 		"prompt",
 		"brief",
 		"waitTimeout",
+		"startupTimeout",
 		"background",
 	],
 	status: ["agentRef"],
@@ -356,6 +365,96 @@ export function parseDurationMs(value) {
 	if (!match) return null;
 	const mult = { ms: 1, s: 1000, m: 60000, h: 3600000 }[match[2] ?? "s"];
 	return Number(match[1]) * mult;
+}
+
+function sleepSync(ms) {
+	if (ms <= 0) return;
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function parseCliJson(result) {
+	if (!result?.ok) return null;
+	try {
+		return JSON.parse(result.stdout);
+	} catch {
+		return null;
+	}
+}
+
+function unwrapStatusPayload(data) {
+	if (Array.isArray(data)) return data[0] ?? null;
+	return data?.data ?? data;
+}
+
+function identityValue(value) {
+	return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+export function extractRuntimeIdentity(data) {
+	const runtime =
+		data?.snapshot?.runtimeInfo ??
+		data?.snapshot?.RuntimeInfo ??
+		data?.runtimeInfo ??
+		data?.RuntimeInfo ??
+		data?.data?.snapshot?.runtimeInfo ??
+		data?.data?.runtimeInfo ??
+		data?.data ??
+		data;
+	return {
+		model: identityValue(runtime?.model ?? runtime?.Model),
+		thinking: identityValue(
+			runtime?.thinkingOptionId ??
+			runtime?.ThinkingOptionId ??
+			runtime?.thinking ??
+			runtime?.Thinking,
+		),
+	};
+}
+
+/**
+ * Poll a newly-created background agent until its runtime identity is ready.
+ * Missing identity is a startup condition, not a mismatch. Only an explicit
+ * model/thinking value that differs from the request is a confirmed mismatch.
+ */
+export function waitForRuntimeIdentity({
+	status,
+	requested,
+	timeoutMs = DEFAULT_STARTUP_IDENTITY_TIMEOUT_MS,
+	intervalMs = STARTUP_IDENTITY_POLL_INTERVAL_MS,
+	now = () => performance.now(),
+	sleep = sleepSync,
+	maxAttempts = MAX_STARTUP_IDENTITY_ATTEMPTS,
+}) {
+	const boundedTimeoutMs = Math.min(
+		MAX_STARTUP_IDENTITY_TIMEOUT_MS,
+		Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0,
+	);
+	const boundedIntervalMs = Number.isFinite(intervalMs) ? Math.max(0, intervalMs) : 0;
+	const boundedMaxAttempts = Number.isFinite(maxAttempts)
+		? Math.max(1, Math.floor(maxAttempts))
+		: MAX_STARTUP_IDENTITY_ATTEMPTS;
+	const deadline = now() + boundedTimeoutMs;
+	let attempts = 0;
+	let last = null;
+	while (attempts < boundedMaxAttempts) {
+		const remainingMs = Math.max(0, deadline - now());
+		if (attempts > 0 && remainingMs <= 0) break;
+		attempts++;
+		const result = status({ attempt: attempts, remainingMs });
+		last = result;
+		const data = unwrapStatusPayload(parseCliJson(result));
+		const observed = extractRuntimeIdentity(data);
+		if (observed.model !== null && observed.thinking !== null) {
+			if (observed.model !== requested.model || observed.thinking !== requested.thinking) {
+				return { state: "mismatch", attempts, observed, result };
+			}
+			return { state: "ready", attempts, observed, result };
+		}
+		const remainingAfterStatus = Math.max(0, deadline - now());
+		if (remainingAfterStatus <= 0) break;
+		sleep(Math.min(boundedIntervalMs, remainingAfterStatus));
+	}
+	return { state: "unavailable", attempts, result: last };
 }
 
 export function readPrompt(opts) {
@@ -703,6 +802,7 @@ Commands:
   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
                    --thinking <level> --workspace <wks-id> [--title <t>]
                    [--prompt <text> | --brief <file>] [--wait-timeout <dur>]
+                   [--startup-timeout <dur>]
   status           --agent-ref <host-id>/<agent-id>
   cancel           --agent-ref <host-id>/<agent-id>
   archive          --agent-ref <host-id>/<agent-id>
@@ -721,11 +821,11 @@ endpointSet, data). Exit: 0 ok · 1 usage/config/env · 2 CLI runtime error.`;
 // CLI entry
 // ---------------------------------------------------------------------------
 
-function isMain() {
-	const entry = process.argv[1];
+/** Compare canonical filesystem paths so macOS /var aliases work. */
+export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
 	if (!entry) return false;
 	try {
-		return import.meta.url === pathToFileURL(entry).href;
+		return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
 	} catch {
 		return false;
 	}
@@ -870,6 +970,19 @@ function main() {
 		}
 		timeoutMs = parsedWait + 60000;
 	}
+	let startupTimeoutMs = DEFAULT_STARTUP_IDENTITY_TIMEOUT_MS;
+	if (command === "run" && typeof parsed.startupTimeout === "string") {
+		const parsedStartup = parseDurationMs(parsed.startupTimeout);
+		if (
+			parsedStartup === null ||
+			!Number.isFinite(parsedStartup) ||
+			parsedStartup <= 0 ||
+			parsedStartup > MAX_STARTUP_IDENTITY_TIMEOUT_MS
+		) {
+			emit({ ok: false, code: "USAGE", message: `--startup-timeout must be a positive duration no greater than ${MAX_STARTUP_IDENTITY_TIMEOUT_MS}ms (got "${parsed.startupTimeout}")` }, 1);
+		}
+		startupTimeoutMs = parsedStartup;
+	}
 
 	const retryableReadCommand = new Set([
 		"health",
@@ -896,14 +1009,68 @@ function main() {
 	}
 
 	if (command === "run") {
+		let parsedOut;
 		try {
-			const parsedOut = JSON.parse(result.stdout);
-			payload.data = parsedOut;
-			if (parsedOut && typeof parsedOut.agentId === "string") {
-				payload.agentRef = `${hostInfo.hostId}/${parsedOut.agentId}`;
-			}
+			parsedOut = JSON.parse(result.stdout);
 		} catch {
-			payload.data = { raw: result.stdout };
+			parsedOut = { raw: result.stdout };
+		}
+		payload.data = parsedOut;
+		if (!parsedOut || typeof parsedOut.agentId !== "string" || parsedOut.agentId.trim() === "") {
+			payload.ok = false;
+			payload.code = "AGENT_REF_UNAVAILABLE";
+			payload.message = "remote run did not return an agent id; agent was not archived because its lifecycle identity is unavailable";
+			emit(payload, 2);
+		}
+		if (parsedOut && typeof parsedOut.agentId === "string") {
+			payload.agentRef = `${hostInfo.hostId}/${parsedOut.agentId}`;
+			const statusRef = `${hostInfo.hostId}/${parsedOut.agentId}`;
+			const requested = validateRunProvider(parsed.provider);
+			const identity = waitForRuntimeIdentity({
+				requested: {
+					model: requested.model,
+					thinking: parsed.thinking,
+				},
+				status: ({ remainingMs }) => runCli(buildArgv("status", { agentRef: statusRef }, hostInfo.endpoint), {
+					secret: hostInfo.endpoint,
+					timeoutMs: Math.max(1, Math.floor(Math.min(120000, remainingMs || 1))),
+					maxAttempts: 1,
+				}),
+				timeoutMs: startupTimeoutMs,
+			});
+			payload.startupIdentity = {
+				state: identity.state,
+				attempts: identity.attempts,
+				...(identity.observed ? { observed: identity.observed } : {}),
+				...(identity.state === "unavailable" && identity.result
+					? { lastStatus: identity.result }
+					: {}),
+			};
+			if (identity.state === "unavailable") {
+				payload.ok = false;
+				payload.code = "STARTUP_IDENTITY_UNAVAILABLE";
+				payload.message = "runtime identity was not available within the startup timeout; agent was not archived";
+				emit(payload, 2);
+			}
+			if (identity.state === "mismatch") {
+				const archive = runCli(buildArgv("archive", { agentRef: statusRef }, hostInfo.endpoint), {
+					secret: hostInfo.endpoint,
+					timeoutMs: 120000,
+					maxAttempts: 1,
+				});
+				payload.ok = false;
+				payload.code = "MODEL_RESOLUTION_MISMATCH";
+				payload.message = archive.ok
+					? "observed runtime identity differs from the requested route; confirmed mismatching agent was archived"
+					: "observed runtime identity differs from the requested route; archive attempt failed and the agent may still be active";
+				payload.archive = {
+					ok: archive.ok,
+					attempts: archive.attempts,
+					...(archive.status !== undefined ? { status: archive.status } : {}),
+					...(archive.error ? { error: archive.error } : {}),
+				};
+				emit(payload, 2);
+			}
 		}
 	} else {
 		try {
@@ -915,7 +1082,7 @@ function main() {
 	emit(payload, 0);
 }
 
-if (isMain()) {
+if (isMainModule()) {
 	try {
 		main();
 	} catch (error) {

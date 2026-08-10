@@ -29,6 +29,10 @@ if (argv.includes("--fail")) {
 }
 
 if (argv[0] === "run") {
+	if (process.env.FAKE_PASEO_NO_AGENT_ID === "1") {
+		console.log(JSON.stringify({ status: "running" }));
+		process.exit(0);
+	}
 	console.log(
 		JSON.stringify({
 			agentId: "9f8e7d6c-0000-0000-0000-000000000000",
@@ -44,16 +48,38 @@ if (argv[0] === "run") {
 }
 
 if (argv[0] === "inspect") {
+	const noRuntime = process.env.FAKE_PASEO_NO_RUNTIME === "1";
+	const runtime = {
+		model: process.env.FAKE_PASEO_RUNTIME_MODEL ?? "testprov/model-a",
+		thinkingOptionId: process.env.FAKE_PASEO_RUNTIME_THINKING ?? "low",
+	};
 	console.log(
 		JSON.stringify({
 			Id: argv[1],
 			Name: "fake-agent",
 			Provider: "pi",
-			Model: "testprov/model-a",
-			Thinking: "low",
+			...(noRuntime
+				? {}
+				: process.env.FAKE_PASEO_NEST_RUNTIME === "1"
+					? { snapshot: { runtimeInfo: runtime } }
+					: { Model: runtime.model, Thinking: runtime.thinkingOptionId }),
 			Status: "idle",
 		}),
 	);
+	process.exit(0);
+}
+
+if (argv[0] === "archive") {
+	if (process.env.FAKE_PASEO_ARCHIVE_FAIL === "1") {
+		console.error("archive failed");
+		process.exit(1);
+	}
+	if (process.env.FAKE_PASEO_ARCHIVE_MARKER) {
+		await import("node:fs/promises").then(({ writeFile }) =>
+			writeFile(process.env.FAKE_PASEO_ARCHIVE_MARKER, argv[1], "utf8"),
+		);
+	}
+	console.log(JSON.stringify({ archived: argv[1] }));
 	process.exit(0);
 }
 

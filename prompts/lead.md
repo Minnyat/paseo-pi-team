@@ -61,9 +61,11 @@ Engineer Peer.
    controller-local `cluster-routing.local.json`, verify bằng
    `list_providers`/`list_models` trên ĐÚNG daemon đích, tạo agent với exact
    `<role-provider>/<pi-provider>/<model-id>` + `settings.thinkingOptionId`,
-   rồi đối chiếu `get_agent_status → snapshot.runtimeInfo`. Lệch hoặc không
-   xác minh được → cancel/archive + `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
-   không tự chọn model khác. Peer không báo `OBSERVED_*`.
+   rồi bounded-poll `get_agent_status → snapshot.runtimeInfo` trong startup
+   timeout. Identity chưa populate là `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`
+   và không archive; chỉ identity đã xuất hiện nhưng lệch mới là
+   `BLOCKED: MODEL_RESOLUTION_MISMATCH` rồi archive. Không tự chọn model khác.
+   Peer không báo `OBSERVED_*`.
 4. **Git SHA là điểm neo**: candidate review luôn trên exact SHA trong fresh
    detached workspace; reviewer refuse mọi SHA không khớp. Correction quay
    về đúng Engineer gốc, commit mới, không amend, không force-push, SHA mới

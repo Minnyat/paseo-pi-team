@@ -5,9 +5,9 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export const OCR_SUPPORTED_VERSION = "1.8.10";
 export const OCR_WRAPPER_VERSION = "1";
@@ -466,7 +466,16 @@ function help() {
   return `ocr-review.mjs — deterministic OpenCodeReview delegation preflight\n\nUsage:\n  node scripts/ocr-review.mjs --base <sha> --candidate <sha> [--repo <path>]\n  node scripts/ocr-review.mjs --verify --candidate <sha> --tree <tree-sha> [--repo <path>]\n\nChecks the exact clean HEAD, runs ocr delegate preview/rule in range mode, and\nemits a normalized manifest. --verify performs the post-review HEAD/status/tree\ncheck. It never edits code, changes Git state, or calls an LLM.`;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   try {
     const options = parseArgs(process.argv.slice(2));
     if (options.help) {

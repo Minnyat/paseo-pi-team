@@ -52,10 +52,18 @@ The MCP server injected into THIS agent always talks to the **local daemon**
 only — there is no `--host` on any MCP tool (`--host` is a Paseo CLI option,
 not an MCP argument). Remote daemons are driven through the Paseo CLI via
 `remote-paseo.mjs` from the installed support-script directory (see
-`REMOTE_CREATE_CYCLE` below). Use `<PASEO_TEAM_SCRIPTS_DIR>` below; installers
-place the scripts at `~/.pi/agent/extensions/paseo-team-scripts`. Source
-checkouts may set the variable to the repository `scripts/` directory. Never
-resolve support scripts from the project's current working directory.
+`REMOTE_CREATE_CYCLE` below). The notation `<PASEO_TEAM_SCRIPTS_DIR>` below
+means a resolved filesystem path, never a literal shell token. Resolve it before
+running the first support command, without relying on a profile file:
+
+- POSIX/macOS: `SUPPORT_DIR="${PASEO_TEAM_SCRIPTS_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/paseo-team-scripts}"`
+- PowerShell: `$supportDir = if ($env:PASEO_TEAM_SCRIPTS_DIR) { $env:PASEO_TEAM_SCRIPTS_DIR } elseif ($env:PI_CODING_AGENT_DIR) { Join-Path $env:PI_CODING_AGENT_DIR 'extensions\paseo-team-scripts' } else { Join-Path $env:USERPROFILE '.pi\agent\extensions\paseo-team-scripts' }`
+
+Use that resolved directory for every `node .../remote-paseo.mjs`,
+`model-routing.mjs`, and `ocr-review.mjs` invocation. Installers place the
+scripts at this deterministic default. Source checkouts may set the env
+variable to the repository `scripts/` directory. Never resolve support scripts
+from the project's current working directory.
 
 ## Implementation — model routing cycle (mandatory)
 
@@ -122,10 +130,13 @@ This is the exact failure mode the cluster config exists to prevent.
 8. Create the workspace when needed (worktree isolation for writers).
 9. Call `create_agent` with the exact provider string + thinking. NEVER omit
    the model to inherit a daemon default.
-10. Call `get_agent_status` and read `snapshot.runtimeInfo.model` and
-    `runtimeInfo.thinkingOptionId`; compare against requested values →
-    mismatch (or missing runtimeInfo) → `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
-    archive the wrongly-resolved agent.
+10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
+    `runtimeInfo.thinkingOptionId` until startup identity is populated. Missing
+    identity during the bounded startup window is
+    `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`; do **not** archive because this is
+    not a confirmed mismatch. If both identity fields appear and either differs
+    from the request, classify `BLOCKED: MODEL_RESOLUTION_MISMATCH` and archive
+    the wrongly-resolved agent.
 11. Only then deliver/continue the initial task.
 
 ### REMOTE_CREATE_CYCLE — target is `connection.type: remote` (remote-paseo.mjs)
@@ -159,11 +170,15 @@ local one. In the commands below, `<id>` is the HOST_ID from
    `--wait-timeout <dur>` to wait for completion):
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
    The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
-8. Verify the OBSERVED runtime identity on the remote daemon:
+8. Verify the OBSERVED runtime identity on the remote daemon. The wrapper's
+   `run` command performs a bounded startup poll; use `--startup-timeout <dur>`
+   when the host needs a longer (still bounded) initialization window:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>`
-   Compare `data.Model` / `data.Thinking` against the requested values →
-   mismatch or missing → `BLOCKED: MODEL_RESOLUTION_MISMATCH`; archive the
-   wrongly-resolved agent on that host
+   Missing `data.Model`/`data.Thinking` until the startup deadline is
+   `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`; do not archive. Only after both
+   fields appear, compare them with the request: a confirmed mismatch is
+   `BLOCKED: MODEL_RESOLUTION_MISMATCH`, then archive the wrongly-resolved agent
+   on that host
    (`node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>`).
 9. Follow-ups / corrections:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>`

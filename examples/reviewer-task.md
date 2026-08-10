@@ -86,7 +86,7 @@ REQUIRED HANDOFF:
 - Structured OCR findings and evidence; every finding has DISPOSITION:
   BLOCKER | REQUIRED | SUGGESTION | QUESTION | NIT
 - RECOMMENDATION: PASS | CHANGES_REQUIRED | BLOCKED
-- REVIEW_LIMITATIONS
+- REVIEW_LIMITATIONS: none or a concrete limitation with affected files/rules
 
 TASK_BODY_END
 ```

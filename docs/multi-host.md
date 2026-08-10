@@ -82,7 +82,8 @@ node scripts/remote-paseo.mjs run --host-id <id> \
   --workspace <wks-id> --title <t> --brief <task-file>
 node scripts/remote-paseo.mjs status --agent-ref <host-id>/<agent-id>
 node scripts/remote-paseo.mjs send --agent-ref <host-id>/<agent-id> --prompt <text>
-node scripts/remote-paseo.mjs cancel|archive --agent-ref <host-id>/<agent-id>
+node scripts/remote-paseo.mjs cancel --agent-ref <host-id>/<agent-id>
+node scripts/remote-paseo.mjs archive --agent-ref <host-id>/<agent-id>
 ```
 
 Đủ chi tiết: `node scripts/remote-paseo.mjs --help`.

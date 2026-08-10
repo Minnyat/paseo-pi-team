@@ -309,6 +309,12 @@ RISKS:
 
 OPEN_QUESTIONS:
 
+WORKTREE_CLEAN:
+- yes | no | unknown (review workspace status evidence)
+
+REVIEW_LIMITATIONS:
+- none | <concrete limitation and affected files/rules>
+
 RECOMMENDATION: PASS | CHANGES_REQUIRED | BLOCKED
 
 Derivation:

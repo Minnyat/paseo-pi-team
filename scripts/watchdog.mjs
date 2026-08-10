@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
@@ -175,7 +175,16 @@ async function main() {
   console.log(JSON.stringify(await collectWatchdogSnapshot(options), null, 2));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   main().catch((error) => {
     console.error(JSON.stringify({ ok: false, code: "WATCHDOG_FAILED", message: String(error?.message ?? error) }));
     process.exit(2);

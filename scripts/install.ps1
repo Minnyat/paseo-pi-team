@@ -14,9 +14,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$extDir    = Join-Path $PiHome "agent\extensions"
+$agentDir = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $PiHome "agent" }
+$extDir    = Join-Path $agentDir "extensions"
 $promptDir = Join-Path $extDir "prompts"
-$skillsDir = Join-Path $PiHome "agent\skills"
+$skillsDir = Join-Path $agentDir "skills"
 $skillDir  = Join-Path $skillsDir "paseo-team-lead"
 $ocrSkillDir = Join-Path $skillsDir "paseo-ocr-reviewer"
 $teamScriptsDir = Join-Path $extDir "paseo-team-scripts"
@@ -26,7 +27,8 @@ $teamSupportFiles = @(
   "team-communication.mjs",
   "ocr-review.mjs",
   "remote-paseo.mjs",
-  "model-routing.mjs"
+  "model-routing.mjs",
+  "team-scripts-path.mjs"
 )
 
 New-Item -ItemType Directory -Force -Path $extDir, $promptDir, $skillsDir | Out-Null
@@ -53,7 +55,9 @@ foreach ($supportFile in $teamSupportFiles) {
 if ($LASTEXITCODE -ne 0) {
   throw "OCR setup failed with exit code $LASTEXITCODE"
 }
-& node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") --install --pi-home $PiHome
+$browserSetupArgs = @("--install")
+if (-not $env:PI_CODING_AGENT_DIR) { $browserSetupArgs += @("--pi-home", $PiHome) }
+& node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") @browserSetupArgs
 if ($LASTEXITCODE -ne 0) {
   throw "agent-browser setup failed with exit code $LASTEXITCODE"
 }
@@ -65,8 +69,10 @@ Write-Host "  prompts   -> $promptDir"
 Write-Host "  lead skill -> $skillDir"
 Write-Host "  OCR skill  -> $ocrSkillDir"
 Write-Host "  support   -> $teamScriptsDir"
-[Environment]::SetEnvironmentVariable("PASEO_TEAM_SCRIPTS_DIR", $teamScriptsDir, "User")
-Write-Host "  support env -> PASEO_TEAM_SCRIPTS_DIR=$teamScriptsDir (new processes)"
+$env:PASEO_TEAM_SCRIPTS_DIR = $teamScriptsDir
+Write-Host "  support env -> PASEO_TEAM_SCRIPTS_DIR=$teamScriptsDir (current process only)"
+Write-Host "  support default -> `$env:PI_CODING_AGENT_DIR\extensions\paseo-team-scripts or `$env:USERPROFILE\.pi\agent\extensions\paseo-team-scripts"
+Write-Host "  env override is optional; no user-profile mutation is required"
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. The installer checked/installed OCR v1.8.10, agent-browser CLI, Chrome runtime, skill and Pi MCP config."

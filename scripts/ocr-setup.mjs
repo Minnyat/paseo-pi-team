@@ -4,8 +4,8 @@
 // as a successful role-pack installation.
 
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 export const OCR_NPM_PACKAGE = "@alibaba-group/open-code-review";
 export const OCR_SUPPORTED_VERSION = "1.8.10";
@@ -71,7 +71,17 @@ export function ensureOcr({ run = defaultRun } = {}) {
   return { installed: true, version, output: versionResult.stdout };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+/** Compare canonical filesystem paths so macOS /var aliases work. */
+export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   try {
     const result = ensureOcr();
     console.log(`[paseo-team] OCR ${result.installed ? "installed" : "already ready"}: open-code-review v${result.version}`);

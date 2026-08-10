@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +21,8 @@ import {
 	validateRunProvider,
 	runCli,
 	validateThinking,
+	waitForRuntimeIdentity,
+	extractRuntimeIdentity,
 } from "../scripts/remote-paseo.mjs";
 import { loadClusterConfig } from "../scripts/model-routing.mjs";
 
@@ -138,11 +140,12 @@ function runWrapper(
 		...SAVED_ENV,
 		PASEO_TEAM_HOME: h,
 		PASEO_TEAM_PASEO_EXEC: `node "${FAKE}"`,
-		// An explicit undefined endpoint would be swallowed by the default
-		// param, so omitting the endpoint is an explicit flag.
-		...(omitEndpoint ? {} : { PASEO_TEST_ENDPOINT: endpoint }),
 		...extraEnv,
 	};
+	// Do not let a developer/CI-level endpoint leak into the missing-endpoint
+	// test; omission must mean absent even when the parent environment exports it.
+	if (omitEndpoint) delete env.PASEO_TEST_ENDPOINT;
+	else if (!Object.hasOwn(extraEnv, "PASEO_TEST_ENDPOINT")) env.PASEO_TEST_ENDPOINT = endpoint;
 	const res = spawnSync(process.execPath, [WRAPPER, ...args], {
 		encoding: "utf8",
 		env,
@@ -641,6 +644,83 @@ const EP = "https://app.paseo.sh/#offer=tok";
 	);
 }
 
+assert.deepEqual(
+	extractRuntimeIdentity({ snapshot: { runtimeInfo: { model: "m", thinkingOptionId: "t" } } }),
+	{ model: "m", thinking: "t" },
+);
+assert.deepEqual(
+	extractRuntimeIdentity({ data: { snapshot: { runtimeInfo: { model: "m2", thinkingOptionId: "t2" } } } }),
+	{ model: "m2", thinking: "t2" },
+);
+assert.deepEqual(
+	extractRuntimeIdentity({ Model: "  ", Thinking: 42 }),
+	{ model: null, thinking: null },
+);
+assert.deepEqual(
+	extractRuntimeIdentity({ data: { Model: "m3", Thinking: "t3" } }),
+	{ model: "m3", thinking: "t3" },
+);
+
+// ---------------------------------------------------------------------------
+// Startup identity polling
+// ---------------------------------------------------------------------------
+
+{
+	const responses = [
+		{ ok: true, stdout: JSON.stringify({ Status: "running" }) },
+		{ ok: true, stdout: JSON.stringify({ runtimeInfo: { model: "testprov/model-b", thinkingOptionId: "medium" } }) },
+	];
+	const result = waitForRuntimeIdentity({
+		requested: { model: "testprov/model-b", thinking: "medium" },
+		status: () => responses.shift(),
+		timeoutMs: 100,
+		intervalMs: 0,
+		now: (() => { let t = 0; return () => t++; })(),
+		sleep: () => {},
+	});
+	assert.equal(result.state, "ready");
+	assert.equal(result.attempts, 2);
+}
+
+{
+	const result = waitForRuntimeIdentity({
+		requested: { model: "testprov/model-b", thinking: "medium" },
+		status: () => ({ ok: true, stdout: JSON.stringify({ Status: "running" }) }),
+		timeoutMs: 0,
+		intervalMs: 0,
+		now: () => 1,
+		sleep: () => {},
+	});
+	assert.equal(result.state, "unavailable");
+}
+
+{
+	let calls = 0;
+	const result = waitForRuntimeIdentity({
+		requested: { model: "testprov/model-b", thinking: "medium" },
+		status: () => {
+			calls++;
+			return { ok: true, stdout: JSON.stringify({ Status: "running" }) };
+		},
+		timeoutMs: 100,
+		intervalMs: Number.POSITIVE_INFINITY,
+		now: (() => { let t = 0; return () => t++; })(),
+		sleep: () => {},
+		maxAttempts: 3,
+	});
+	assert.equal(result.state, "unavailable");
+	assert.equal(calls, 3, "polling has an explicit attempt bound");
+}
+
+{
+	const result = waitForRuntimeIdentity({
+		requested: { model: "testprov/model-b", thinking: "medium" },
+		status: () => ({ ok: true, stdout: JSON.stringify({ runtimeInfo: { model: "testprov/model-a", thinkingOptionId: "medium" } }) }),
+		timeoutMs: 100,
+	});
+	assert.equal(result.state, "mismatch");
+}
+
 // ---------------------------------------------------------------------------
 // End-to-end: wrapper subprocess against the fake CLI
 // ---------------------------------------------------------------------------
@@ -704,7 +784,13 @@ const EP = "https://app.paseo.sh/#offer=tok";
 		"remote-job",
 		"--prompt",
 		"implement the feature",
-	]);
+	], {
+		extraEnv: {
+			FAKE_PASEO_RUNTIME_MODEL: "testprov/model-b",
+			FAKE_PASEO_RUNTIME_THINKING: "medium",
+			FAKE_PASEO_NEST_RUNTIME: "1",
+		},
+	});
 	assert.equal(r.code, 0, `${t} (stderr: ${r.stderr})`);
 	assert.equal(r.json.ok, true, t);
 	assert.equal(
@@ -715,6 +801,75 @@ const EP = "https://app.paseo.sh/#offer=tok";
 	const data = r.json.data;
 	assert.equal(data.agentId, "9f8e7d6c-0000-0000-0000-000000000000", t);
 	assert.equal(data.status, "running", t);
+	assert.equal(r.json.startupIdentity.state, "ready", t);
+}
+
+{
+	const t = "e2e: missing agent id is explicit and does not archive";
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1", "--prompt", "missing-id",
+	], { extraEnv: { FAKE_PASEO_NO_AGENT_ID: "1" } });
+	assert.equal(r.code, 2, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.code, "AGENT_REF_UNAVAILABLE", t);
+	assert.equal(r.json.archive, undefined, t);
+}
+
+{
+	const t = "e2e: startup identity unavailable does not archive";
+	const home = makeHome();
+	const archiveMarker = join(home, "archive-called");
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1", "--prompt", "wait",
+		"--startup-timeout", "1ms",
+	], {
+		home,
+		extraEnv: { FAKE_PASEO_NO_RUNTIME: "1", FAKE_PASEO_ARCHIVE_MARKER: archiveMarker },
+	});
+	assert.equal(r.code, 2, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.code, "STARTUP_IDENTITY_UNAVAILABLE", t);
+	assert.equal(r.json.startupIdentity.state, "unavailable", t);
+	assert.equal(r.json.archive, undefined, t);
+	assert.equal(existsSync(archiveMarker), false, `${t}: archive side effect`);
+}
+
+{
+	const t = "e2e: confirmed identity mismatch archives exactly once";
+	const home = makeHome();
+	const archiveMarker = join(home, "archive-called");
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1", "--prompt", "mismatch",
+	], {
+		home,
+		extraEnv: {
+			FAKE_PASEO_RUNTIME_MODEL: "testprov/model-a",
+			FAKE_PASEO_RUNTIME_THINKING: "medium",
+			FAKE_PASEO_ARCHIVE_MARKER: archiveMarker,
+		},
+	});
+	assert.equal(r.code, 2, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.code, "MODEL_RESOLUTION_MISMATCH", t);
+	assert.equal(r.json.archive.ok, true, t);
+	assert.equal(readFileSync(archiveMarker, "utf8"), "9f8e7d6c-0000-0000-0000-000000000000", t);
+}
+
+{
+	const t = "e2e: mismatch archive failure remains explicit";
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1", "--prompt", "mismatch",
+	], {
+		extraEnv: {
+			FAKE_PASEO_RUNTIME_MODEL: "testprov/model-a",
+			FAKE_PASEO_RUNTIME_THINKING: "medium",
+			FAKE_PASEO_ARCHIVE_FAIL: "1",
+		},
+	});
+	assert.equal(r.code, 2, `${t} (stderr: ${r.stderr})`);
+	assert.equal(r.json.code, "MODEL_RESOLUTION_MISMATCH", t);
+	assert.equal(r.json.archive.ok, false, t);
 }
 
 {
@@ -890,6 +1045,9 @@ const EP = "https://app.paseo.sh/#offer=tok";
 		"ENDPOINT_UNSAFE",
 		"CLI_ERROR",
 		"PROMPT_TOO_LONG",
+		"STARTUP_IDENTITY_UNAVAILABLE",
+		"AGENT_REF_UNAVAILABLE",
+		"MODEL_RESOLUTION_MISMATCH",
 	]) {
 		assert.ok(REMOTE_ERROR_CODES.includes(code), `${t}: missing ${code}`);
 	}
