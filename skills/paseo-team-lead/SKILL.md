@@ -135,6 +135,12 @@ This is the exact failure mode the cluster config exists to prevent.
    `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE`; there is no fallback (the
    reviewer wrapper mechanically rejects non-worktree workspaces with
    `REVIEW_WORKSPACE_NOT_WORKTREE`).
+   Local MCP `create_workspace` calls MUST pass an explicit
+   `isolation: "local" | "worktree"` (the policy extension rejects a
+   missing/invalid value), and a reviewer workspace MUST carry the naming
+   convention `title: "review:<TASK_ID>"` (or a `worktreeSlug` containing
+   `review`) with `isolation: "worktree"` — the policy extension blocks a
+   review-marked workspace that requests local isolation.
 9. Call `create_agent` with the exact provider string + thinking. NEVER omit
    the model to inherit a daemon default.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and

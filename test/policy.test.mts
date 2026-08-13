@@ -760,6 +760,69 @@ assert.ok(
 );
 assert.ok(mcpBlockReason("lead", { tool: {} }) !== null);
 
+// Lead create_workspace argument gate (Layer 1 of reviewer worktree invariant).
+assert.match(
+	mcpBlockReason("lead", { tool: "create_workspace" }) ?? "",
+	/args object/,
+	"missing create_workspace args → block",
+);
+assert.match(
+	mcpBlockReason("lead", {
+		tool: "create_workspace",
+		args: { path: "/repo" },
+	}) ?? "",
+	/explicit isolation/,
+	"missing isolation → block (no daemon default)",
+);
+assert.match(
+	mcpBlockReason("lead", {
+		tool: "create_workspace",
+		args: { path: "/repo", isolation: "worktee" },
+	}) ?? "",
+	/explicit isolation/,
+	"misspelled isolation → block fail-closed",
+);
+assert.equal(
+	mcpBlockReason("lead", {
+		tool: "create_workspace",
+		args: { path: "/repo", isolation: "local", title: "scout scratch" },
+	}),
+	null,
+	"non-review local workspace passes",
+);
+assert.equal(
+	mcpBlockReason("lead", {
+		tool: "create_workspace",
+		args: { path: "/repo", isolation: "worktree", title: "review:T-042" },
+	}),
+	null,
+	"review-marked worktree workspace passes",
+);
+assert.match(
+	mcpBlockReason("lead", {
+		tool: "create_workspace",
+		args: { path: "/repo", isolation: "local", title: "review:T-042" },
+	}) ?? "",
+	/worktree/,
+	"review-titled workspace with local isolation → block",
+);
+assert.match(
+	mcpBlockReason("lead", {
+		tool: "create_workspace",
+		args: { path: "/repo", isolation: "local", worktreeSlug: "review-T-042" },
+	}) ?? "",
+	/worktree/,
+	"review-slugged workspace with local isolation → block",
+);
+assert.match(
+	mcpBlockReason("lead", {
+		tool: "paseo_create_workspace",
+		args: JSON.stringify({ path: "/repo", isolation: "local", title: "Review T-9" }),
+	}) ?? "",
+	/worktree/,
+	"prefixed target + string args are gated the same way",
+);
+
 // Peer is fully blocked (handled by caller always blocking mcp for peer).
 
 // --- mcpScriptBlockReason (lead heuristic backstop) ---------------------------

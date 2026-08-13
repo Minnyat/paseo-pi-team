@@ -83,6 +83,13 @@ assert.match(leadSkill, /REVIEW_WORKTREE_UNAVAILABLE/);
 assert.match(leadSkill, /--disposition independent-reviewer/);
 assert.match(remotePaseo, /REVIEW_ISOLATION_INVALID/);
 assert.match(remotePaseo, /independent-reviewer/);
+assert.match(remotePaseo, /REVIEW_WORKTREE_UNAVAILABLE/);
+
+// Layer-1 local guard: the policy extension gates MCP create_workspace args.
+const policyExtension = read("extensions/paseo-team-policy.ts");
+assert.match(policyExtension, /leadCreateWorkspaceBlockReason/);
+assert.match(policyExtension, /REVIEW_WORKTREE_UNAVAILABLE/);
+assert.match(leadSkill, /review:<TASK_ID>/);
 
 // OCR metadata stays outside the V3 authority marker block.
 const authorityBlock = brief.split("PASEO_TEAM_TASK_V3_BEGIN")[1].split("PASEO_TEAM_TASK_V3_END")[0];

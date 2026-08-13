@@ -1037,6 +1037,45 @@ assert.deepEqual(
 }
 
 {
+	const t =
+		"e2e: reviewer worktree creation failure → REVIEW_WORKTREE_UNAVAILABLE, not CLI_ERROR";
+	const r = runWrapper(
+		[
+			"workspace-create",
+			"--host-id",
+			"mac-review",
+			"--path",
+			"/Users/admin/repo",
+			"--disposition",
+			"independent-reviewer",
+		],
+		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1" } },
+	);
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.ok, false, t);
+	assert.equal(r.json.code, "REVIEW_WORKTREE_UNAVAILABLE", t);
+	assert.match(r.json.message, /REVIEW_WORKTREE_UNAVAILABLE/, t);
+	assert.match(r.json.message, /never fall back/i, t);
+}
+
+{
+	const t =
+		"e2e: non-reviewer workspace-create failure stays CLI_ERROR";
+	const r = runWrapper(
+		[
+			"workspace-create",
+			"--host-id",
+			"mac-review",
+			"--path",
+			"/Users/admin/repo",
+		],
+		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1" } },
+	);
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.code, "CLI_ERROR", t);
+}
+
+{
 	const t = "successful CLI output is redacted at the wrapper boundary";
 	const home = makeHome();
 	const previous = process.env.FAKE_PASEO_LEAK_ENDPOINT;

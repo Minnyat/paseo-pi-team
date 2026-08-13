@@ -28,6 +28,15 @@ if (argv.includes("--fail")) {
 	process.exit(1);
 }
 
+if (
+	argv[0] === "workspace" &&
+	argv[1] === "create" &&
+	process.env.FAKE_PASEO_WORKSPACE_CREATE_FAIL === "1"
+) {
+	console.error("fatal: could not create worktree: disk full");
+	process.exit(1);
+}
+
 if (argv[0] === "run") {
 	if (process.env.FAKE_PASEO_NO_AGENT_ID === "1") {
 		console.log(JSON.stringify({ status: "running" }));

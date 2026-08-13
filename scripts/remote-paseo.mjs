@@ -84,6 +84,7 @@ export const REMOTE_ERROR_CODES = Object.freeze([
 	"CLI_ERROR",
 	"PROMPT_TOO_LONG",
 	"REVIEW_ISOLATION_INVALID",
+	"REVIEW_WORKTREE_UNAVAILABLE",
 ]);
 
 export class RemoteError extends Error {
@@ -1047,10 +1048,20 @@ function main() {
 	const payload = basePayload(command, hostInfo);
 	if (!result.ok) {
 		payload.ok = false;
-		payload.code = "CLI_ERROR";
-		payload.message =
-			result.error ||
-			`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
+		// A failed reviewer worktree creation is the specific blocker the Lead
+		// skill keys recovery on — surface it as REVIEW_WORKTREE_UNAVAILABLE, not
+		// a generic CLI_ERROR. There is no fallback to a local workspace.
+		const reviewerWorkspaceCreate =
+			command === "workspace-create" &&
+			typeof parsed.disposition === "string" &&
+			parsed.disposition.trim() === "independent-reviewer";
+		payload.code = reviewerWorkspaceCreate
+			? "REVIEW_WORKTREE_UNAVAILABLE"
+			: "CLI_ERROR";
+		payload.message = reviewerWorkspaceCreate
+			? `reviewer worktree workspace could not be created on host "${hostInfo.hostId}" — report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE; never fall back to a local/standalone workspace (${result.error || `paseo exit ${result.status}`})`
+			: result.error ||
+				`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
 		if (result.stdout) payload.data = result.stdout;
 		emit(payload, 2);
 	}
