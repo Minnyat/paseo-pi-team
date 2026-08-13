@@ -77,6 +77,8 @@ node scripts/remote-paseo.mjs models --host-id <id> --provider pi-peer
 node scripts/remote-paseo.mjs workspaces --host-id <id>
 node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> \
   --isolation local|worktree --title <t>
+# reviewer workspace: --disposition independent-reviewer ép --isolation worktree,
+# từ chối local (REVIEW_ISOLATION_INVALID); worktree fail → BLOCKED: REVIEW_WORKTREE_UNAVAILABLE
 node scripts/remote-paseo.mjs run --host-id <id> \
   --provider pi-peer/<pi-provider>/<model-id> --thinking <level> \
   --workspace <wks-id> --title <t> --brief <task-file>

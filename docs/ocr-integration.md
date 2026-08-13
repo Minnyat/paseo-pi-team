@@ -8,17 +8,25 @@ an OCR agent/provider.
 
 ## Prerequisites
 
-The role-pack installers automatically install and verify the pinned OCR CLI
-`@alibaba-group/open-code-review@1.8.10`. If you are not using an installer,
-install it manually with the command in the next section. The wrapper still
-fails closed on missing or unsupported versions.
+The role-pack installers automatically install and verify the OCR CLI
+`@alibaba-group/open-code-review`. Compatibility is capability-based: any
+installed release at or above the verified `1.8.10` baseline that passes the
+delegation capability probe (`ocr delegate preview|rule --help` exposing
+`--repo`/`--from`) is accepted as-is and never downgraded. When OCR is absent,
+too old, or capability-broken, the installer installs the pinned `1.9.2`. If
+you are not using an installer, install it manually with the command in the
+next section. The wrapper still fails closed on missing OCR or a real
+capability/schema incompatibility.
 
 - Git `>= 2.41` (current upstream requirement);
 - Node.js/npm when installing the npm distribution;
 - Pi and Paseo configured for this role pack;
 - the `paseo-ocr-reviewer` skill installed;
-- a clean fresh reviewer workspace at the assigned candidate SHA;
-- the OCR CLI (the current verified npm distribution is v1.8.10).
+- a clean fresh reviewer workspace at the assigned candidate SHA, created as a
+  **linked git worktree** from the source repository (worktree isolation) —
+  the wrapper rejects a primary checkout or standalone clone with
+  `REVIEW_WORKSPACE_NOT_WORKTREE`;
+- the OCR CLI (verified releases: v1.8.10 through v1.9.2).
 
 Detect the platform and shell rather than assuming one:
 
@@ -40,15 +48,18 @@ Unix-like shell:    ocr version
 If it is unavailable and you are not running the role-pack installer, use the official npm distribution:
 
 ```bash
-npm install -g @alibaba-group/open-code-review@1.8.10
+npm install -g @alibaba-group/open-code-review@1.9.2
 ocr version
 ```
 
-The tested Phase 1 contract is OCR `open-code-review v1.8.10`. The verified
-machine is Windows with Git Bash, Node `v25.9.0`, npm `11.12.1`, and Git
-`2.53.0.windows.2`. The wrapper rejects other OCR versions with
-`OCR_VERSION_UNSUPPORTED`. Do not copy this machine's paths into configuration. No API key or secret is
-required by delegation mode, and no secret belongs in this repository.
+The verified baseline contract is OCR `open-code-review v1.8.10`; `v1.9.2` is
+verified end-to-end on Windows with Git Bash, Node `v25.9.0`, npm `11.12.1`,
+and Git `2.53.0.windows.2`. The wrapper treats the version as provenance and
+blocks only on a real incompatibility (`OCR_CAPABILITY_MISSING`,
+`OCR_OUTPUT_SCHEMA_UNSUPPORTED`); the installer refuses to leave an install
+below the baseline (`OCR_VERSION_UNSUPPORTED`). Do not copy this machine's
+paths into configuration. No API key or secret is required by delegation mode,
+and no secret belongs in this repository.
 
 ## Delegation smoke test
 
@@ -69,10 +80,11 @@ $candidate = git rev-parse <candidate-ref>
 ocr delegate preview --from $base --to $candidate
 ```
 
-The verified npm CLI v1.8.10 rejects `--format` and emits structured Markdown;
-upstream `main` documents JSON output, so verify the installed version before
-adding that flag. If the preview includes reviewable paths, resolve their rules
-with the exact paths returned by OCR:
+The v1.8.10 CLI rejects `--format` and emits structured Markdown; v1.9.x
+supports `--format json`. The wrapper probes the installed CLI and requests
+JSON when available, normalizing both forms against one schema. If the preview
+includes reviewable paths, resolve their rules with the exact paths returned
+by OCR:
 
 ```bash
 ocr delegate rule <path-1> <path-2>

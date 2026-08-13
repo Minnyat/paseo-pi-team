@@ -481,6 +481,84 @@ const EP = "https://app.paseo.sh/#offer=tok";
 }
 
 {
+	const t = "buildArgv: workspace-create validates --isolation values";
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", isolation: "worktee" },
+			EP,
+		),
+	);
+	assert.ok(
+		buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", isolation: "worktree" },
+			EP,
+		).includes("worktree"),
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: independent-reviewer disposition forces worktree isolation";
+	// Unspecified isolation defaults to worktree for a reviewer workspace.
+	const argv = buildArgv(
+		"workspace-create",
+		{
+			path: "/Users/admin/repo",
+			disposition: "independent-reviewer",
+			title: "review-workspace",
+		},
+		EP,
+	);
+	const isolationIndex = argv.indexOf("--isolation");
+	assert.ok(isolationIndex !== -1 && argv[isolationIndex + 1] === "worktree", t);
+	// Explicit worktree is accepted unchanged.
+	assert.ok(
+		buildArgv(
+			"workspace-create",
+			{
+				path: "/Users/admin/repo",
+				disposition: "independent-reviewer",
+				isolation: "worktree",
+			},
+			EP,
+		).includes("worktree"),
+		t,
+	);
+	// Local isolation for a reviewer is a hard error, never a silent fallback.
+	expectRemoteError("REVIEW_ISOLATION_INVALID", () =>
+		buildArgv(
+			"workspace-create",
+			{
+				path: "/Users/admin/repo",
+				disposition: "independent-reviewer",
+				isolation: "local",
+			},
+			EP,
+		),
+	);
+	// Non-reviewer dispositions do not force isolation.
+	assert.ok(
+		!buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", disposition: "engineer" },
+			EP,
+		).includes("--isolation"),
+		t,
+	);
+	// A misspelled disposition fails closed instead of silently skipping the
+	// reviewer worktree enforcement.
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", disposition: "independent-reviwer" },
+			EP,
+		),
+	);
+}
+
+{
 	const t = "buildArgv: agents";
 	assert.deepEqual(
 		buildArgv("agents", {}, EP),

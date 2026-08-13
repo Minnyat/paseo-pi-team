@@ -127,7 +127,14 @@ This is the exact failure mode the cluster config exists to prevent.
    `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
-8. Create the workspace when needed (worktree isolation for writers).
+8. Create the workspace when needed. Worktree isolation is required for
+   writers AND is a hard invariant for the independent reviewer: a reviewer
+   workspace is ALWAYS a git worktree created from the source repository at
+   the exact candidate SHA — never `local` isolation, a standalone clone, or
+   a new project. If the worktree cannot be created, report
+   `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE`; there is no fallback (the
+   reviewer wrapper mechanically rejects non-worktree workspaces with
+   `REVIEW_WORKSPACE_NOT_WORKTREE`).
 9. Call `create_agent` with the exact provider string + thinking. NEVER omit
    the model to inherit a daemon default.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
@@ -166,6 +173,12 @@ local one. In the commands below, `<id>` is the HOST_ID from
    ID has no meaning on the Mac:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
+   For an independent-reviewer workspace, pass
+   `--disposition independent-reviewer`: the wrapper then forces
+   `--isolation worktree` and rejects `--isolation local`
+   (`REVIEW_ISOLATION_INVALID`). If worktree creation fails on the remote
+   host, report `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — never fall back to
+   a local/standalone workspace for review.
 7. Create the agent on the remote daemon (background by default; add
    `--wait-timeout <dur>` to wait for completion):
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
@@ -253,8 +266,13 @@ After implementation:
    candidate is automatically refused by the independent reviewer and must be
    corrected in the same Engineer session before review.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
-   `DISPOSITION: independent-reviewer`) in a **fresh workspace** checked out
-   at the exact candidate SHA — not the Engineer's own working tree. Route it
+   `DISPOSITION: independent-reviewer`) in a **fresh git worktree** created
+   from the source repository and checked out at the exact candidate SHA —
+   not the Engineer's own working tree, and not a standalone clone or new
+   project (workspace `--isolation worktree`; remote path:
+   `workspace-create ... --disposition independent-reviewer`). If the
+   worktree cannot be created, this step is
+   `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — no fallback. Route the Reviewer
    with `MODEL_CLASS: REVIEW_HIGH` and load `paseo-ocr-reviewer`.
 3. Require the Reviewer to run `git rev-parse HEAD`, `git status --porcelain`,
    and `ocr version`, then verify `observed HEAD == ASSIGNED_CANDIDATE_SHA == REVIEW_CANDIDATE_SHA`.

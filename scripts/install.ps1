@@ -75,7 +75,7 @@ Write-Host "  support default -> `$env:PI_CODING_AGENT_DIR\extensions\paseo-team
 Write-Host "  env override is optional; no user-profile mutation is required"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. The installer checked/installed OCR v1.8.10, agent-browser CLI, Chrome runtime, skill and Pi MCP config."
+Write-Host "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing), agent-browser CLI, Chrome runtime, skill and Pi MCP config."
 Write-Host "  2. Verify OCR if needed: Get-Command ocr; ocr version"
 Write-Host "  3. Install the MCP adapter (PINNED version - Paseo tools depend on it):"
 Write-Host "     pi install npm:pi-mcp-adapter@2.19.0"

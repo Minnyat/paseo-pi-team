@@ -72,8 +72,11 @@ CONSTRAINTS:
 - Run the deterministic wrapper from the installed support directory:
   `node <PASEO_TEAM_SCRIPTS_DIR>/ocr-review.mjs --repo <review-repo> --base <base-sha> --candidate <assigned-candidate-sha>`.
   Any direct OCR diagnostic must use the same `--repo`, `--from <base-sha>`,
-  and `--to <assigned-candidate-sha>` values. The verified v1.8.10 CLI emits
-  structured Markdown; normalize it only through the deterministic wrapper.
+  and `--to <assigned-candidate-sha>` values. The wrapper probes the installed
+  CLI (Markdown on v1.8.10, `--format json` on 1.9.x) and normalizes both
+  forms; normalize only through the deterministic wrapper. It also verifies
+  the review workspace is a linked git worktree
+  (`BLOCKED: REVIEW_WORKSPACE_NOT_WORKTREE` otherwise).
 - Account for every OCR `reviewable_files` item as reviewed or skipped with a concrete reason.
 - Do NOT normalize, edit, or fix the candidate to make tests pass.
 

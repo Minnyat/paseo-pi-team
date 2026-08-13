@@ -9,7 +9,12 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const OCR_SUPPORTED_VERSION = "1.8.10";
+// Oldest OCR release whose delegation contract was verified end-to-end.
+// Compatibility is decided at run time by capability/schema probes; the
+// version string is provenance recorded in the manifest, never an equality
+// gate. (OCR_VERSION_UNSUPPORTED remains a valid code for consumers — the
+// installer throws it when even a repair install cannot reach this baseline.)
+export const OCR_BASELINE_VERSION = "1.8.10";
 export const OCR_WRAPPER_VERSION = "1";
 export const OCR_ERROR_CODES = Object.freeze([
   "USAGE",
@@ -17,6 +22,7 @@ export const OCR_ERROR_CODES = Object.freeze([
   "OCR_CAPABILITY_MISSING",
   "OCR_OUTPUT_SCHEMA_UNSUPPORTED",
   "NOT_GIT_REPOSITORY",
+  "REVIEW_WORKSPACE_NOT_WORKTREE",
   "CANDIDATE_SHA_MISMATCH",
   "DIRTY_REVIEW_WORKSPACE",
   "OCR_UNAVAILABLE",
@@ -328,6 +334,37 @@ function validateRuleCoverage(reviewableFiles, groups) {
   if (missing.length > 0 || unrelated.length > 0) fail("RULES_INVALID", "rule output does not exactly match reviewable files", { missing, unrelated });
 }
 
+/**
+ * The reviewer isolation invariant: the review workspace must be a LINKED git
+ * worktree (created with `git worktree add` / Paseo `--isolation worktree`),
+ * never the primary checkout or a standalone clone. In a linked worktree
+ * `--git-dir` points under `<source>/.git/worktrees/<name>` and differs from
+ * `--git-common-dir`; in a primary checkout or clone the two are identical.
+ * A clean clone at the right SHA must NOT pass this gate.
+ */
+export function assertLinkedWorktree(repo) {
+  const gitDir = git(repo, ["rev-parse", "--git-dir"], "NOT_GIT_REPOSITORY", "could not read the Git directory");
+  const commonDir = git(repo, ["rev-parse", "--git-common-dir"], "NOT_GIT_REPOSITORY", "could not read the Git common directory");
+  const resolvePath = (path) => {
+    const absolute = isAbsolute(path) ? path : join(repo, path);
+    try {
+      return realpathSync(absolute);
+    } catch {
+      return absolute;
+    }
+  };
+  const resolvedGitDir = resolvePath(gitDir);
+  const resolvedCommonDir = resolvePath(commonDir);
+  if (resolvedGitDir === resolvedCommonDir) {
+    fail(
+      "REVIEW_WORKSPACE_NOT_WORKTREE",
+      "review workspace is a primary checkout or standalone clone, not a linked git worktree — create the reviewer workspace with worktree isolation from the source repository",
+      { gitDir: resolvedGitDir },
+    );
+  }
+  return { gitDir: resolvedGitDir, gitCommonDir: resolvedCommonDir };
+}
+
 function readGitState(repo, candidate) {
   const head = git(repo, ["rev-parse", "HEAD"], "NOT_GIT_REPOSITORY", "could not read Git HEAD");
   const status = git(repo, ["status", "--porcelain"], "NOT_GIT_REPOSITORY", "could not inspect Git status");
@@ -374,10 +411,11 @@ function main(options) {
   const repoCheck = runCommand(["rev-parse", "--is-inside-work-tree"], { cwd: options.repo });
   if (!repoCheck.ok || repoCheck.stdout.trim() !== "true") fail("NOT_GIT_REPOSITORY", `not inside a Git worktree: ${options.repo}`);
 
+  const worktree = assertLinkedWorktree(options.repo);
   const entryState = verifyReviewWorkspace(options.repo, options.candidate, undefined, "entry");
   if (options.verify) {
     const verified = verifyReviewWorkspace(options.repo, options.candidate, options.tree);
-    return { schema: "paseo.ocr-review-verification/v1", candidate_sha: verified.head, candidate_tree_sha: verified.tree, clean: verified.clean };
+    return { schema: "paseo.ocr-review-verification/v1", candidate_sha: verified.head, candidate_tree_sha: verified.tree, clean: verified.clean, linked_worktree: true };
   }
   git(options.repo, ["rev-parse", "--verify", `${options.base}^{commit}`], "GIT_REF_INVALID", `review base is not a valid commit: ${options.base}`);
   const actualMergeBase = git(options.repo, ["merge-base", options.base, options.candidate], "GIT_REF_INVALID", "could not calculate Git merge-base");
@@ -388,13 +426,21 @@ function main(options) {
   const ocrVersion = versionResult.stdout.trim().split(/\r?\n/)[0] ?? "";
   const ocrVersionNumber = parseOcrVersion(ocrVersion);
   if (!ocrVersionNumber) fail("OCR_OUTPUT_SCHEMA_UNSUPPORTED", "ocr version output did not contain a supported version string");
-  if (ocrVersionNumber !== OCR_SUPPORTED_VERSION) fail("OCR_VERSION_UNSUPPORTED", `OCR version ${ocrVersionNumber} is not the tested ${OCR_SUPPORTED_VERSION}`, { supported: OCR_SUPPORTED_VERSION, observed: ocrVersionNumber });
+  // Compatibility is capability/schema-based: the version number is recorded
+  // as provenance only. The probes below and the strict normalizers decide
+  // whether this OCR is usable; a version that differs from the tested
+  // baseline is not, by itself, a blocker.
+  let formatJsonCapable = true;
   for (const command of ["preview", "rule"]) {
     const helpResult = runCommand(["delegate", command, "--help"], { cwd: options.repo, executable: ocr, timeoutMs: 30_000 });
     if (!helpResult.ok || !helpResult.stdout.includes("--repo") || !helpResult.stdout.includes("--from")) fail("OCR_CAPABILITY_MISSING", `OCR delegate ${command} capability is missing or unrecognized`);
+    if (!helpResult.stdout.includes("--format")) formatJsonCapable = false;
   }
+  // Prefer machine-readable output when this OCR advertises --format; older
+  // releases (e.g. 1.8.10) reject the flag and emit the parseable Markdown.
+  const formatArgs = formatJsonCapable ? ["--format", "json"] : [];
 
-  const previewResult = runCommand(["delegate", "preview", "--repo", options.repo, "--from", options.base, "--to", options.candidate], { cwd: options.repo, executable: ocr, timeoutMs: 120_000 });
+  const previewResult = runCommand(["delegate", "preview", "--repo", options.repo, "--from", options.base, "--to", options.candidate, ...formatArgs], { cwd: options.repo, executable: ocr, timeoutMs: 120_000 });
   const preview = normalizePreview(parseStructuredOutput(previewResult, "PREVIEW_FAILED", "PREVIEW_INVALID", "OCR preview", parsePreviewText));
   if (preview.mode !== "range") fail("PREVIEW_INVALID", `expected range preview, got ${preview.mode}`);
   if (preview.from !== options.base) fail("PREVIEW_INVALID", "preview.from does not equal requested base", { expected: options.base, observed: preview.from });
@@ -404,7 +450,7 @@ function main(options) {
 
   let ruleGroups = [];
   if (preview.reviewable_files.length > 0) {
-    const ruleArgs = ["delegate", "rule", "--repo", options.repo, "--from", options.base, "--to", options.candidate, ...preview.reviewable_files.map((entry) => entry.path)];
+    const ruleArgs = ["delegate", "rule", "--repo", options.repo, "--from", options.base, "--to", options.candidate, ...formatArgs, ...preview.reviewable_files.map((entry) => entry.path)];
     const rulesResult = runCommand(ruleArgs, { cwd: options.repo, executable: ocr, timeoutMs: 120_000 });
     ruleGroups = normalizeRules(parseStructuredOutput(rulesResult, "RULES_FAILED", "RULES_INVALID", "OCR rule", parseRulesText));
     validateRuleCoverage(preview.reviewable_files, ruleGroups);
@@ -429,6 +475,7 @@ function main(options) {
       wrapper_version: "1",
       wrapper_commit_sha: wrapperCommit,
       ocr_version: ocrVersionNumber,
+      ocr_output_format: formatJsonCapable ? "json" : "text",
     },
     scope: {
       discovered_count: preview.reviewable_files.length + preview.excluded_files.length,
@@ -446,6 +493,8 @@ function main(options) {
       head_exit: exitState.head,
       clean_entry: entryState.clean,
       clean_exit: exitState.clean,
+      linked_worktree: true,
+      git_dir: worktree.gitDir,
     },
     // Backward-compatible top-level fields for simple consumers.
     base_sha: options.base,
@@ -463,7 +512,7 @@ function main(options) {
 }
 
 function help() {
-  return `ocr-review.mjs — deterministic OpenCodeReview delegation preflight\n\nUsage:\n  node scripts/ocr-review.mjs --base <sha> --candidate <sha> [--repo <path>]\n  node scripts/ocr-review.mjs --verify --candidate <sha> --tree <tree-sha> [--repo <path>]\n\nChecks the exact clean HEAD, runs ocr delegate preview/rule in range mode, and\nemits a normalized manifest. --verify performs the post-review HEAD/status/tree\ncheck. It never edits code, changes Git state, or calls an LLM.`;
+  return `ocr-review.mjs — deterministic OpenCodeReview delegation preflight\n\nUsage:\n  node scripts/ocr-review.mjs --base <sha> --candidate <sha> [--repo <path>]\n  node scripts/ocr-review.mjs --verify --candidate <sha> --tree <tree-sha> [--repo <path>]\n\nRequires the review workspace to be a LINKED git worktree (worktree\nisolation), checks the exact clean HEAD, probes OCR delegation capabilities\n(version is provenance, not a gate), runs ocr delegate preview/rule in range\nmode, and emits a normalized manifest. --verify performs the post-review\nHEAD/status/tree check. It never edits code, changes Git state, or calls an LLM.`;
 }
 
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
