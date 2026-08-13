@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   OCR_ERROR_CODES,
-  OCR_SUPPORTED_VERSION,
+  OCR_BASELINE_VERSION,
+  assertLinkedWorktree,
   normalizePreview,
   normalizeRules,
   parsePreviewText,
@@ -35,20 +36,28 @@ function git(repo, ...args) {
   return execFileSync(GIT, args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
+// The review workspace invariant: the wrapper only accepts a LINKED git
+// worktree, so the default fixture is a source repo plus a detached worktree
+// checked out at the candidate SHA. `source` is the primary checkout used by
+// the negative isolation tests.
 function makeRepo() {
-  const repo = mkdtempSync(join(tmpdir(), "paseo-ocr-review-"));
-  git(repo, "init", "-q");
-  git(repo, "config", "user.email", "test@example.invalid");
-  git(repo, "config", "user.name", "OCR Test");
-  mkdirSync(join(repo, "src"));
-  writeFileSync(join(repo, "src", "reviewed.js"), "export const value = 1;\n");
-  git(repo, "add", ".");
-  git(repo, "commit", "-qm", "initial");
-  const base = git(repo, "rev-parse", "HEAD");
-  writeFileSync(join(repo, "src", "reviewed.js"), "export const value = 2;\n");
-  git(repo, "commit", "-qam", "candidate");
-  const candidate = git(repo, "rev-parse", "HEAD");
-  return { repo, base, candidate };
+  const root = mkdtempSync(join(tmpdir(), "paseo-ocr-review-"));
+  const source = join(root, "source");
+  mkdirSync(source);
+  git(source, "init", "-q");
+  git(source, "config", "user.email", "test@example.invalid");
+  git(source, "config", "user.name", "OCR Test");
+  mkdirSync(join(source, "src"));
+  writeFileSync(join(source, "src", "reviewed.js"), "export const value = 1;\n");
+  git(source, "add", ".");
+  git(source, "commit", "-qm", "initial");
+  const base = git(source, "rev-parse", "HEAD");
+  writeFileSync(join(source, "src", "reviewed.js"), "export const value = 2;\n");
+  git(source, "commit", "-qam", "candidate");
+  const candidate = git(source, "rev-parse", "HEAD");
+  const repo = join(root, "review-worktree");
+  git(source, "worktree", "add", "-q", "--detach", repo, candidate);
+  return { repo, source, base, candidate };
 }
 
 function runWrapper(repo, base, candidate, extraEnv = {}) {
@@ -157,10 +166,11 @@ for (const code of [
   "OCR_UNAVAILABLE",
   "PREVIEW_INVALID",
   "RULES_INVALID",
+  "REVIEW_WORKSPACE_NOT_WORKTREE",
 ]) {
   assert.ok(OCR_ERROR_CODES.includes(code), `exports ${code}`);
-assert.equal(OCR_SUPPORTED_VERSION, "1.8.10");
 }
+assert.equal(OCR_BASELINE_VERSION, "1.8.10");
 
 // Ref inputs must be full immutable SHAs, not branch names or shell-like values.
 {
@@ -170,12 +180,57 @@ assert.equal(OCR_SUPPORTED_VERSION, "1.8.10");
   assert.equal(result.json.code, "USAGE");
 }
 
-// Capability/version failures are distinct and fail before selection.
-for (const [mode, code] of [["old-version", "OCR_VERSION_UNSUPPORTED"], ["missing-capability", "OCR_CAPABILITY_MISSING"]]) {
+// A missing delegate capability fails before selection.
+{
   const { repo, base, candidate } = makeRepo();
-  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: mode });
-  assert.equal(result.status, 2, mode);
-  assert.equal(result.json.code, code, mode);
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: "missing-capability" });
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "OCR_CAPABILITY_MISSING");
+}
+
+// Version drift alone is NOT a blocker: compatibility is capability/schema
+// based and the version is recorded as provenance only.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: "old-version" });
+  assert.equal(result.status, 0, result.stdout);
+  assert.equal(result.json.harness.ocr_version, "1.8.9");
+  assert.equal(result.json.harness.ocr_output_format, "text");
+}
+
+// A format-capable OCR is invoked with --format json (the fixture rejects the
+// invocation otherwise) and the manifest records the machine-readable format.
+{
+  const { repo, base, candidate } = makeRepo();
+  const result = runWrapper(repo, base, candidate, { OCR_FIXTURE_MODE: "format-capable" });
+  assert.equal(result.status, 0, result.stdout);
+  assert.equal(result.json.harness.ocr_version, "1.9.2");
+  assert.equal(result.json.harness.ocr_output_format, "json");
+}
+
+// The reviewer isolation invariant: a primary checkout is rejected even when
+// clean and at the exact candidate SHA.
+{
+  const { source, base, candidate } = makeRepo();
+  const result = runWrapper(source, base, candidate);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "REVIEW_WORKSPACE_NOT_WORKTREE");
+}
+
+// A standalone CLONE at the exact candidate SHA is also rejected — HEAD and
+// cleanliness alone must never satisfy the isolation gate.
+{
+  const { source, base, candidate } = makeRepo();
+  const clone = join(mkdtempSync(join(tmpdir(), "paseo-ocr-clone-")), "clone");
+  execFileSync(GIT, ["clone", "-q", source, clone], { encoding: "utf8" });
+  git(clone, "checkout", "-q", candidate);
+  const result = runWrapper(clone, base, candidate);
+  assert.equal(result.status, 2);
+  assert.equal(result.json.code, "REVIEW_WORKSPACE_NOT_WORKTREE");
+  assert.throws(
+    () => assertLinkedWorktree(clone),
+    (error) => error.code === "REVIEW_WORKSPACE_NOT_WORKTREE",
+  );
 }
 
 // Candidate SHA must match current HEAD before OCR is invoked.
@@ -219,6 +274,7 @@ for (const [mode, code] of [["old-version", "OCR_VERSION_UNSUPPORTED"], ["missin
   assert.equal(result.json.review.candidate_sha, candidate);
   assert.equal(result.json.review.candidate_tree_sha.length, 40);
   assert.equal(result.json.workspace.clean_entry, true);
+  assert.equal(result.json.workspace.linked_worktree, true);
   assert.equal(result.json.scope.selected_count, 1);
   assert.equal(result.json.scope.excluded_count, 0);
   assert.equal(result.json.scope.discovered_count, 1);

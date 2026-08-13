@@ -427,8 +427,8 @@ export function mcpAllowedTargets(role: TeamRole): string[] {
 	}
 }
 
-/** Extract create_agent args from an mcp proxy input ({ tool, args }). */
-function extractCreateAgentArgs(input: unknown): unknown {
+/** Extract tool args from an mcp proxy input ({ tool, args }). */
+function extractMcpArgs(input: unknown): unknown {
 	if (typeof input !== "object" || input === null) return null;
 	const args = (input as Record<string, unknown>).args;
 	if (typeof args === "string") {
@@ -455,7 +455,7 @@ const SUPERVISOR_RECOVERY_PURPOSES = new Set(["recovery", "bootstrap"]);
 export function supervisorCreateAgentBlockReason(
 	input: unknown,
 ): string | null {
-	const args = extractCreateAgentArgs(input);
+	const args = extractMcpArgs(input);
 	if (typeof args !== "object" || args === null) {
 		return "Supervisor create_agent requires an args object (provider, labels, settings). Refusing fail-closed.";
 	}
@@ -488,6 +488,42 @@ export function supervisorCreateAgentBlockReason(
 			: undefined;
 	if (typeof thinking !== "string" || thinking.trim().length === 0) {
 		return "Supervisor create_agent requires settings.thinkingOptionId (no daemon-default model — route from the approved Lead route).";
+	}
+	return null;
+}
+
+/**
+ * Argument-level gate for Lead create_workspace through the MCP proxy —
+ * Layer 1 of the reviewer isolation invariant (Layer 2 is the runtime
+ * assertLinkedWorktree gate in ocr-review.mjs, which rejects any
+ * non-worktree workspace with REVIEW_WORKSPACE_NOT_WORKTREE).
+ *
+ * MCP create_workspace args carry no disposition field, so reviewer intent
+ * is declared through the workspace naming convention the Lead skill
+ * mandates: reviewer workspaces are titled/slugged with "review". The gate
+ * enforces:
+ *   - isolation is explicit and valid ("local" | "worktree") — never a
+ *     daemon default;
+ *   - a review-marked workspace (title/worktreeSlug containing "review")
+ *     MUST use worktree isolation; local is the exact anti-pattern the
+ *     runtime gate rejects, so it is blocked before creation.
+ */
+export function leadCreateWorkspaceBlockReason(input: unknown): string | null {
+	const args = extractMcpArgs(input);
+	if (typeof args !== "object" || args === null) {
+		return 'Lead create_workspace requires an args object with an explicit isolation ("local" or "worktree"). Refusing fail-closed.';
+	}
+	const rec = args as Record<string, unknown>;
+	const isolation =
+		typeof rec.isolation === "string" ? rec.isolation.trim() : "";
+	if (isolation !== "local" && isolation !== "worktree") {
+		return `create_workspace requires explicit isolation "local" or "worktree" (got "${isolation || "<missing>"}") — never rely on a daemon default.`;
+	}
+	const markers = [rec.title, rec.worktreeSlug].filter(
+		(value): value is string => typeof value === "string",
+	);
+	if (isolation !== "worktree" && markers.some((value) => /review/i.test(value))) {
+		return 'An independent-reviewer workspace must use isolation "worktree" (a linked git worktree from the source repository). If the worktree cannot be created, report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE — never fall back to a local workspace.';
 	}
 	return null;
 }
@@ -562,6 +598,10 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 	}
 	if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
 		const argBlock = supervisorCreateAgentBlockReason(input);
+		if (argBlock) return argBlock;
+	}
+	if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
+		const argBlock = leadCreateWorkspaceBlockReason(input);
 		if (argBlock) return argBlock;
 	}
 	return null;

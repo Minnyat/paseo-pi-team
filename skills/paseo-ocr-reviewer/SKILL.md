@@ -48,6 +48,7 @@ Before invoking OCR, run:
 ```text
 git rev-parse HEAD
 git status --porcelain
+git rev-parse --git-dir --git-common-dir
 ocr version
 ```
 
@@ -70,6 +71,22 @@ If `git status --porcelain` is non-empty, stop with:
 STATUS: BLOCKED
 REASON: DIRTY_REVIEW_WORKSPACE
 ```
+
+The review workspace MUST be a **linked git worktree** created from the source
+repository (worktree isolation), never the Engineer's primary checkout or a
+standalone clone/project. In a linked worktree `git rev-parse --git-dir`
+resolves under `<source>/.git/worktrees/<name>` and differs from
+`--git-common-dir`; if the two resolve to the same directory, stop with:
+
+```text
+STATUS: BLOCKED
+REASON: REVIEW_WORKSPACE_NOT_WORKTREE
+```
+
+A clean clone at the exact candidate SHA does NOT satisfy this gate — the
+wrapper enforces it mechanically. Ask the Lead for a workspace created with
+worktree isolation; if one cannot be created, the Lead reports
+`BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` rather than falling back.
 
 If OCR is missing or `ocr version` fails, stop with:
 
@@ -94,12 +111,11 @@ If a direct OCR command is needed for diagnosis, it MUST use the same exact
 `--repo`, `--from <REVIEW_BASE_SHA>`, and `--to <ASSIGNED_CANDIDATE_SHA>` values;
 never use a task-body candidate that differs from the authority candidate.
 
-Use the repository's actual installed OCR syntax. Upstream `main` documents a
-JSON format flag, but the verified npm CLI `open-code-review v1.8.10` rejects
-`--format` and emits the delegation preview as structured Markdown. The
-role-pack wrapper parses that output and normalizes it; if a future installed
-version accepts `--format json`, JSON may be used after verifying its schema.
-The current preview still supplies:
+Use the repository's actual installed OCR syntax. The wrapper probes the
+installed CLI's capabilities at run time: releases that advertise `--format`
+(1.9.x and later) are invoked with `--format json`, while older releases
+(e.g. 1.8.10) emit structured Markdown that the wrapper parses and normalizes.
+Both forms are validated against the same strict schema. The preview supplies:
 
 ```text
 mode
@@ -113,9 +129,12 @@ excluded file entries + reasons
 The returned `merge_base` is authoritative for the range diff. Do not replace
 OCR's selection with `git diff --name-only`. If OCR preview fails or returns
 invalid/incomplete output, report a blocker/diagnostic and do not claim a review.
-The tested Phase 1 contract is OCR `1.8.10`; capability/version drift is a
-blocker (`OCR_VERSION_UNSUPPORTED`, `OCR_CAPABILITY_MISSING`, or
-`OCR_OUTPUT_SCHEMA_UNSUPPORTED`).
+Compatibility is capability/schema-based: the wrapper records the OCR version
+as provenance and blocks only on a REAL incompatibility
+(`OCR_CAPABILITY_MISSING` or `OCR_OUTPUT_SCHEMA_UNSUPPORTED`); a version newer
+than the tested `1.8.10` baseline is not, by itself, a blocker. The installer
+still throws `OCR_VERSION_UNSUPPORTED` when even a repair install cannot reach
+that baseline.
 
 The installed support directory contains the deterministic wrapper:
 
@@ -178,9 +197,10 @@ For direct diagnosis only, `ocr delegate rule` must receive the exact
 OCR-selected paths; normal review execution uses the wrapper above.
 ```
 
-The verified v1.8.10 output is structured Markdown with `Rule Group` headers,
-`Applies to` paths, and rule content. The wrapper parses it; newer JSON output
-may be used only after capability/schema verification. In either form, map
+Older CLIs (e.g. v1.8.10) emit structured Markdown with `Rule Group` headers,
+`Applies to` paths, and rule content; format-capable CLIs emit the equivalent
+JSON. The wrapper detects which form the installed CLI supports, requests
+JSON when available, and normalizes both to one schema. In either form, map
 each rule group to every listed path. For a large review, batch by
 shared rule or diff size, while retaining one coverage identity per
 `(path,status)`. If a selected file is absent from rule resolution, stop or

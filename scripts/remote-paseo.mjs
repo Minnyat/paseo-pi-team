@@ -24,7 +24,8 @@
 //   models           --host-id <id> --provider <role>   paseo provider models
 //   workspaces       --host-id <id>                     paseo workspace ls
 //   workspace-create --host-id <id> --path <p> [--isolation local|worktree]
-//                    [--title <t>] [--project <id>]
+//                    [--disposition <d>] [--title <t>] [--project <id>]
+//                    (disposition independent-reviewer forces worktree isolation)
 //   agents           --host-id <id> [--all]             paseo ls -g
 //   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
 //                    --thinking <level> [--workspace <wks>] [--title <t>]
@@ -82,6 +83,8 @@ export const REMOTE_ERROR_CODES = Object.freeze([
 	"ENDPOINT_UNSAFE",
 	"CLI_ERROR",
 	"PROMPT_TOO_LONG",
+	"REVIEW_ISOLATION_INVALID",
+	"REVIEW_WORKTREE_UNAVAILABLE",
 ]);
 
 export class RemoteError extends Error {
@@ -175,7 +178,7 @@ const COMMAND_FLAG_KEYS = {
 	providers: ["hostId"],
 	models: ["hostId", "provider"],
 	workspaces: ["hostId"],
-	"workspace-create": ["hostId", "path", "isolation", "title", "project"],
+	"workspace-create": ["hostId", "path", "isolation", "disposition", "title", "project"],
 	agents: ["hostId", "all"],
 	run: [
 		"hostId",
@@ -194,6 +197,15 @@ const COMMAND_FLAG_KEYS = {
 	archive: ["agentRef"],
 	send: ["agentRef", "prompt", "promptFile", "wait", "noWait"],
 };
+
+// The V3 brief disposition vocabulary (see templates/TASK_BRIEF_V3.md).
+export const WORKSPACE_DISPOSITIONS = Object.freeze([
+	"repository-scout",
+	"documentation-researcher",
+	"solution-architect",
+	"engineer",
+	"independent-reviewer",
+]);
 
 const GLOBAL_FLAG_KEYS = new Set(["cluster", "dryRun", "json", "help"]);
 const BOOLEAN_KEYS = new Set([...BOOLEAN_FLAGS].map(toCamelCase));
@@ -520,8 +532,42 @@ export function buildArgv(command, opts, endpoint) {
 			}
 			const argv = ["workspace", "create", ...ep];
 			argv.push("--path", opts.path.trim());
-			if (typeof opts.isolation === "string" && opts.isolation.trim() !== "") {
-				argv.push("--isolation", opts.isolation.trim());
+			const isolation =
+				typeof opts.isolation === "string" && opts.isolation.trim() !== ""
+					? opts.isolation.trim()
+					: "";
+			if (isolation && isolation !== "local" && isolation !== "worktree") {
+				throw usageError(
+					`--isolation must be "local" or "worktree" (got "${isolation}")`,
+				);
+			}
+			const disposition =
+				typeof opts.disposition === "string" ? opts.disposition.trim() : "";
+			// Fail closed on typos: a misspelled reviewer disposition must never
+			// silently skip the worktree enforcement below.
+			if (disposition && !WORKSPACE_DISPOSITIONS.includes(disposition)) {
+				throw usageError(
+					`--disposition must be one of ${WORKSPACE_DISPOSITIONS.join(", ")} (got "${disposition}")`,
+				);
+			}
+			let effectiveIsolation = isolation;
+			// Reviewer isolation is an invariant, not a preference: an
+			// independent-reviewer workspace is ALWAYS a git worktree. If the
+			// worktree cannot be created on the target host, the caller reports
+			// BLOCKED: REVIEW_WORKTREE_UNAVAILABLE — it never falls back to a
+			// local/standalone workspace that ocr-review.mjs would reject anyway.
+			if (disposition === "independent-reviewer") {
+				if (isolation && isolation !== "worktree") {
+					throw new RemoteError(
+						"REVIEW_ISOLATION_INVALID",
+						`an independent-reviewer workspace requires --isolation worktree (got "${isolation}"); if a worktree cannot be created, report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE instead of falling back`,
+						{ disposition, isolation },
+					);
+				}
+				effectiveIsolation = "worktree";
+			}
+			if (effectiveIsolation) {
+				argv.push("--isolation", effectiveIsolation);
 			}
 			if (typeof opts.title === "string" && opts.title.trim() !== "") {
 				argv.push("--title", opts.title.trim());
@@ -797,7 +843,9 @@ Commands:
   models           --host-id <id> --provider <role-provider>
   workspaces       --host-id <id>
   workspace-create --host-id <id> --path <path> [--isolation local|worktree]
-                   [--title <t>] [--project <id>]
+                   [--disposition <d>] [--title <t>] [--project <id>]
+                   --disposition independent-reviewer forces --isolation worktree
+                   (reviewer isolation is an invariant; local is rejected)
   agents           --host-id <id> [--all]
   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
                    --thinking <level> --workspace <wks-id> [--title <t>]
@@ -1000,10 +1048,20 @@ function main() {
 	const payload = basePayload(command, hostInfo);
 	if (!result.ok) {
 		payload.ok = false;
-		payload.code = "CLI_ERROR";
-		payload.message =
-			result.error ||
-			`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
+		// A failed reviewer worktree creation is the specific blocker the Lead
+		// skill keys recovery on — surface it as REVIEW_WORKTREE_UNAVAILABLE, not
+		// a generic CLI_ERROR. There is no fallback to a local workspace.
+		const reviewerWorkspaceCreate =
+			command === "workspace-create" &&
+			typeof parsed.disposition === "string" &&
+			parsed.disposition.trim() === "independent-reviewer";
+		payload.code = reviewerWorkspaceCreate
+			? "REVIEW_WORKTREE_UNAVAILABLE"
+			: "CLI_ERROR";
+		payload.message = reviewerWorkspaceCreate
+			? `reviewer worktree workspace could not be created on host "${hostInfo.hostId}" — report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE; never fall back to a local/standalone workspace (${result.error || `paseo exit ${result.status}`})`
+			: result.error ||
+				`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
 		if (result.stdout) payload.data = result.stdout;
 		emit(payload, 2);
 	}

@@ -5,16 +5,28 @@ const mode = process.env.OCR_FIXTURE_MODE ?? "";
 const file = process.env.OCR_FIXTURE_FILE ?? "src/reviewed.js";
 
 if (args.includes("version")) {
-  console.log(mode === "old-version" ? "open-code-review v1.8.9 (fixture)" : "open-code-review v1.8.10 (fixture)");
+  if (mode === "old-version") console.log("open-code-review v1.8.9 (fixture)");
+  else if (mode === "format-capable") console.log("open-code-review v1.9.2 (fixture)");
+  else console.log("open-code-review v1.8.10 (fixture)");
   process.exit(0);
 }
 if (args.includes("--help")) {
   if (mode === "missing-capability") {
     console.log("delegate command help without required flags");
+  } else if (mode === "format-capable") {
+    console.log("--repo <path> --from <ref> --to <ref> --format <text|json>");
   } else {
     console.log("--repo <path> --from <ref> --to <ref>");
   }
   process.exit(0);
+}
+// A format-capable OCR must actually be invoked with --format json.
+if (mode === "format-capable" && (args.includes("preview") || args.includes("rule"))) {
+  const flagIndex = args.indexOf("--format");
+  if (flagIndex === -1 || args[flagIndex + 1] !== "json") {
+    console.error("fixture: expected --format json in argv");
+    process.exit(1);
+  }
 }
 if (args.includes("preview")) {
   if (mode === "preview-malformed") {

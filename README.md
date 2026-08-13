@@ -106,11 +106,14 @@ Recovery bắt buộc: kiểm tra activity, pending permission, daemon/remote he
 ## OpenCodeReview delegation (Phase 1)
 
 `paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill. The
-installer automatically installs and verifies the pinned OCR CLI
-`@alibaba-group/open-code-review@1.8.10`; OCR is not an
+installer automatically installs and verifies the OCR CLI
+`@alibaba-group/open-code-review` (capability-based: any installed release at
+or above the verified `1.8.10` baseline that passes the delegation capability
+probe is accepted as-is and never downgraded; when OCR is absent or
+incompatible the installer installs the pinned `1.9.2`). OCR is not an
 agent/provider or second control plane: it deterministically selects files and
 resolves rules, while the Pi Reviewer performs reasoning on the exact candidate
-SHA. The installer runs `scripts/ocr-setup.mjs` to install/verify the pinned CLI;
+SHA. The installer runs `scripts/ocr-setup.mjs` to install/verify the CLI;
 check it manually with `ocr version` (PowerShell:
 `Get-Command ocr`; Unix-like shells: `command -v ocr`) and use delegation mode,
 not `ocr review`. See [`docs/ocr-integration.md`](docs/ocr-integration.md).
@@ -121,11 +124,15 @@ The optional deterministic preflight emits a normalized manifest:
 node scripts/ocr-review.mjs --repo <repo> --base <base-sha> --candidate <candidate-sha>
 ```
 
-It pins OCR `1.8.10`, probes `delegate preview/rule` capabilities, and blocks
-candidate mismatch, dirty/mutated workspaces, unavailable/unsupported OCR,
-malformed selection/rules, and incomplete rule coverage. Its manifest includes
-candidate-tree/workspace entry-exit state and deterministic digests. It never
-edits Git state or calls an LLM.
+It probes `delegate preview/rule` capabilities (recording the OCR version as
+provenance, preferring `--format json` when the installed release supports it)
+and blocks candidate mismatch, non-worktree review workspaces
+(`REVIEW_WORKSPACE_NOT_WORKTREE` — the reviewer must run in a linked git
+worktree, never a primary checkout or standalone clone), dirty/mutated
+workspaces, unavailable/incompatible OCR, malformed selection/rules, and
+incomplete rule coverage. Its manifest includes candidate-tree/workspace
+entry-exit state and deterministic digests. It never edits Git state or calls
+an LLM.
 
 ## Cài đặt
 
@@ -149,7 +156,9 @@ Script copy:
 
 Installer tự kiểm tra `agent-browser --version`, `agent-browser doctor --offline --quick`,
 bundled skill (`agent-browser skills path agent-browser`) và các MCP config chuẩn.
-Nếu thiếu, installer sẽ cài OCR `@alibaba-group/open-code-review@1.8.10`,
+Nếu thiếu, installer sẽ cài OCR `@alibaba-group/open-code-review` (bản pin
+hiện tại `1.9.2`; bản đã cài `>= 1.8.10` qua được capability probe thì giữ
+nguyên, không downgrade),
 `npm install -g agent-browser`, chạy `agent-browser install`
 (`--with-deps` trên Linux), copy skill, rồi merge entry `agent-browser` vào
 `~/.pi/agent/mcp.json` mà không ghi đè server khác. Chạy lại installer là an toàn.

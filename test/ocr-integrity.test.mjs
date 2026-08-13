@@ -64,6 +64,33 @@ assert.match(ocrSetup, /1\.8\.10/);
 assert.match(ocrSetup, /OCR_INSTALL_FAILED/);
 assert.match(ocrSkill, /MUST NOT:[\s\S]*edit product code[\s\S]*commit[\s\S]*push[\s\S]*merge[\s\S]*deploy/);
 
+// OCR compatibility is capability-based, never a version-equality gate.
+assert.match(ocrSetup, /probeDelegateCapability/);
+assert.match(ocrSetup, /OCR_PINNED_VERSION/);
+assert.match(ocrSetup, /OCR_MINIMUM_VERSION/);
+assert.doesNotMatch(ocrReview, /version\s*!==\s*OCR_/, "review wrapper has no version-equality gate");
+assert.match(ocrReview, /OCR_CAPABILITY_MISSING/);
+assert.match(ocrReview, /--format/);
+
+// Reviewer worktree isolation is a mechanical invariant end-to-end.
+const remotePaseo = read("scripts/remote-paseo.mjs");
+assert.match(ocrReview, /assertLinkedWorktree/);
+assert.match(ocrReview, /REVIEW_WORKSPACE_NOT_WORKTREE/);
+assert.match(ocrReview, /--git-common-dir/);
+assert.match(ocrSkill, /REVIEW_WORKSPACE_NOT_WORKTREE/);
+assert.match(ocrSkill, /REVIEW_WORKTREE_UNAVAILABLE/);
+assert.match(leadSkill, /REVIEW_WORKTREE_UNAVAILABLE/);
+assert.match(leadSkill, /--disposition independent-reviewer/);
+assert.match(remotePaseo, /REVIEW_ISOLATION_INVALID/);
+assert.match(remotePaseo, /independent-reviewer/);
+assert.match(remotePaseo, /REVIEW_WORKTREE_UNAVAILABLE/);
+
+// Layer-1 local guard: the policy extension gates MCP create_workspace args.
+const policyExtension = read("extensions/paseo-team-policy.ts");
+assert.match(policyExtension, /leadCreateWorkspaceBlockReason/);
+assert.match(policyExtension, /REVIEW_WORKTREE_UNAVAILABLE/);
+assert.match(leadSkill, /review:<TASK_ID>/);
+
 // OCR metadata stays outside the V3 authority marker block.
 const authorityBlock = brief.split("PASEO_TEAM_TASK_V3_BEGIN")[1].split("PASEO_TEAM_TASK_V3_END")[0];
 assert.doesNotMatch(authorityBlock, /OCR_MODE|OCR_ENGINE|OCR_BASE_SHA|REVIEW_BASE_SHA|REVIEW_CANDIDATE_SHA/);

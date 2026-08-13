@@ -120,9 +120,17 @@ function summarizeMessages() {
 		warn("ocr-cli", "ocr CLI unavailable — independent-reviewer OCR workflow is blocked (install @alibaba-group/open-code-review)");
 	} else {
 		const versionLine = ocr.stdout.trim().split(/\r?\n/)[0] || "";
-		const supported = /^open-code-review v1\.8\.10(?:\b|\s)/i.test(versionLine);
-		if (supported) pass("ocr-cli", versionLine);
-		else warn("ocr-cli", `${versionLine || "installed"} — tested contract is open-code-review v1.8.10; reviewer wrapper will fail closed`);
+		const parsed = versionLine.match(/open-code-review v(\d+)\.(\d+)\.(\d+)/i);
+		// Compatibility is capability-based; the version only gates a warning
+		// when it is below the verified 1.8.10 baseline or unparseable.
+		const meetsBaseline =
+			parsed &&
+			(Number(parsed[1]) > 1 ||
+				(Number(parsed[1]) === 1 &&
+					(Number(parsed[2]) > 8 ||
+						(Number(parsed[2]) === 8 && Number(parsed[3]) >= 10))));
+		if (meetsBaseline) pass("ocr-cli", versionLine);
+		else warn("ocr-cli", `${versionLine || "installed"} — below the verified open-code-review v1.8.10 baseline; reviewer wrapper capability probes will fail closed`);
 		for (const command of ["preview", "rule"]) {
 			const help = tryExec("ocr", ["delegate", command, "--help"]);
 			if (help.ok && help.stdout.includes("--repo") && help.stdout.includes("--from")) pass(`ocr-capability:${command}`, "delegate capability available");

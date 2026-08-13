@@ -481,6 +481,84 @@ const EP = "https://app.paseo.sh/#offer=tok";
 }
 
 {
+	const t = "buildArgv: workspace-create validates --isolation values";
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", isolation: "worktee" },
+			EP,
+		),
+	);
+	assert.ok(
+		buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", isolation: "worktree" },
+			EP,
+		).includes("worktree"),
+		t,
+	);
+}
+
+{
+	const t = "buildArgv: independent-reviewer disposition forces worktree isolation";
+	// Unspecified isolation defaults to worktree for a reviewer workspace.
+	const argv = buildArgv(
+		"workspace-create",
+		{
+			path: "/Users/admin/repo",
+			disposition: "independent-reviewer",
+			title: "review-workspace",
+		},
+		EP,
+	);
+	const isolationIndex = argv.indexOf("--isolation");
+	assert.ok(isolationIndex !== -1 && argv[isolationIndex + 1] === "worktree", t);
+	// Explicit worktree is accepted unchanged.
+	assert.ok(
+		buildArgv(
+			"workspace-create",
+			{
+				path: "/Users/admin/repo",
+				disposition: "independent-reviewer",
+				isolation: "worktree",
+			},
+			EP,
+		).includes("worktree"),
+		t,
+	);
+	// Local isolation for a reviewer is a hard error, never a silent fallback.
+	expectRemoteError("REVIEW_ISOLATION_INVALID", () =>
+		buildArgv(
+			"workspace-create",
+			{
+				path: "/Users/admin/repo",
+				disposition: "independent-reviewer",
+				isolation: "local",
+			},
+			EP,
+		),
+	);
+	// Non-reviewer dispositions do not force isolation.
+	assert.ok(
+		!buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", disposition: "engineer" },
+			EP,
+		).includes("--isolation"),
+		t,
+	);
+	// A misspelled disposition fails closed instead of silently skipping the
+	// reviewer worktree enforcement.
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"workspace-create",
+			{ path: "/Users/admin/repo", disposition: "independent-reviwer" },
+			EP,
+		),
+	);
+}
+
+{
 	const t = "buildArgv: agents";
 	assert.deepEqual(
 		buildArgv("agents", {}, EP),
@@ -956,6 +1034,45 @@ assert.deepEqual(
 	assert.equal(r.json.code, "CLI_ERROR", t);
 	assert.ok(!r.stdout.includes(ENDPOINT), `${t}: endpoint leaked in error`);
 	assert.ok(r.stdout.includes("<endpoint-value-redacted>"), t);
+}
+
+{
+	const t =
+		"e2e: reviewer worktree creation failure → REVIEW_WORKTREE_UNAVAILABLE, not CLI_ERROR";
+	const r = runWrapper(
+		[
+			"workspace-create",
+			"--host-id",
+			"mac-review",
+			"--path",
+			"/Users/admin/repo",
+			"--disposition",
+			"independent-reviewer",
+		],
+		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1" } },
+	);
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.ok, false, t);
+	assert.equal(r.json.code, "REVIEW_WORKTREE_UNAVAILABLE", t);
+	assert.match(r.json.message, /REVIEW_WORKTREE_UNAVAILABLE/, t);
+	assert.match(r.json.message, /never fall back/i, t);
+}
+
+{
+	const t =
+		"e2e: non-reviewer workspace-create failure stays CLI_ERROR";
+	const r = runWrapper(
+		[
+			"workspace-create",
+			"--host-id",
+			"mac-review",
+			"--path",
+			"/Users/admin/repo",
+		],
+		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1" } },
+	);
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.code, "CLI_ERROR", t);
 }
 
 {
