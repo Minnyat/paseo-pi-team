@@ -30,49 +30,27 @@ jobs:
           node-version: ${{ matrix.node }}
       # The extension imports isToolCallEventType (a runtime value, not just
       # types) from pi-coding-agent, so the policy tests need it present.
-      # Everything is pinned to exact versions — no-latest so a fresh upstream
+      # `npm ci` installs exactly what package-lock.json pins — a fresh upstream
       # release cannot change CI behavior for unchanged source.
-      - name: install dev type deps
-        shell: bash
-        run: |
-          npm install --no-save --no-audit --no-fund \
-            @earendil-works/pi-coding-agent@0.83.0 @types/node@22.19.19
-      - name: policy tests
-        run: node test/policy.test.mts
-      - name: model-routing tests
-        run: node test/model-routing.test.mjs
-      - name: pure role-pack tests
-        shell: bash
-        run: |
-          node test/remote-paseo.test.mjs
-          node test/reliability.test.mjs
-          node test/watchdog.test.mjs
-          node test/team-communication.test.mjs
-          node test/browser-setup.test.mjs
-          node test/installer-contract.test.mjs
-          node test/ocr-setup.test.mjs
-          node test/ocr-review.test.mjs
-          node test/ocr-integrity.test.mjs
-          node test/paseo-contract.test.mjs
+      - name: install dev deps
+        run: npm ci --no-audit --no-fund
+      # Runs every test/*.test.{mjs,mts} — a new test file is picked up without
+      # editing this workflow, so the suite cannot silently lose coverage.
+      - name: tests
+        run: npm test
+      # Globbed, not enumerated: preflight.mjs has no importing test, so a
+      # parse error there would otherwise reach users. A new script is covered
+      # the moment it lands.
       - name: syntax checks
         shell: bash
         run: |
-          node --check scripts/preflight.mjs
-          node --check scripts/model-routing.mjs
-          node --check scripts/remote-paseo.mjs
-          node --check scripts/reliability.mjs
-          node --check scripts/watchdog.mjs
-          node --check scripts/team-communication.mjs
-          node --check scripts/browser-setup.mjs
-          node --check scripts/ocr-review.mjs
-          node --check scripts/ocr-setup.mjs
-          node --check scripts/team-scripts-path.mjs
-          node --check test/fixtures/fake-paseo.mjs
-          node --check test/fixtures/fake-ocr.mjs
+          for f in scripts/*.mjs test/fixtures/*.mjs; do
+            node --check "$f"
+          done
 
   # Live remote Paseo checks stay manual (they need two real hosts); this CI
   # only gates the pure tests. Typecheck needs the pi-coding-agent package
-  # types, so it fetches the pinned dev deps on the fly.
+  # types, which come from the same locked devDependencies.
   typecheck:
     name: tsc (extension)
     runs-on: ubuntu-latest
@@ -85,11 +63,7 @@ jobs:
         # v4.4.0
         with:
           node-version: "24"
-      - name: install dev type deps
-        shell: bash
-        run: |
-          npm install --no-save --no-audit --no-fund \
-            @earendil-works/pi-coding-agent@0.83.0 @types/node@22.19.19 \
-            typescript@6.0.3
+      - name: install dev deps
+        run: npm ci --no-audit --no-fund
       - name: typecheck extension
-        run: npx tsc --noEmit -p tsconfig.ci.json
+        run: npm run typecheck
