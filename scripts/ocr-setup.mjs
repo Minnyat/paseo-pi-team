@@ -10,30 +10,21 @@
 // never downgraded just because its version differs.
 
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import {
+  compareOcrVersions,
+  isEntrypoint,
+  parseOcrVersion,
+} from "./lib-common.mjs";
+
+// Re-exported so the installer and the review wrapper agree on one parser:
+// ocr-review.mjs used to carry a private copy of parseOcrVersion.
+export { compareOcrVersions, parseOcrVersion };
 
 export const OCR_NPM_PACKAGE = "@alibaba-group/open-code-review";
 // Installed when OCR is absent, older than the minimum, or capability-broken.
 export const OCR_PINNED_VERSION = "1.9.2";
 // Oldest release whose delegation contract was verified end-to-end (1.8.10).
 export const OCR_MINIMUM_VERSION = "1.8.10";
-
-export function parseOcrVersion(output) {
-  const match = String(output).match(/open-code-review v(\d+\.\d+\.\d+)/i);
-  return match?.[1] ?? null;
-}
-
-/** Numeric semver compare over major.minor.patch; returns -1 | 0 | 1. */
-export function compareOcrVersions(a, b) {
-  const pa = String(a).split(".").map(Number);
-  const pb = String(b).split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    const delta = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (delta !== 0) return delta < 0 ? -1 : 1;
-  }
-  return 0;
-}
 
 /**
  * Probe the delegation surface ocr-review.mjs depends on: `ocr delegate
@@ -118,12 +109,7 @@ export function ensureOcr({ run = defaultRun } = {}) {
 
 /** Compare canonical filesystem paths so macOS /var aliases work. */
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-  if (!entry) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-  } catch {
-    return false;
-  }
+  return isEntrypoint(moduleUrl, entry);
 }
 
 if (isMainModule()) {

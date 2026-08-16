@@ -12,10 +12,10 @@
 // database, hold API keys, or fall back to another model/host on its own.
 // Paseo remains the only control plane; git SHA remains the artifact anchor.
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isEntrypoint } from "./lib-common.mjs";
 
 export const MODEL_CLASSES = Object.freeze([
 	"MONITOR_ECONOMY",
@@ -799,12 +799,7 @@ export function verifyObserved(requested, runtimeInfo) {
 
 /** Compare canonical filesystem paths so macOS /var aliases work. */
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-	if (!entry) return false;
-	try {
-		return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-	} catch {
-		return false;
-	}
+	return isEntrypoint(moduleUrl, entry);
 }
 
 if (isMainModule()) {

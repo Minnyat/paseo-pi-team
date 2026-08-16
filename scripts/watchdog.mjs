@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isEntrypoint } from "./lib-common.mjs";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
@@ -176,12 +176,7 @@ async function main() {
 }
 
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-  if (!entry) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-  } catch {
-    return false;
-  }
+  return isEntrypoint(moduleUrl, entry);
 }
 
 if (isMainModule()) {

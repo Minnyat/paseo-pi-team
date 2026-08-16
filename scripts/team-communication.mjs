@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 // Reliable, parent-scoped Peer -> Lead communication.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const MESSAGE_KINDS = Object.freeze(["question", "blocked", "dependency", "progress"]);
@@ -30,25 +28,6 @@ export function validatePeerMessage(input) {
       ? `peer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       : metadataToken("correlationId", correlationId),
   };
-}
-
-function resolvePaseoExec() {
-  const override = process.env.PASEO_TEAM_PASEO_EXEC?.trim();
-  if (override) return override.split(/\s+/);
-  if (process.platform !== "win32") return ["paseo"];
-  const pathValue = process.env.PATH ?? "";
-  const pathEntries = pathValue.includes(";") ? pathValue.split(";") : pathValue.split(":");
-  if (process.env.APPDATA) pathEntries.push(join(process.env.APPDATA, "npm"));
-  for (const dir of pathEntries) {
-    for (const name of ["paseo.exe", "paseo.cmd", "paseo.bat"]) {
-      const candidate = join(dir, name);
-      if (!existsSync(candidate)) continue;
-      if (name === "paseo.exe") return [candidate];
-      const entry = join(dirname(candidate), "node_modules", "@getpaseo", "cli", "bin", "paseo");
-      if (existsSync(entry)) return [process.execPath, entry];
-    }
-  }
-  return ["paseo"];
 }
 
 export function runPaseo(args, timeoutMs = 20_000) {
@@ -110,12 +89,7 @@ async function main() {
 }
 
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-  if (!entry) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-  } catch {
-    return false;
-  }
+  return isEntrypoint(moduleUrl, entry);
 }
 
 if (isMainModule()) {

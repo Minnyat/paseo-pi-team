@@ -22,6 +22,9 @@ $skillDir  = Join-Path $skillsDir "paseo-team-lead"
 $ocrSkillDir = Join-Path $skillsDir "paseo-ocr-reviewer"
 $teamScriptsDir = Join-Path $extDir "paseo-team-scripts"
 $teamSupportFiles = @(
+  # lib-common.mjs must ship: every other support script imports it as
+  # "./lib-common.mjs" and would fail at import time without it.
+  "lib-common.mjs",
   "reliability.mjs",
   "watchdog.mjs",
   "team-communication.mjs",
