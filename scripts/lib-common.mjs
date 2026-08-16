@@ -42,10 +42,15 @@ export function isEntrypoint(moduleUrl, entry = process.argv[1]) {
  * translated at every call site anyway.
  */
 export function splitCommandLine(commandLine) {
+	// Reject non-strings loudly. Coercing would turn `undefined` into the argv
+	// element "undefined" and spawn a nonsense binary with a confusing ENOENT.
+	if (typeof commandLine !== "string") {
+		throw new TypeError("splitCommandLine expects a string");
+	}
 	const parts = [];
 	let current = "";
 	let quote = "";
-	for (const ch of String(commandLine)) {
+	for (const ch of commandLine) {
 		if ((ch === '"' || ch === "'") && (!quote || quote === ch)) {
 			quote = quote ? "" : ch;
 			continue;

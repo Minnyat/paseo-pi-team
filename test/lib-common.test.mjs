@@ -51,6 +51,11 @@ assert.equal(splitCommandLine('"unclosed').unterminated, true);
 assert.equal(splitCommandLine("'unclosed").unterminated, true);
 assert.equal(splitCommandLine('"closed"').unterminated, false);
 
+// Non-strings throw instead of coercing: String(undefined) would have produced
+// the argv element "undefined" and spawned a nonsense binary.
+assert.throws(() => splitCommandLine(undefined), TypeError);
+assert.throws(() => splitCommandLine(["paseo"]), TypeError);
+
 // --- searchPathDirs / findOnPath ---------------------------------------------
 
 {

@@ -31,7 +31,14 @@ export function validatePeerMessage(input) {
 }
 
 export function runPaseo(args, timeoutMs = 20_000) {
-  const [bin, ...prefix] = resolvePaseoExec();
+  // A malformed PASEO_TEAM_PASEO_EXEC is a configuration fault, not a transport
+  // fault: give it its own code so reliability.mjs never retries it and the
+  // operator sees the real cause instead of a generic send failure.
+  const [bin, ...prefix] = resolvePaseoExec((reason) => {
+    throw Object.assign(new Error(`PASEO_TEAM_PASEO_EXEC ${reason}`), {
+      code: "PASEO_EXEC_INVALID",
+    });
+  });
   try {
     return { ok: true, data: JSON.parse(execFileSync(bin, [...prefix, ...args, "--json"], {
       encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], env: process.env, windowsHide: true,
