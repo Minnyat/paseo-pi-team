@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 // gate. (OCR_VERSION_UNSUPPORTED remains a valid code for consumers — the
 // installer throws it when even a repair install cannot reach this baseline.)
 export const OCR_BASELINE_VERSION = "1.8.10";
+// Schema version of the manifest THIS wrapper emits (harness.wrapper_version).
+// Bump when the manifest shape changes in a way consumers must notice.
 export const OCR_WRAPPER_VERSION = "1";
 export const OCR_ERROR_CODES = Object.freeze([
   "USAGE",
@@ -472,7 +474,7 @@ function main(options) {
       candidate_tree_sha: exitState.tree,
     },
     harness: {
-      wrapper_version: "1",
+      wrapper_version: OCR_WRAPPER_VERSION,
       wrapper_commit_sha: wrapperCommit,
       ocr_version: ocrVersionNumber,
       ocr_output_format: formatJsonCapable ? "json" : "text",

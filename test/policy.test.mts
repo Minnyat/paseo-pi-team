@@ -14,7 +14,6 @@ import {
 	isSupervisorAllowedMcpTarget,
 	mcpBlockReason,
 	mcpScriptBlockReason,
-	parsePeerMode,
 	parseTaskBrief,
 	peerMcpBlockReason,
 	teamToolBlockReason,
@@ -232,23 +231,28 @@ const v3WriteBrief = [
 // A bare V3 header without BEGIN marker is NOT a brief (legacy regex rejection).
 assert.equal(parseTaskBrief("PASEO_TEAM_TASK_V3\nMODE: write"), null);
 
-// --- parsePeerMode (legacy, strict-brief based) -------------------------------
+// --- parseTaskBrief: MODE field parsing (diagnostics only) --------------------
+// The parsed `.mode` is what the brief CLAIMS. Only resolvePeerMode below
+// decides what is granted — these two must never be conflated.
 
 assert.equal(
-	parsePeerMode("PASEO_TEAM_TASK_V1\n\nMODE: write\n\nOBJECTIVE: x"),
+	parseTaskBrief("PASEO_TEAM_TASK_V1\n\nMODE: write\n\nOBJECTIVE: x")?.mode,
 	"write",
 );
-assert.equal(parsePeerMode("PASEO_TEAM_TASK_V2\nMODE: read-only"), "read-only");
 assert.equal(
-	parsePeerMode("MODE: write\nmore content"),
-	null,
-	"no header → null",
+	parseTaskBrief("PASEO_TEAM_TASK_V2\nMODE: read-only")?.mode,
+	"read-only",
 );
-assert.equal(parsePeerMode("no mode here"), null);
 assert.equal(
-	parsePeerMode("X MODE: write"),
+	parseTaskBrief("MODE: write\nmore content"),
 	null,
-	"MODE must be line-anchored",
+	"no header → not a brief",
+);
+assert.equal(parseTaskBrief("no mode here"), null);
+assert.equal(
+	parseTaskBrief("X MODE: write"),
+	null,
+	"header must be line-anchored",
 );
 
 // --- resolvePeerMode (fail-closed) --------------------------------------------
