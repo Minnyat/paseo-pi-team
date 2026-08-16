@@ -16,8 +16,7 @@ paseo-pi-team/
 ├── config/
 │   ├── paseo.providers.example.json   # 3 profile Pi: supervisor / lead / peer
 │   ├── model-routing.example.json     # template route MODEL_CLASS → model (copy per host)
-│   ├── cluster-routing.example.json   # template contract controller-local N-host
-│   └── hosts.example.json             # template host registry N-host (legacy)
+│   └── cluster-routing.example.json   # template contract controller-local N-host
 ├── templates/
 │   ├── TASK_BRIEF_V3.md               # canonical V3 task brief + parser rules
 │   └── WORKSPACE_PROTOCOL.example.md  # .orchestration/WORKSPACE_PROTOCOL.md cho repo đích
@@ -236,8 +235,8 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
    `~/.paseo-pi-team/cluster-routing.local.json` trên CONTROLLER — một file duy
    nhất mô tả connection/required/capabilities/limits/routes của mọi host;
    endpoint remote chỉ tham chiếu qua **tên env var**, không bao giờ chứa value.
-   Xem [`docs/multi-host.md`](docs/multi-host.md). (`config/hosts.example.json`
-   là host registry legacy; cluster file là chuẩn mới.)
+   Xem [`docs/multi-host.md`](docs/multi-host.md). (Host registry
+   `hosts.local.json` đã bị bỏ; cluster file là nguồn host duy nhất.)
 4. Lead truyền exact model vào mọi `create_agent` dạng
    `pi-peer/<pi-provider>/<model-id>` + `settings.thinkingOptionId`, rồi đối
    chiếu `get_agent_status` runtimeInfo — lệch thì
@@ -334,20 +333,28 @@ hơn tiện lợi.
 
 ## Phát triển
 
-Type-check extension (tsconfig là dev-only, máy-specific, đã gitignore):
+Dev dependency pin trong `package.json` + `package-lock.json` (CI dùng đúng
+lockfile này qua `npm ci`):
 
 ```bash
-npx tsc --noEmit -p tsconfig.json
+npm ci          # cài @earendil-works/pi-coding-agent, @types/node, typescript
+npm test        # chạy toàn bộ test/*.test.{mjs,mts}
+npm run typecheck   # tsc --noEmit -p tsconfig.ci.json
+npm run check       # cả hai
 ```
 
-Test (node **22.18+ hoặc 23.6+** chạy được `.ts`/`.mts` trực tiếp nhờ type
-stripping bật sẵn):
+Node **22.18+ hoặc 23.6+** chạy được `.ts`/`.mts` trực tiếp nhờ type stripping
+bật sẵn. Chạy lẻ một suite khi cần khoanh vùng:
 
 ```bash
 node test/policy.test.mts          # policy + per-turn lifecycle regression
 node test/model-routing.test.mjs   # routing resolver regression
 node test/remote-paseo.test.mjs    # remote executor regression (fake CLI)
+node test/lib-common.test.mjs      # helper dùng chung: exec resolution, shim, version
 ```
+
+`tsconfig.json` ở root là dev-only, máy-specific và đã gitignore; CI và
+`npm run typecheck` dùng `tsconfig.ci.json` nằm trong repo.
 
 Smoke-test load extension không cần LLM (in mode):
 

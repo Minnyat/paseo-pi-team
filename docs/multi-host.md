@@ -8,10 +8,14 @@ logic; mọi host là một entry trong file controller-local duy nhất:
                                                 validator: scripts/model-routing.mjs#validateClusterConfig)
 ```
 
-> `hosts.local.json` (template `config/hosts.example.json`) là dạng LEGACY,
-> chỉ giữ để tham khảo. Cluster file là chuẩn: Lead resolve route bằng
-> `resolveClusterRoute(cluster, hostId, MODEL_CLASS, inventory)` và gate bằng
-> `node scripts/preflight.mjs --strict --host-id <id>`.
+Lead resolve route bằng
+`resolveClusterRoute(cluster, hostId, MODEL_CLASS, inventory)` và gate bằng
+`node scripts/preflight.mjs --strict --host-id <id>`.
+
+> **Di trú:** host registry `hosts.local.json` (cùng flag `--hosts` và template
+> `config/hosts.example.json`) đã bị **bỏ hẳn** — không còn được đọc ở bất kỳ
+> đâu. Chuyển từng entry sang `hosts{}` của cluster file rồi xóa file cũ;
+> preflight sẽ cảnh báo `hosts-config` chừng nào file cũ còn nằm đó.
 
 ## Tài nguyên thiết kế
 
