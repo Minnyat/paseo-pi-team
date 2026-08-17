@@ -3,10 +3,9 @@
 [![ci](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml/badge.svg)](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Role pack chạy trực tiếp trên **Paseo + Pi**: không Python, không database, không
-state machine, không candidate ledger, không integration engine, không CLI riêng.
-Paseo giữ lifecycle/workspace/control-plane truth; Pi extension giữ role
-invariant (prompt + tool policy); Lead skill giữ quy trình orchestration.
+Role pack chạy trực tiếp trên **Paseo + Pi**. Ba thành phần, ba trách nhiệm
+tách bạch: Paseo giữ lifecycle/workspace/control-plane truth; Pi extension giữ
+role invariant (prompt + tool policy); Lead skill giữ quy trình orchestration.
 
 Tham chiếu thiết kế đầy đủ:
 [`docs/demonthorn-agent-orchestration-deep-dive.md`](docs/demonthorn-agent-orchestration-deep-dive.md).
@@ -343,7 +342,7 @@ test — tạo một repo rác tương đương ở đâu cũng được.
 [x] Lead nhận thông báo khi Peer hoàn thành
 [x] Lead gửi được correction bằng send_agent_prompt (đã xác minh supervisor → lead; cùng một tool)
 [x] Reviewer là session mới và read-only
-[x] Workflow hoàn tất không cần database hay CLI riêng
+[x] Workflow hoàn tất chỉ bằng Paseo + Pi extension + Lead skill
 ```
 
 Kết quả POC Windows (2026-08-04, model Minnyat/deepseek-v4-flash): cả 6 test
@@ -388,7 +387,8 @@ PASEO_PI_ROLE=lead pi -e ./extensions/paseo-team-policy.ts -p "/team-tools"
 
 ## Nguyên tắc thiết kế (tóm tắt từ deep-dive)
 
-- Paseo là control plane duy nhất; không sync task database riêng giữa hai máy.
+- Paseo là control plane duy nhất: state của agent/workspace luôn đọc từ Paseo,
+  kể cả khi chạy nhiều host.
 - Git commit SHA là điểm neo giữa writer và reviewer.
 - Peer là independent co-worker, không phải function call; brief không chứa
   verdict trá hình; Peer có quyền `REOPEN_REQUEST` / `DEPENDENCY_REQUEST` /
