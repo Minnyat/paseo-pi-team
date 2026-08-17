@@ -21,6 +21,9 @@ SKILL_DIR="$SKILLS_DIR/paseo-team-lead"
 OCR_SKILL_DIR="$SKILLS_DIR/paseo-ocr-reviewer"
 TEAM_SCRIPTS_DIR="$EXT_DIR/paseo-team-scripts"
 TEAM_SUPPORT_FILES=(
+  # lib-common.mjs must ship: every other support script imports it as
+  # "./lib-common.mjs" and would fail at import time without it.
+  lib-common.mjs
   reliability.mjs
   watchdog.mjs
   team-communication.mjs

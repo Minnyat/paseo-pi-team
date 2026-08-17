@@ -52,9 +52,14 @@
 // The endpoint VALUE is never printed, logged or embedded in errors.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+	PASEO_CONVENTIONAL_ENTRIES,
+	isEntrypoint,
+	resolveCmdEntry as resolveCmdEntryFromShim,
+	resolvePaseoExec as resolvePaseoExecShared,
+} from "./lib-common.mjs";
 import { classifyRemoteFailure } from "./reliability.mjs";
 import {
 	ROLE_PROVIDERS,
@@ -673,93 +678,18 @@ export function buildArgv(command, opts, endpoint) {
 // CLI executable resolution (no shell on Windows)
 // ---------------------------------------------------------------------------
 
-function splitCommandLine(commandLine) {
-	const parts = [];
-	let current = "";
-	let inQuotes = false;
-	for (const ch of commandLine) {
-		if (ch === '"') {
-			inQuotes = !inQuotes;
-			continue;
-		}
-		if (/\s/.test(ch) && !inQuotes) {
-			if (current) {
-				parts.push(current);
-				current = "";
-			}
-			continue;
-		}
-		current += ch;
-	}
-	if (current) parts.push(current);
-	return parts;
-}
-
-function findOnPath(name) {
-	for (const dir of (process.env.PATH ?? "").split(
-		process.platform === "win32" ? ";" : ":",
-	)) {
-		if (!dir) continue;
-		const candidate = join(dir, name);
-		if (existsSync(candidate)) return candidate;
-	}
-	return undefined;
-}
-
-/** Parse the npm .cmd shim for the real `node ... entry.js` invocation. */
+/** Parse the npm .cmd shim for the real `node ... entry.js` invocation.
+ * Kept at this name because the remote-paseo tests pin the contract here. */
 export function resolveCmdEntry(shimPath) {
-	let text;
-	try {
-		text = readFileSync(shimPath, "utf8");
-	} catch {
-		return undefined;
-	}
-	// npm shims end with: "%_prog%" "%dp0%\node_modules\@scope\pkg\dist\index.js" %*
-	const match = text.match(/"([^"]*(?:%~dp0|%dp0%)[^"]*\.js)"/i);
-	if (match?.[1]) {
-		const entry = match[1]
-			.replace(/%~dp0|%dp0%/gi, dirname(shimPath))
-			.replace(/[\\/]/g, sep);
-		if (existsSync(entry)) return entry;
-	}
-	// Last resort: the conventional layout next to the shim.
-	const conventional = join(
-		dirname(shimPath),
-		"node_modules",
-		"@getpaseo",
-		"cli",
-		"dist",
-		"index.js",
-	);
-	return existsSync(conventional) ? conventional : undefined;
+	return resolveCmdEntryFromShim(shimPath, PASEO_CONVENTIONAL_ENTRIES);
 }
 
-/**
- * Resolve `[bin, ...prefixArgs]` to execute. On Windows, `.cmd` shims cannot
- * be spawned with argv (EINVAL), so we locate the shim, read its real node
- * entry, and spawn node.exe directly — argv fidelity without cmd.exe quoting.
- * PASEO_TEAM_PASEO_EXEC overrides everything (test/debug hook).
- */
+/** Shared resolution, with a bad PASEO_TEAM_PASEO_EXEC mapped onto this
+ * module's USAGE error contract instead of a bare Error. */
 export function resolvePaseoExec() {
-	const override = process.env.PASEO_TEAM_PASEO_EXEC?.trim();
-	if (override) {
-		const parts = splitCommandLine(override);
-		if (parts.length === 0) {
-			throw new RemoteError("USAGE", "PASEO_TEAM_PASEO_EXEC is set but empty");
-		}
-		return parts;
-	}
-	if (process.platform !== "win32") return ["paseo"];
-	const exe = findOnPath("paseo.exe");
-	if (exe) return [exe];
-	const shim = findOnPath("paseo.cmd") ?? findOnPath("paseo.bat");
-	if (shim) {
-		const entry = resolveCmdEntry(shim);
-		if (entry) return [process.execPath, entry];
-	}
-	// Fallback: let the spawn fail with the real error (child_process will
-	// surface ENOENT / EINVAL); the wrapper maps it to a clear CLI_ERROR.
-	return ["paseo"];
+	return resolvePaseoExecShared((reason) => {
+		throw new RemoteError("USAGE", `PASEO_TEAM_PASEO_EXEC ${reason}`);
+	});
 }
 
 /**
@@ -871,12 +801,7 @@ endpointSet, data). Exit: 0 ok · 1 usage/config/env · 2 CLI runtime error.`;
 
 /** Compare canonical filesystem paths so macOS /var aliases work. */
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-	if (!entry) return false;
-	try {
-		return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-	} catch {
-		return false;
-	}
+	return isEntrypoint(moduleUrl, entry);
 }
 
 function basePayload(command, hostInfo) {

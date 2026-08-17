@@ -2,7 +2,7 @@
 // unrelated project cwd and must include remote-paseo dependencies.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -18,8 +18,26 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "scripts");
 const installed = mkdtempSync(join(tmpdir(), "paseo-installed-support-"));
 const unrelatedCwd = mkdtempSync(join(tmpdir(), "paseo-unrelated-cwd-"));
-for (const file of ["remote-paseo.mjs", "model-routing.mjs", "reliability.mjs", "team-communication.mjs", "watchdog.mjs", "ocr-review.mjs", "ocr-setup.mjs", "team-scripts-path.mjs"]) {
+for (const file of ["lib-common.mjs", "remote-paseo.mjs", "model-routing.mjs", "reliability.mjs", "team-communication.mjs", "watchdog.mjs", "ocr-review.mjs", "ocr-setup.mjs", "team-scripts-path.mjs"]) {
   cpSync(join(source, file), join(installed, file));
+}
+
+// Every file the installers ship must exist in scripts/, and every support
+// script an installed file imports must itself be shipped — otherwise the
+// install succeeds and then fails at import time on the user's machine.
+for (const installer of ["install.sh", "install.ps1"]) {
+  const text = readFileSync(join(root, "scripts", installer), "utf8");
+  const shipped = new Set([...text.matchAll(/^\s*"?([a-z0-9-]+\.mjs)"?,?\s*$/gm)].map((m) => m[1]));
+  // Sanity floor only — proves the regex still matches the installer's list
+  // shape. The real check is the dependency loop below, not this count.
+  assert.ok(shipped.size >= 4, `${installer}: support-file list not found (${shipped.size} matches)`);
+  for (const file of shipped) {
+    assert.ok(existsSync(join(source, file)), `${installer} ships missing scripts/${file}`);
+    const body = readFileSync(join(source, file), "utf8");
+    for (const [, dep] of body.matchAll(/from "\.\/([a-z0-9-]+\.mjs)"/g)) {
+      assert.ok(shipped.has(dep), `${installer}: ${file} imports ./${dep}, which is not shipped`);
+    }
+  }
 }
 
 const env = { ...process.env, PASEO_TEAM_SCRIPTS_DIR: installed };

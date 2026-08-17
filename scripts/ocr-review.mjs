@@ -5,9 +5,15 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  isEntrypoint,
+  parseOcrVersion,
+  resolveWindowsCliExec,
+  splitCommandLine,
+} from "./lib-common.mjs";
 
 // Oldest OCR release whose delegation contract was verified end-to-end.
 // Compatibility is decided at run time by capability/schema probes; the
@@ -15,6 +21,8 @@ import { fileURLToPath } from "node:url";
 // gate. (OCR_VERSION_UNSUPPORTED remains a valid code for consumers — the
 // installer throws it when even a repair install cannot reach this baseline.)
 export const OCR_BASELINE_VERSION = "1.8.10";
+// Schema version of the manifest THIS wrapper emits (harness.wrapper_version).
+// Bump when the manifest shape changes in a way consumers must notice.
 export const OCR_WRAPPER_VERSION = "1";
 export const OCR_ERROR_CODES = Object.freeze([
   "USAGE",
@@ -47,67 +55,25 @@ function fail(code, message, details = {}) {
   throw new OcrReviewError(code, message, details);
 }
 
-function splitCommandLine(commandLine) {
-  const parts = [];
-  let current = "";
-  let quote = "";
-  for (const ch of commandLine) {
-    if ((ch === '"' || ch === "'") && (!quote || quote === ch)) {
-      quote = quote ? "" : ch;
-      continue;
-    }
-    if (/\s/.test(ch) && !quote) {
-      if (current) parts.push(current);
-      current = "";
-    } else {
-      current += ch;
-    }
+function splitOcrExecOverride(commandLine) {
+  const { parts, unterminated } = splitCommandLine(commandLine);
+  if (unterminated) {
+    fail("OCR_UNAVAILABLE", "PASEO_TEAM_OCR_EXEC has an unterminated quote");
   }
-  if (quote) fail("OCR_UNAVAILABLE", "PASEO_TEAM_OCR_EXEC has an unterminated quote");
-  if (current) parts.push(current);
   return parts;
-}
-
-function findOnPath(names) {
-  const separator = process.platform === "win32" ? ";" : ":";
-  for (const dir of (process.env.PATH ?? "").split(separator)) {
-    if (!dir) continue;
-    for (const name of names) {
-      const path = join(dir, name);
-      if (existsSync(path)) return path;
-    }
-  }
-  return undefined;
-}
-
-function resolveNpmShim(shimPath) {
-  let text;
-  try {
-    text = readFileSync(shimPath, "utf8");
-  } catch {
-    return undefined;
-  }
-  const match = text.match(/"([^\"]*(?:%~dp0|%dp0%)[^\"]*\.js)"/i);
-  if (!match?.[1]) return undefined;
-  const entry = match[1]
-    .replace(/%~dp0|%dp0%/gi, dirname(shimPath))
-    .replace(/[\\/]/g, sep);
-  return existsSync(entry) ? entry : undefined;
 }
 
 export function resolveOcrExec() {
   const override = process.env.PASEO_TEAM_OCR_EXEC?.trim();
   if (override) {
-    const parts = splitCommandLine(override);
+    const parts = splitOcrExecOverride(override);
     if (parts.length === 0) fail("OCR_UNAVAILABLE", "PASEO_TEAM_OCR_EXEC is empty");
     return parts;
   }
   if (process.platform !== "win32") return ["ocr"];
-  const exe = findOnPath(["ocr.exe"]);
-  if (exe) return [exe];
-  const shim = findOnPath(["ocr.cmd", "ocr.bat"]);
-  const entry = shim ? resolveNpmShim(shim) : undefined;
-  return entry ? [process.execPath, entry] : ["ocr"];
+  // Bare "ocr" as the fallback: let spawn surface the real ENOENT rather than
+  // guessing at a layout the shim did not confirm.
+  return resolveWindowsCliExec({ exe: "ocr.exe", shims: ["ocr.cmd", "ocr.bat"] }) ?? ["ocr"];
 }
 
 function runCommand(argv, options = {}) {
@@ -164,11 +130,6 @@ function sha256(value) {
 
 function canonicalJson(value) {
   return JSON.stringify(value);
-}
-
-function parseOcrVersion(output) {
-  const match = String(output).match(/open-code-review v(\d+\.\d+\.\d+)/i);
-  return match?.[1] ?? null;
 }
 
 function requireString(value, field, code) {
@@ -472,7 +433,7 @@ function main(options) {
       candidate_tree_sha: exitState.tree,
     },
     harness: {
-      wrapper_version: "1",
+      wrapper_version: OCR_WRAPPER_VERSION,
       wrapper_commit_sha: wrapperCommit,
       ocr_version: ocrVersionNumber,
       ocr_output_format: formatJsonCapable ? "json" : "text",
@@ -516,12 +477,7 @@ function help() {
 }
 
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-  if (!entry) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-  } catch {
-    return false;
-  }
+  return isEntrypoint(moduleUrl, entry);
 }
 
 if (isMainModule()) {

@@ -3,12 +3,12 @@
 //
 // Usage:
 //   node scripts/preflight.mjs [--json] [--strict] [--host-id <id>] [--cluster <path>]
-//                              [--routes <path>] [--hosts <path>] [--skip-models]
+//                              [--routes <path>] [--skip-models]
 //
 // Checks (per host): node, git, paseo CLI + daemon, pi CLI, pi-mcp-adapter,
 // role-pack extension + prompts, Paseo role providers, model inventory,
-// routing-config validity, per-model thinking support, hosts config,
-// cluster routing contract, endpoint env presence, repository state.
+// routing-config validity, per-model thinking support, cluster routing
+// contract, endpoint env presence, repository state.
 //
 // Never prints secret values: only env-var NAMES are checked/reported.
 // Exit code 1 when any check fails. In --strict mode, warnings that affect
@@ -56,7 +56,9 @@ const routesPath = opt(
 	"--routes",
 	join(defaultRoutingDir(), "model-routing.local.json"),
 );
-const hostsPath = opt("--hosts", join(defaultRoutingDir(), "hosts.local.json"));
+// Not configurable: this path exists only to warn that a leftover legacy
+// registry is no longer read. The cluster file is the only host source.
+const legacyHostsPath = join(defaultRoutingDir(), "hosts.local.json");
 const clusterPath = opt("--cluster", defaultClusterRoutingPath());
 const hostIdArg = opt("--host-id", undefined);
 
@@ -457,55 +459,21 @@ if (routing && daemonUp && !skipModels) {
 	warn("routes", "model inventory checks skipped (--skip-models)");
 }
 
-// --- hosts config ---------------------------------------------------------------
+// --- legacy hosts.local.json migration notice ------------------------------------
+// The N-host registry was replaced by the single controller-local cluster file.
+// Removing the reader silently would leave a stale hosts.local.json looking
+// authoritative while nothing read it, so say so once, loudly, instead.
 
-if (existsSync(hostsPath)) {
-	try {
-		const data = JSON.parse(readFileSync(hostsPath, "utf8"));
-		const hosts = data?.hosts ?? {};
-		let problems = 0;
-		for (const [hostId, entry] of Object.entries(hosts)) {
-			if (typeof entry !== "object" || entry === null) {
-				fail(`host:${hostId}`, "host entry must be an object");
-				problems++;
-				continue;
-			}
-			if (
-				hostId !== "local" &&
-				typeof entry.endpointEnv === "string" &&
-				entry.endpointEnv.trim() !== ""
-			) {
-				if (process.env[entry.endpointEnv]) {
-					pass(
-						`host:${hostId}`,
-						`endpoint env ${entry.endpointEnv} present (value not printed)`,
-					);
-				} else {
-					warn(
-						`host:${hostId}`,
-						`endpoint env ${entry.endpointEnv} NOT set — remote routing to this host is blocked`,
-					);
-				}
-			} else if (hostId !== "local") {
-				warn(
-					`host:${hostId}`,
-					"no endpointEnv — only local-daemon routing is available for this host entry",
-				);
-			} else {
-				pass(`host:${hostId}`, "local daemon entry");
-			}
-		}
-		if (problems === 0) pass("hosts-config", hostsPath);
-	} catch (error) {
-		fail(
-			"hosts-config",
-			`hosts file is not valid JSON: ${String(error?.message ?? error)}`,
-		);
-	}
-} else {
+if (existsSync(legacyHostsPath)) {
 	warn(
 		"hosts-config",
-		`${hostsPath} missing (copy config/hosts.example.json for multi-host; single-host can ignore)`,
+		`${legacyHostsPath} is a REMOVED legacy format and is ignored — move its entries into ${clusterPath} (see docs/multi-host.md) and delete the file`,
+	);
+}
+if (process.argv.includes("--hosts")) {
+	warn(
+		"hosts-config",
+		"--hosts was removed with the legacy host registry; pass --cluster <path> instead",
 	);
 }
 

@@ -1054,15 +1054,6 @@ export function gitAuthorityBlockReason(
 }
 
 // ---------------------------------------------------------------------------
-// Legacy parser — kept for API compatibility; strict semantics now live in
-// parseTaskBrief + resolvePeerMode.
-// ---------------------------------------------------------------------------
-
-export function parsePeerMode(prompt: string): PeerMode | null {
-	return parseTaskBrief(prompt)?.mode ?? null;
-}
-
-// ---------------------------------------------------------------------------
 // Per-turn peer state — recomputed from the *current* prompt on every
 // before_agent_start. Never sticky across turns.
 // ---------------------------------------------------------------------------

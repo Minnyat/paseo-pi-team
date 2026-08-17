@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import {
   MESSAGE_KINDS,
   parentAgentIdFromInspect,
+  runPaseo,
   sendPeerMessage,
   validatePeerMessage,
 } from "../scripts/team-communication.mjs";
+import { classifyRemoteFailure } from "../scripts/reliability.mjs";
 
 assert.deepEqual([...MESSAGE_KINDS], ["question", "blocked", "dependency", "progress"]);
 assert.deepEqual(
@@ -52,6 +54,30 @@ assert.equal(parentAgentIdFromInspect({ ParentAgentId: null }), null);
   assert.deepEqual(calls.map((args) => args[0]), ["inspect", "send"], "send mutation is never retried");
   if (previousAgentId === undefined) delete process.env.PASEO_AGENT_ID;
   else process.env.PASEO_AGENT_ID = previousAgentId;
+}
+
+// A malformed PASEO_TEAM_PASEO_EXEC must fail before any spawn, with a code
+// reliability.mjs treats as non-retryable — retrying a config fault only
+// delays the operator seeing it.
+{
+  const previous = process.env.PASEO_TEAM_PASEO_EXEC;
+  for (const [override, expected] of [
+    ['""', /is set but empty/],
+    ['"unclosed', /unterminated quote/],
+  ]) {
+    process.env.PASEO_TEAM_PASEO_EXEC = override;
+    assert.throws(
+      () => runPaseo(["inspect", "x"]),
+      (error) => {
+        assert.equal(error.code, "PASEO_EXEC_INVALID");
+        assert.match(error.message, expected);
+        assert.equal(classifyRemoteFailure(error), "non-retryable");
+        return true;
+      },
+    );
+  }
+  if (previous === undefined) delete process.env.PASEO_TEAM_PASEO_EXEC;
+  else process.env.PASEO_TEAM_PASEO_EXEC = previous;
 }
 
 console.log("team communication tests passed");

@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
@@ -28,21 +26,11 @@ export function classifyStaleAgents(agents, options = {}) {
 }
 
 function paseoExec() {
-  const override = process.env.PASEO_TEAM_PASEO_EXEC?.trim();
-  if (override) return override.split(/\s+/);
-  if (process.platform !== "win32") return ["paseo"];
-  const pathDirs = (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":");
-  if (process.env.APPDATA) pathDirs.push(join(process.env.APPDATA, "npm"));
-  for (const dir of pathDirs) {
-    for (const name of ["paseo.exe", "paseo.cmd", "paseo.bat"]) {
-      const candidate = join(dir, name);
-      if (!existsSync(candidate)) continue;
-      if (name === "paseo.exe") return [candidate];
-      const entry = join(dirname(candidate), "node_modules", "@getpaseo", "cli", "bin", "paseo");
-      if (existsSync(entry)) return [process.execPath, entry];
-    }
-  }
-  return ["paseo"];
+  return resolvePaseoExec((reason) => {
+    throw Object.assign(new Error(`PASEO_TEAM_PASEO_EXEC ${reason}`), {
+      code: "PASEO_EXEC_INVALID",
+    });
+  });
 }
 
 function deadlineBound(promise, deadline) {
@@ -176,12 +164,7 @@ async function main() {
 }
 
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
-  if (!entry) return false;
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
-  } catch {
-    return false;
-  }
+  return isEntrypoint(moduleUrl, entry);
 }
 
 if (isMainModule()) {

@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import {
   OCR_ERROR_CODES,
   OCR_BASELINE_VERSION,
+  OCR_WRAPPER_VERSION,
   assertLinkedWorktree,
   normalizePreview,
   normalizeRules,
@@ -266,6 +267,8 @@ assert.equal(OCR_BASELINE_VERSION, "1.8.10");
   const result = runWrapper(repo, base, candidate);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.json.schema, "paseo.ocr-review-manifest/v1");
+  // The emitted manifest must carry the exported constant, not a stray literal.
+  assert.equal(result.json.harness.wrapper_version, OCR_WRAPPER_VERSION);
   assert.equal(result.json.base_sha, base);
   assert.equal(result.json.candidate_sha, candidate);
   assert.equal(result.json.reviewable_files.length, 1);

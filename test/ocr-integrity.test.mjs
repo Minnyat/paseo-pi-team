@@ -17,6 +17,7 @@ const teamScriptsPath = read("scripts/team-scripts-path.mjs");
 const ocrReview = read("scripts/ocr-review.mjs");
 const teamCommunication = read("scripts/team-communication.mjs");
 const watchdog = read("scripts/watchdog.mjs");
+const libCommon = read("scripts/lib-common.mjs");
 
 assert.match(ocrSkill, /name: paseo-ocr-reviewer/);
 assert.match(leadSkill, /load `paseo-ocr-reviewer`/);
@@ -56,9 +57,18 @@ assert.match(installSh, /team-scripts-path\.mjs/);
 assert.match(installPs1, /team-scripts-path\.mjs/);
 assert.match(teamScriptsPath, /PASEO_TEAM_SCRIPTS_DIR/);
 assert.match(teamScriptsPath, /PI_CODING_AGENT_DIR/);
-assert.match(ocrReview, /realpathSync/);
-assert.match(teamCommunication, /realpathSync/);
-assert.match(watchdog, /realpathSync/);
+// Entrypoint detection must compare canonical paths, not URL text. The
+// implementation now lives once in lib-common; each script must route through
+// it rather than reintroducing its own comparison.
+assert.match(libCommon, /realpathSync/);
+for (const [name, text] of [
+  ["ocr-review.mjs", ocrReview],
+  ["team-communication.mjs", teamCommunication],
+  ["watchdog.mjs", watchdog],
+]) {
+  assert.match(text, /isEntrypoint/, `${name} uses the shared entrypoint check`);
+  assert.doesNotMatch(text, /realpathSync\(fileURLToPath/, `${name} has no private copy`);
+}
 assert.match(ocrSetup, /@alibaba-group\/open-code-review/);
 assert.match(ocrSetup, /1\.8\.10/);
 assert.match(ocrSetup, /OCR_INSTALL_FAILED/);

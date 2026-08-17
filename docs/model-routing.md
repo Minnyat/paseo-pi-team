@@ -127,9 +127,10 @@ HOST_ROUTE_UNAVAILABLE         class không có route trên host này
 
 ## Ranh giới secret
 
-- Không commit: `model-routing.local.json`, `hosts.local.json`,
+- Không commit: `model-routing.local.json`, `cluster-routing.local.json`,
   `~/.pi/agent/{auth.json,models.json}`, `~/.paseo/config.json`, pairing URL,
   mọi endpoint có credential.
-- `hosts.local.json` chỉ tham chiếu endpoint qua **tên env var**
-  (`endpointEnv`); giá trị tcp://...?password=... nằm trong environment.
+- `cluster-routing.local.json` chỉ tham chiếu endpoint qua **tên env var**
+  (`connection.endpointEnv`); giá trị tcp://...?password=... nằm trong
+  environment.
 - Preflight chỉ báo env var có tồn tại hay không, không in giá trị.
