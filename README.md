@@ -271,6 +271,45 @@ normalized prefixes); Paseo MCP and other servers stay off-limits.
 `node scripts/preflight.mjs --json` covers the CLI, Chrome/runtime, skill and
 MCP entry checks.
 
+#### Launch mode vs. CDP attach mode
+
+By default the MCP entry is `args: ["mcp"]` — **launch mode**. agent-browser
+starts its own browser, which carries no cookies and no logged-in sessions.
+That emptiness is what makes a per-turn `BROWSER_MCP_AUTHORITY` grant a real
+bound: the worst a granted Peer can do is browse as a stranger.
+
+**Attach mode** points agent-browser at a browser that is already running,
+through the Chrome DevTools Protocol:
+
+```bash
+scripts/install.sh --attach-cdp-port 9222
+# or, directly:
+node scripts/browser-setup.mjs --install --attach-cdp-port 9222
+```
+
+That writes `args: ["--cdp", "9222", "mcp"]` (agent-browser takes `--cdp` as a
+global flag, before the subcommand). It is faster and reuses the profile's auth
+— which is exactly the cost: a Peer holding the grant inherits **every session
+open in that profile**, and agent-browser refuses `--allowed-domains` while CDP
+is in use, so per-domain restriction is off the table too. Point it at a
+dedicated automation profile, never your daily browser.
+
+The rules around it:
+
+- **Opt-in, explicit port, no env fallback.** A setting this consequential has
+  to be visible in the command that caused it.
+- **Existing MCP entries are still never rewritten.** If one already exists with
+  a different target, the installer *fails* rather than silently ignoring the
+  flag — re-running `--attach-cdp-port` on an already-installed host is an
+  error you can see, not a no-op you cannot.
+- **Preflight probes it.** `agent-browser-cdp` reports launch mode, or dials
+  `127.0.0.1:<port>/json/version` and fails when nothing answers, so a dead
+  attach target surfaces as host unreadiness instead of a browser call dying
+  mid-turn. `agent-browser-cdp-exposure` warns when the same port also answers
+  on a non-loopback address — a browser started with
+  `--remote-debugging-address=0.0.0.0` is unauthenticated remote control of
+  that profile for anyone on the network.
+
 ### Paseo inspect contract test
 
 Because `peer_ask_lead` and the watchdog depend on JSON fields Paseo exposes,

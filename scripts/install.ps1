@@ -9,7 +9,11 @@
 
 param(
   [string]$PiHome = "$env:USERPROFILE\.pi",
-  [string]$RolePackRoot = (Split-Path -Parent $PSScriptRoot)
+  [string]$RolePackRoot = (Split-Path -Parent $PSScriptRoot),
+  # Optional: attach agent-browser to an already-running browser over CDP
+  # instead of letting it launch an isolated one. Opt-in with an explicit port
+  # - see scripts/browser-setup.mjs for why this is not a default.
+  [string]$AttachCdpPort = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +64,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $browserSetupArgs = @("--install")
 if (-not $env:PI_CODING_AGENT_DIR) { $browserSetupArgs += @("--pi-home", $PiHome) }
+if ($AttachCdpPort) { $browserSetupArgs += @("--attach-cdp-port", $AttachCdpPort) }
 & node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") @browserSetupArgs
 if ($LASTEXITCODE -ne 0) {
   throw "agent-browser setup failed with exit code $LASTEXITCODE"

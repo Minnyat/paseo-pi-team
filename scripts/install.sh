@@ -10,6 +10,27 @@
 
 set -euo pipefail
 
+# Optional: attach agent-browser to an already-running browser over CDP instead
+# of letting it launch an isolated one. Opt-in with an explicit port — see
+# scripts/browser-setup.mjs for why this is not a default.
+ATTACH_CDP_PORT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --attach-cdp-port)
+      if [[ $# -lt 2 ]]; then
+        echo "[paseo-team] --attach-cdp-port requires a port" >&2
+        exit 1
+      fi
+      ATTACH_CDP_PORT="$2"
+      shift 2
+      ;;
+    *)
+      echo "[paseo-team] unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 ROLE_PACK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PI_HOME="${PI_HOME:-$HOME/.pi}"
 AGENT_DIR="${PI_CODING_AGENT_DIR:-$PI_HOME/agent}"
@@ -60,6 +81,9 @@ fi
 BROWSER_SETUP_ARGS=(--install)
 if [[ -z "${PI_CODING_AGENT_DIR:-}" ]]; then
   BROWSER_SETUP_ARGS+=(--pi-home "$PI_HOME")
+fi
+if [[ -n "$ATTACH_CDP_PORT" ]]; then
+  BROWSER_SETUP_ARGS+=(--attach-cdp-port "$ATTACH_CDP_PORT")
 fi
 if ! node "$ROLE_PACK_ROOT/scripts/browser-setup.mjs" "${BROWSER_SETUP_ARGS[@]}"; then
   echo "[paseo-team] agent-browser setup failed" >&2
