@@ -1,0 +1,15 @@
+# Normalize to LF in the index AND check out as LF on every platform.
+# CI runs ubuntu/windows/macos against the same source, so a CRLF checkout on
+# Windows would make one runner parse different bytes than the other two.
+* text=auto eol=lf
+
+# Shell scripts fail to execute on Unix when they carry CRLF.
+*.sh text eol=lf
+
+# OCR fixtures are canonical CLI output parsed byte-for-byte.
+# test/ocr-review.test.mjs derives its own CRLF variants from them (toCrlf),
+# so the stored form must stay LF or that test stops testing anything.
+test/fixtures/ocr/** text eol=lf
+
+# Generated: collapse in GitHub diffs and exclude from language stats.
+package-lock.json linguist-generated=true
