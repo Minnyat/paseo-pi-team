@@ -372,3 +372,12 @@ PASEO_PI_ROLE=lead pi -e ./extensions/paseo-team-policy.ts -p "/team-tools"
 - One writer per moving scope; worktree isolation khi có writer song song.
 - Supervisor là governance plane: quan sát, không sửa code, không điều phối Peer.
 - Model/workspace ID phải được inspect (`list_providers`, `list_models`), không đoán.
+
+## Giấy phép
+
+[MIT](LICENSE).
+
+`package.json` giữ `"private": true` một cách có chủ đích: role pack này được
+cài bằng `scripts/install.{sh,ps1}`, không phải bằng `npm install`, nên cờ đó
+chặn một lần `npm publish` nhầm. Nó không hạn chế quyền sử dụng — giấy phép
+MIT mới là thứ quyết định điều đó.
