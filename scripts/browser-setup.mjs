@@ -131,9 +131,11 @@ export function isValidAgentBrowserMcpServer(server) {
 	if (server.disabled !== undefined && typeof server.disabled !== "boolean") {
 		return false;
 	}
-	if (server.lifecycle !== undefined && typeof server.lifecycle !== "string") {
-		return false;
-	}
+	// Deliberately NOT validating `lifecycle` or any other extra field. What this
+	// predicate really decides is whether the installer OVERWRITES the entry, so
+	// every rejection is a clobber: rejecting a field the previous rule ignored
+	// would silently replace a config the user owns. Only the fields the
+	// installer itself relies on may gate validity.
 	return readAgentBrowserArgs(server.args) !== null;
 }
 

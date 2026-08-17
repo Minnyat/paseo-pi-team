@@ -149,10 +149,57 @@ assert.equal(
 	false,
 );
 assert.equal(isValidAgentBrowserMcpServer({ command: "agent-browser", args: [] }), false);
-assert.equal(
-	isValidAgentBrowserMcpServer({ command: "agent-browser", args: ["mcp"], lifecycle: 7 }),
-	false,
-);
+
+// Superset guard. Every rejection here makes the installer OVERWRITE that entry,
+// so the rule must never reject anything the pre-CDP rule accepted — including
+// fields it did not look at, such as `lifecycle`. This replays the old rule
+// verbatim over a corpus and fails on any entry that lost validity.
+{
+	const preCdpRule = (server) =>
+		Boolean(
+			server &&
+				typeof server === "object" &&
+				!Array.isArray(server) &&
+				typeof server.command === "string" &&
+				server.command.trim() === "agent-browser" &&
+				Array.isArray(server.args) &&
+				server.args[0] === "mcp" &&
+				server.args.every((arg) => typeof arg === "string") &&
+				(server.disabled === undefined || typeof server.disabled === "boolean"),
+		);
+	const argSets = [
+		["mcp"],
+		["mcp", "--tools", "core"],
+		["mcp", "--cdp"],
+		["mcp", "--cdp", "9222"],
+		["mcp", "--cdp", "0"],
+		["open"],
+		[],
+		["--cdp", "9222", "mcp"],
+	];
+	const extras = [
+		{},
+		{ disabled: true },
+		{ disabled: false },
+		{ lifecycle: "lazy" },
+		{ lifecycle: 7 },
+		{ lifecycle: null },
+		{ lifecycle: {} },
+		{ someFutureField: { nested: true } },
+	];
+	for (const args of argSets) {
+		for (const extra of extras) {
+			const server = { command: "agent-browser", args, ...extra };
+			if (preCdpRule(server)) {
+				assert.equal(
+					isValidAgentBrowserMcpServer(server),
+					true,
+					`the installer would clobber a previously valid entry: ${JSON.stringify(server)}`,
+				);
+			}
+		}
+	}
+}
 
 // Preflight needs the parsed target, not a second ad-hoc scan of args.
 assert.deepEqual(agentBrowserCdpTarget({ command: "agent-browser", args: ["mcp"] }), {
