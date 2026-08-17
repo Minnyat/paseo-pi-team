@@ -8,10 +8,12 @@ import {
 	agentBrowserCdpTarget,
 	assertCdpPort,
 	browserMcpConfig,
+	cdpEndpointUrl,
 	isValidAgentBrowserMcpServer,
 	mergeAgentBrowserMcpConfig,
 	mcpConfigCandidates,
 	probeCdpEndpoint,
+	resolveExistingEntryDecision,
 	skillIsInstalled,
 } from "../scripts/browser-setup.mjs";
 
@@ -105,11 +107,30 @@ assert.deepEqual(browserMcpConfig({ cdpPort: "9222" }).args, [
 // Ports are validated at the boundary so a typo can never reach mcp.json.
 assert.equal(assertCdpPort(9222), 9222);
 assert.equal(assertCdpPort(" 9222 "), 9222);
-for (const bad of ["", " ", "abc", "0", "-1", "65536", "92.22", null, undefined, {}, 1.5, Number.NaN]) {
+// Every rejection must be THIS error, not an incidental one from formatting the
+// offending value — a fail-closed helper that dies the wrong way is a helper you
+// cannot diagnose.
+for (const bad of [
+	"",
+	" ",
+	"abc",
+	"0",
+	"-1",
+	"65536",
+	"92.22",
+	null,
+	undefined,
+	{},
+	1.5,
+	Number.NaN,
+	9222n,
+	Symbol("9222"),
+	[9222],
+]) {
 	assert.throws(
 		() => assertCdpPort(bad),
-		/CDP port/,
-		`assertCdpPort must reject ${JSON.stringify(bad) ?? String(bad)}`,
+		/CDP port must be an integer/,
+		`assertCdpPort must reject ${String(bad)} with its own error`,
 	);
 }
 assert.throws(() => browserMcpConfig({ cdpPort: "nope" }), /CDP port/);
@@ -243,6 +264,54 @@ assert.deepEqual(
 );
 assert.throws(() => agentBrowserCdpTarget({ command: "gh", args: ["mcp"] }), /agent-browser/);
 
+// An IPv6 target has to be bracketed or the URL is nonsense — and the exposure
+// probe now dials IPv6 addresses too, so this is on a live path.
+assert.equal(cdpEndpointUrl("127.0.0.1", 9222), "http://127.0.0.1:9222/json/version");
+assert.equal(cdpEndpointUrl("::1", 9222), "http://[::1]:9222/json/version");
+assert.equal(cdpEndpointUrl("fd00::1", 9222), "http://[fd00::1]:9222/json/version");
+// Already-bracketed input must not be double-wrapped.
+assert.equal(cdpEndpointUrl("[::1]", 9222), "http://[::1]:9222/json/version");
+assert.throws(() => cdpEndpointUrl("127.0.0.1", 0), /CDP port/);
+
+// The conflict rule is the safety behaviour of this whole change. It lives in a
+// pure function so it is testable without shelling out to npm/agent-browser.
+{
+	const launchEntry = {
+		path: "/home/u/.pi/agent/mcp.json",
+		server: { command: "agent-browser", args: ["mcp"] },
+	};
+	const attach9222 = {
+		path: "/home/u/.pi/agent/mcp.json",
+		server: { command: "agent-browser", args: ["--cdp", "9222", "mcp"] },
+	};
+
+	// No port requested: whatever the user has stays, in either mode.
+	assert.deepEqual(resolveExistingEntryDecision(launchEntry, null), {
+		action: "keep",
+		target: { mode: "launch", port: null },
+	});
+	assert.equal(resolveExistingEntryDecision(attach9222, null).action, "keep");
+
+	// Requested port already in place: idempotent, not a conflict.
+	assert.equal(resolveExistingEntryDecision(attach9222, 9222).action, "keep");
+
+	// Requested port the existing entry cannot satisfy: loud, never a silent
+	// no-op, and never an overwrite.
+	for (const [entry, requested] of [
+		[launchEntry, 9222],
+		[attach9222, 9333],
+	]) {
+		const decision = resolveExistingEntryDecision(entry, requested);
+		assert.equal(decision.action, "conflict");
+		assert.match(decision.message, /--attach-cdp-port/);
+		assert.match(decision.message, /never rewritten/);
+		assert.ok(
+			decision.message.includes(entry.path),
+			"the conflict must name the config file the user has to edit",
+		);
+	}
+}
+
 // A requested attach port must reach the merged config.
 {
 	const merged = mergeAgentBrowserMcpConfig({}, { cdpPort: 9222 });
@@ -300,6 +369,26 @@ for (const args of [["mcp", "--tools", "core"], ["--cdp", "9333", "mcp"]]) {
 	const { port } = server.address();
 	const probe = await probeCdpEndpoint({ port, timeoutMs: 2000 });
 	assert.equal(probe.ok, false);
+	await new Promise((resolve) => server.close(resolve));
+}
+// The probe must actually work over IPv6, not just format the URL correctly.
+{
+	const server = createServer((req, res) => {
+		if (req.url === "/json/version") {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ Browser: "Chrome/141.0.0.0" }));
+			return;
+		}
+		res.writeHead(404).end("nope");
+	});
+	const listening = await new Promise((resolve) => {
+		server.once("error", () => resolve(false));
+		server.listen(0, "::1", () => resolve(true));
+	});
+	assert.ok(listening, "IPv6 loopback must be available to exercise the probe");
+	const { port } = server.address();
+	const probe = await probeCdpEndpoint({ host: "::1", port, timeoutMs: 2000 });
+	assert.equal(probe.ok, true, "probeCdpEndpoint must reach an IPv6 endpoint");
 	await new Promise((resolve) => server.close(resolve));
 }
 

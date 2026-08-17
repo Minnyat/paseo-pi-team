@@ -50,10 +50,23 @@ export function assertCdpPort(value) {
 			: Number.NaN;
 	if (!Number.isInteger(port) || port < 1 || port > 65535) {
 		throw new Error(
-			`CDP port must be an integer 1-65535, got ${JSON.stringify(value) ?? String(value)}`,
+			`CDP port must be an integer 1-65535, got ${describeValue(value)}`,
 		);
 	}
 	return port;
+}
+
+/**
+ * Render a rejected value for an error message without ever throwing itself.
+ * JSON.stringify raises on BigInt and returns undefined for symbols, so a
+ * fail-closed check that formats its input naively dies with the wrong error.
+ */
+function describeValue(value) {
+	try {
+		return JSON.stringify(value) ?? String(value);
+	} catch {
+		return String(value);
+	}
 }
 
 /**
@@ -167,6 +180,16 @@ export function describeCdpTarget(target) {
 }
 
 /**
+ * CDP version-probe URL. An IPv6 literal must be bracketed in a URL authority,
+ * and the exposure probe dials IPv6 addresses, so this is not cosmetic.
+ */
+export function cdpEndpointUrl(host, port) {
+	const literal =
+		host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+	return `http://${literal}:${assertCdpPort(port)}/json/version`;
+}
+
+/**
  * Ask a CDP endpoint to identify itself. Used by preflight so an unreachable
  * attach target is a host-readiness failure instead of a browser call that
  * dies inside a Peer turn.
@@ -177,7 +200,7 @@ export async function probeCdpEndpoint({
 	timeoutMs = 2000,
 } = {}) {
 	try {
-		const response = await fetch(`http://${host}:${assertCdpPort(port)}/json/version`, {
+		const response = await fetch(cdpEndpointUrl(host, port), {
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 		if (!response.ok) {
@@ -198,15 +221,26 @@ export async function probeCdpEndpoint({
 }
 
 /**
- * Non-loopback local addresses on which the same CDP port answers. Chrome
- * started with --remote-debugging-address=0.0.0.0 hands full, unauthenticated
- * browser control to anything on the network; a loopback-only probe cannot see
- * that, so dial the host's own external addresses too.
+ * Non-loopback local addresses on which the same CDP port answers. A browser
+ * started with --remote-debugging-address=0.0.0.0 (or [::]) hands full,
+ * unauthenticated control to anything on the network; a loopback-only probe
+ * cannot see that, so dial the host's own external addresses too.
+ *
+ * Link-local addresses are skipped: IPv6 link-local needs a scope id fetch()
+ * will not carry, and neither family is how a LAN peer would reach this host,
+ * so probing them only adds timeouts.
  */
 export async function probeCdpExposure({ port, timeoutMs = 1000 } = {}) {
 	const addresses = Object.values(networkInterfaces())
 		.flat()
-		.filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
+		.filter(
+			(entry) =>
+				entry &&
+				(entry.family === "IPv4" || entry.family === "IPv6") &&
+				!entry.internal &&
+				!entry.address.startsWith("169.254.") &&
+				!/^fe80:/i.test(entry.address),
+		)
 		.map((entry) => entry.address);
 	const probes = await Promise.all(
 		[...new Set(addresses)].map(async (address) => {
@@ -215,6 +249,33 @@ export async function probeCdpExposure({ port, timeoutMs = 1000 } = {}) {
 		}),
 	);
 	return probes.filter((address) => address !== null);
+}
+
+/**
+ * What an install run should do about an agent-browser entry that already
+ * exists. Pure, so the conflict rule is testable without shelling out to
+ * npm/agent-browser.
+ *
+ *   { action: "keep",     target }            leave the user's entry alone
+ *   { action: "conflict", target, message }   the requested port cannot be honoured
+ *
+ * The merge never rewrites an entry the user owns. That is the right default,
+ * but it would turn --attach-cdp-port into a knob that silently does nothing on
+ * the second run — so a request the existing entry cannot satisfy is an error
+ * you can see, not a no-op you cannot.
+ */
+export function resolveExistingEntryDecision(existing, requestedCdpPort = null) {
+	const target = agentBrowserCdpTarget(existing.server);
+	if (requestedCdpPort !== null && target.port !== requestedCdpPort) {
+		return {
+			action: "conflict",
+			target,
+			message:
+				`--attach-cdp-port ${requestedCdpPort} conflicts with the existing ${AGENT_BROWSER_MCP_SERVER} entry in ${existing.path} (${describeCdpTarget(target)}). ` +
+				"Existing MCP entries are never rewritten: edit or remove that entry, then re-run.",
+		};
+	}
+	return { action: "keep", target };
 }
 
 /** Add agent-browser only when the user has not configured that server yet. */
@@ -507,18 +568,10 @@ export function installAgentBrowser({
 		})
 		.find((entry) => entry !== null);
 	if (existingConfig) {
-		const target = agentBrowserCdpTarget(existingConfig.server);
-		// The merge never rewrites an entry the user owns. That is the right
-		// default, but it would turn --attach-cdp-port into a knob that silently
-		// does nothing on the second run — so say so instead of pretending.
-		if (requestedCdpPort !== null && target.port !== requestedCdpPort) {
-			throw new Error(
-				`--attach-cdp-port ${requestedCdpPort} conflicts with the existing ${AGENT_BROWSER_MCP_SERVER} entry in ${existingConfig.path} (${describeCdpTarget(target)}). ` +
-					"Existing MCP entries are never rewritten: edit or remove that entry, then re-run.",
-			);
-		}
+		const decision = resolveExistingEntryDecision(existingConfig, requestedCdpPort);
+		if (decision.action === "conflict") throw new Error(decision.message);
 		actions.push(
-			`MCP server ${AGENT_BROWSER_MCP_SERVER} already configured (${describeCdpTarget(target)})`,
+			`MCP server ${AGENT_BROWSER_MCP_SERVER} already configured (${describeCdpTarget(decision.target)})`,
 		);
 	} else {
 		mkdirSync(dirname(resolvedConfig), { recursive: true });
