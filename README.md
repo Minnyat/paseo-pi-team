@@ -1,5 +1,8 @@
 # paseo-pi-team
 
+[![ci](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml/badge.svg)](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Role pack chạy trực tiếp trên **Paseo + Pi**: không Python, không database, không
 state machine, không candidate ledger, không integration engine, không CLI riêng.
 Paseo giữ lifecycle/workspace/control-plane truth; Pi extension giữ role
@@ -13,6 +16,10 @@ Tham chiếu thiết kế đầy đủ:
 ```text
 paseo-pi-team/
 ├── README.md
+├── LICENSE                             # MIT
+├── package.json / package-lock.json    # dev dependency pin + npm test/typecheck
+├── tsconfig.ci.json                    # typecheck config dùng trong repo (tsconfig.json là dev-only, gitignored)
+├── .github/workflows/ci.yml            # test 3 OS × node 22.18/24 + tsc
 ├── config/
 │   ├── paseo.providers.example.json   # 3 profile Pi: supervisor / lead / peer
 │   ├── model-routing.example.json     # template route MODEL_CLASS → model (copy per host)
@@ -39,23 +46,32 @@ paseo-pi-team/
 │   └── supervisor-observation.md   # khuôn observation
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installer
+│   ├── lib-common.mjs              # helper dùng chung: exec/shim resolution, entrypoint, version
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host qua HOST_ID (Lead REMOTE cycle)
-│   ├── reliability.mjs              # retry classification/backoff + stale predicates
-│   ├── team-communication.mjs       # parent-scoped Peer → Lead messaging
-│   ├── watchdog.mjs                 # observation-only running-agent watchdog
-│   ├── ocr-review.mjs               # deterministic OCR exact-SHA preflight manifest
-│   ├── team-scripts-path.mjs        # durable support-script path resolver
-│   └── preflight.mjs                # host readiness check (--json, --strict, --host-id)
-├── test/
+│   ├── reliability.mjs             # retry classification/backoff + stale predicates
+│   ├── team-communication.mjs      # parent-scoped Peer → Lead messaging
+│   ├── watchdog.mjs                # observation-only running-agent watchdog
+│   ├── ocr-review.mjs              # deterministic OCR exact-SHA preflight manifest
+│   ├── ocr-setup.mjs               # cài/verify OCR CLI (capability probe, không downgrade)
+│   ├── browser-setup.mjs           # cài agent-browser CLI + Chrome runtime + MCP entry
+│   ├── team-scripts-path.mjs       # durable support-script path resolver
+│   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
+├── test/                           # `npm test` chạy mọi test/*.test.{mjs,mts}
 │   ├── policy.test.mts             # policy + lifecycle regression
 │   ├── model-routing.test.mjs      # resolver regression
 │   ├── remote-paseo.test.mjs       # remote executor regression (+ fixtures/fake-paseo.mjs)
+│   ├── lib-common.test.mjs         # helper dùng chung (quoted path, PATH order, shim fallback)
 │   ├── reliability.test.mjs        # retry/backoff/stale predicates
 │   ├── team-communication.test.mjs # parent-scoped Peer → Lead contract
-│   ├── watchdog.test.mjs            # stale-agent classification
-│   ├── ocr-review.test.mjs          # OCR delegation preflight contract
-│   └── ocr-integrity.test.mjs       # skill/reference/authority integrity
+│   ├── watchdog.test.mjs           # stale-agent classification
+│   ├── ocr-review.test.mjs         # OCR delegation preflight contract
+│   ├── ocr-setup.test.mjs          # capability probe + version compare
+│   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity
+│   ├── browser-setup.test.mjs      # MCP config merge + skill install
+│   ├── installer-contract.test.mjs # file installer ship phải tồn tại và đủ dependency
+│   ├── paseo-contract.test.mjs     # Paseo JSON field contract (cần daemon thật — xem bên dưới)
+│   └── fixtures/                   # fake CLI (paseo, ocr) + OCR output đã ghim theo version
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # thiết kế gốc
     ├── model-routing.md            # 4 lớp model routing, verified commands
@@ -148,6 +164,12 @@ Script copy:
 - `extensions/paseo-team-policy.ts` → `~/.pi/agent/extensions/`
 - `prompts/*.md` → `~/.pi/agent/extensions/prompts/`
 - `skills/paseo-team-lead/` → `~/.pi/agent/skills/paseo-team-lead/`
+- `skills/paseo-ocr-reviewer/` → `~/.pi/agent/skills/paseo-ocr-reviewer/`
+- support script (`lib-common`, `reliability`, `watchdog`, `team-communication`,
+  `ocr-review`, `remote-paseo`, `model-routing`, `team-scripts-path`) →
+  `~/.pi/agent/extensions/paseo-team-scripts/` — copy **phẳng**, nên mọi import
+  giữa chúng phải là `./<tên>.mjs`; `installer-contract.test.mjs` gác điều kiện
+  này (mọi file được ship phải tồn tại và mọi dependency của nó cũng phải được ship)
 - `agent-browser` CLI + Chrome runtime (nếu thiếu), bundled skill → `~/.pi/agent/skills/agent-browser/`
 - MCP entry `agent-browser: { command: "agent-browser", args: ["mcp"] }` → `~/.pi/agent/mcp.json` nếu chưa có ở các config chuẩn
 
@@ -261,7 +283,7 @@ Kiến trúc 4 lớp và cơ chế no-silent-fallback: xem
 | Paseo CLI/daemon | 0.2.5 | `create_agent` schema, split-first-slash, runtimeInfo |
 | Pi | 0.83.0 | `--model` (pattern), `--thinking` (7 levels), models.json |
 | pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool name có prefix `paseo_` |
-| Node | ≥ 22.18 | type stripping sẵn có; test trên 25.9.0 |
+| Node | ≥ 22.18 | type stripping sẵn có; CI chạy 22.18 và 24 trên ubuntu/windows/macos |
 
 ### Preflight
 
@@ -294,7 +316,9 @@ bản mặc định). Có thể bổ sung tool theo profile bằng env
 
 ## Proof-of-concept (một máy, Windows trước)
 
-Repo test: `team-test-repo/` (calculator.py + test_calculator.py, có một lỗi cố ý).
+Kịch bản POC dùng một repo nháp bất kỳ nằm **ngoài** role pack (bản gốc là một
+`calculator.py` + `test_calculator.py` với lỗi cố ý). Role pack không ship repo
+test — tạo một repo rác tương đương ở đâu cũng được.
 
 1. **Lead thấy Paseo tools** — `PASEO_PI_ROLE=lead pi`, yêu cầu list providers/models, báo tên tool đã dùng.
 2. **Peer không spawn agent** — `PASEO_PI_ROLE=peer pi`, yêu cầu "Create another agent to inspect the repository" → không thấy `create_agent` hoặc bị block, trả `DEPENDENCY_REQUEST`.
