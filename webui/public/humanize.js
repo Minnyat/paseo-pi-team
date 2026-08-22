@@ -1,0 +1,227 @@
+/**
+ * humanize.js — turns the CLI's machine vocabulary into sentences a person who
+ * has never opened a terminal can act on.
+ *
+ * Kept free of DOM access on purpose: this is the layer that decides what a
+ * non-technical operator is told, so it must be testable without a browser
+ * (see test/humanize.test.mjs). app.js imports it; nothing here imports app.js.
+ *
+ * The rule this file follows everywhere: never show a code without also saying
+ * what to do about it. "DAEMON_NOT_RUNNING" tells the reader nothing; "Paseo
+ * chưa chạy — mở terminal và gõ `paseo start`" tells them everything.
+ */
+
+export const ROLE_LABEL = Object.freeze({
+	supervisor: "Giám sát",
+	lead: "Trưởng nhóm",
+	peer: "Thành viên",
+});
+
+export const ROLE_HINT = Object.freeze({
+	supervisor: "Theo dõi chất lượng công việc, không tự viết code.",
+	lead: "Nhận việc, chia việc và giao cho thành viên.",
+	peer: "Người trực tiếp làm một việc cụ thể.",
+});
+
+export function roleLabel(role) {
+	return ROLE_LABEL[role] ?? "Chưa rõ vai trò";
+}
+
+const STATUS_LABEL = Object.freeze({
+	running: "Đang làm việc",
+	idle: "Đang rảnh",
+	error: "Gặp lỗi",
+	closed: "Đã đóng",
+	archived: "Đã lưu trữ",
+	stopped: "Đã dừng",
+});
+
+export function statusLabel(status) {
+	return STATUS_LABEL[String(status ?? "").toLowerCase()] ?? String(status ?? "không rõ");
+}
+
+/**
+ * Tools are grouped by what they can do to the machine, not by their name.
+ * "bash" means nothing to a non-technical reader; "chạy lệnh trên máy" does.
+ */
+const TOOL_MEANING = [
+	{ match: /^(write|edit|create|apply_patch|multi_edit)/i, risk: "high", what: "sửa hoặc tạo file trong dự án" },
+	{ match: /^(bash|shell|exec|run|terminal|process)/i, risk: "high", what: "chạy lệnh trên máy này" },
+	{ match: /(delete|remove|rm|archive|cancel|stop)/i, risk: "high", what: "xoá hoặc dừng thứ gì đó" },
+	{ match: /(push|commit|merge|git)/i, risk: "high", what: "thay đổi lịch sử mã nguồn (git)" },
+	{ match: /^(fetch|web|http|curl|browser|navigate)/i, risk: "medium", what: "truy cập mạng ra ngoài" },
+	{ match: /^(mcp|send|create_agent|update_agent)/i, risk: "medium", what: "điều khiển agent khác" },
+	{ match: /^(read|cat|list|ls|glob|grep|search|inspect|get)/i, risk: "low", what: "đọc thông tin, không sửa gì" },
+];
+
+export const RISK_LABEL = Object.freeze({
+	high: "Ảnh hưởng lớn",
+	medium: "Cần cân nhắc",
+	low: "Ít rủi ro",
+	unknown: "Chưa rõ mức ảnh hưởng",
+});
+
+/**
+ * An unrecognized tool is "unknown", never "low": guessing low on something we
+ * cannot classify is exactly how a dangerous approval slips through.
+ */
+export function toolMeaning(tool) {
+	const name = typeof tool === "string" ? tool.trim() : "";
+	if (!name) return { risk: "unknown", what: "một hành động chưa xác định được", tool: null };
+	const hit = TOOL_MEANING.find((entry) => entry.match.test(name));
+	return hit ? { risk: hit.risk, what: hit.what, tool: name } : { risk: "unknown", what: `dùng công cụ “${name}”`, tool: name };
+}
+
+/**
+ * One sentence describing what is being asked, addressed to the person who has
+ * to answer it.
+ */
+export function permitSentence(permit, agentName) {
+	const who = agentName?.trim() ? `“${agentName.trim()}”` : "Một agent";
+	const { what } = toolMeaning(permit?.tool);
+	return `${who} đang xin phép để ${what}.`;
+}
+
+const ERROR_ADVICE = [
+	{
+		match: /daemon|econnrefused|not running|unreachable|connect/i,
+		title: "Chưa kết nối được với Paseo",
+		advice: "Paseo có thể chưa chạy. Mở cửa sổ dòng lệnh và gõ: paseo start",
+	},
+	{
+		match: /timed out|timeout|etimedout/i,
+		title: "Máy phản hồi quá chậm",
+		advice: "Thử lại sau vài giây. Nếu lặp lại, khởi động lại Paseo: paseo restart",
+	},
+	{
+		match: /unauthorized|token/i,
+		title: "Phiên làm việc đã hết hạn",
+		advice: "Mở lại đường dẫn có #token=… mà lệnh 'paseo-team web' vừa in ra trong cửa sổ dòng lệnh.",
+	},
+	{
+		match: /prompt not installed|run 'paseo-team install'|no SKILL\.md/i,
+		title: "Bộ vai trò chưa được cài",
+		advice: "Chạy lệnh cài đặt một lần: npm run paseo-team -- install",
+	},
+	{
+		match: /invalid JSON|not json/i,
+		title: "Nội dung nhập vào chưa đúng định dạng",
+		advice: "Kiểm tra lại phần vừa sửa — thiếu dấu phẩy hoặc dấu ngoặc là lỗi hay gặp nhất.",
+	},
+	{
+		match: /is missing or malformed|must be one of/i,
+		title: "Thông tin gửi lên chưa hợp lệ",
+		advice: "Tải lại trang rồi thử lại. Nếu vẫn vậy, đây là lỗi của ứng dụng chứ không phải của bạn.",
+	},
+];
+
+/**
+ * @param {object} payload the server's error envelope
+ * @returns {{title: string, advice: string, technical: string}}
+ */
+export function humanizeError(payload) {
+	const technical = [payload?.command, payload?.stderr, payload?.message, payload?.code]
+		.filter((part) => typeof part === "string" && part.trim() !== "")
+		.join(" · ")
+		.slice(0, 600);
+	const hit = ERROR_ADVICE.find((entry) => entry.match.test(technical));
+	if (hit) return { title: hit.title, advice: hit.advice, technical };
+	return {
+		title: "Có lỗi xảy ra",
+		advice: "Bấm “Chi tiết kỹ thuật” để xem nguyên văn, hoặc gửi phần đó cho người phụ trách.",
+		technical: technical || "không có thông tin chi tiết",
+	};
+}
+
+/** "12 giây trước", "3 phút trước" — a wall-clock time nobody has to subtract. */
+export function relativeTime(iso, now = Date.now()) {
+	const then = typeof iso === "number" ? iso : Date.parse(iso ?? "");
+	if (!Number.isFinite(then)) return "không rõ";
+	const seconds = Math.max(0, Math.round((now - then) / 1000));
+	if (seconds < 5) return "vừa xong";
+	if (seconds < 60) return `${seconds} giây trước`;
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes} phút trước`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours} giờ trước`;
+	return `${Math.round(hours / 24)} ngày trước`;
+}
+
+/**
+ * The one-line verdict on the top of the home screen. Order matters: a blocked
+ * agent is more urgent than a missing config file, and both outrank "fine".
+ */
+export function overallHealth({ status, graph, permits } = {}) {
+	if (!status) {
+		return { level: "bad", headline: "Chưa đọc được tình trạng hệ thống", detail: "Kiểm tra xem Paseo đã chạy chưa." };
+	}
+	const pending = permits?.count ?? 0;
+	if (pending > 0) {
+		return {
+			level: "attention",
+			headline: pending === 1 ? "Có 1 việc đang chờ bạn duyệt" : `Có ${pending} việc đang chờ bạn duyệt`,
+			detail: "Agent đang dừng lại chờ bạn đồng ý — xử lý sớm để công việc chạy tiếp.",
+		};
+	}
+	if (graph && graph.ok === false) {
+		return { level: "bad", headline: "Không lấy được danh sách agent", detail: "Paseo có thể chưa chạy hoặc đang bận." };
+	}
+	const missing = missingSetup(status);
+	if (missing.length > 0) {
+		return {
+			level: "attention",
+			headline: "Cài đặt chưa hoàn tất",
+			detail: `Còn thiếu: ${missing.join(", ")}. Chạy: npm run paseo-team -- install`,
+		};
+	}
+	const errored = graph?.nodes?.filter((node) => node.status === "error").length ?? 0;
+	if (errored > 0) {
+		return {
+			level: "attention",
+			headline: errored === 1 ? "1 agent đang gặp lỗi" : `${errored} agent đang gặp lỗi`,
+			detail: "Mở tab “Nhóm agent” để xem agent nào và đang mắc ở đâu.",
+		};
+	}
+	const running = graph?.nodes?.filter((node) => node.status === "running").length ?? 0;
+	return {
+		level: "good",
+		headline: running > 0 ? `Mọi thứ ổn — ${running} agent đang làm việc` : "Mọi thứ ổn — không có agent nào đang chạy",
+		detail: "Không có việc gì cần bạn xử lý ngay.",
+	};
+}
+
+/** Which pieces of the role pack are not installed yet, in plain words. */
+export function missingSetup(status) {
+	const missing = [];
+	if (status?.presence?.policyExtension === false) missing.push("bộ quy tắc phân quyền");
+	const prompts = status?.presence?.prompts ?? {};
+	const missingPrompts = Object.entries(prompts)
+		.filter(([, present]) => present === false)
+		.map(([role]) => roleLabel(role));
+	if (missingPrompts.length > 0) missing.push(`mô tả vai trò (${missingPrompts.join(", ")})`);
+	if (status?.presence?.paseoConfig === false) missing.push("cấu hình Paseo");
+	return missing;
+}
+
+/**
+ * Collection faults, said out loud. `degraded[]` exists so the UI never shows a
+ * confident-looking picture built from partial data — that promise is only kept
+ * if the wording is understandable.
+ */
+export function degradedSentence(degraded = [], pendingParents = 0) {
+	const parts = [];
+	const byReason = new Map();
+	for (const fault of degraded) {
+		byReason.set(fault.reason, (byReason.get(fault.reason) ?? 0) + 1);
+	}
+	if (byReason.has("PARENT_NOT_LISTED")) {
+		parts.push(`${byReason.get("PARENT_NOT_LISTED")} agent có người giao việc nằm ngoài danh sách này (thường là đã lưu trữ)`);
+	}
+	const unreachable = [...byReason.entries()]
+		.filter(([reason]) => reason !== "PARENT_NOT_LISTED" && reason !== "PERMIT_SHAPE_UNRECOGNIZED")
+		.reduce((sum, [, count]) => sum + count, 0);
+	if (unreachable > 0) parts.push(`${unreachable} mục không lấy được thông tin`);
+	if (byReason.has("PERMIT_SHAPE_UNRECOGNIZED")) parts.push("có yêu cầu xin phép không đọc được nội dung");
+	if (pendingParents > 0) parts.push(`đang dựng sơ đồ, còn ${pendingParents} agent chưa xếp xong`);
+	return parts.length === 0 ? "" : `Lưu ý: ${parts.join("; ")}.`;
+}

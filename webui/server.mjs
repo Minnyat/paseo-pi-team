@@ -1,0 +1,464 @@
+/**
+ * server.mjs — the WebUI transport. It owns no truth.
+ *
+ * The whole contract of this file: an HTTP request is mapped onto a fixed
+ * `paseo-team` argv template, the CLI is spawned, and its stdout is returned
+ * verbatim. This file must never read a config file, never call `paseo`, and
+ * never merge, patch or synthesize a response. If you find yourself wanting to
+ * "just" compute something here, it belongs in the CLI — that is what makes
+ * the UI reproducible from a terminal.
+ *
+ * Two things it *is* allowed to do, because neither invents data:
+ *   - cache a CLI response verbatim for a few seconds (see CACHEABLE), and
+ *   - collapse concurrent identical requests into one spawn (single-flight).
+ * Both exist because one paseo round trip costs ~3s; without them, three open
+ * browser tabs would triple the load on the daemon for identical answers.
+ *
+ * Security posture — this UI can approve permission requests and rewrite
+ * config, so it is treated as privileged even on localhost:
+ *   - binds 127.0.0.1 only;
+ *   - /api/* requires a per-run bearer token, handed to the SPA through the
+ *     URL fragment (a fragment is never sent to a server and never lands in an
+ *     access log);
+ *   - Origin/Host are checked, which is what stops a DNS-rebinding page in
+ *     another tab from driving this API;
+ *   - no CORS headers are ever emitted.
+ */
+
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join, dirname, normalize, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, "..");
+const PUBLIC_DIR = join(HERE, "public");
+const CLI = join(ROOT, "cli", "paseo-team.mjs");
+
+export const DEFAULT_PORT = 4321;
+export const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+// --- request -> argv -------------------------------------------------------
+
+const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo"];
+const ROLES = ["supervisor", "lead", "peer"];
+const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
+const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;
+const SKILL_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+
+class RouteError extends Error {
+	constructor(status, code, message) {
+		super(message);
+		this.status = status;
+		this.code = code;
+	}
+}
+
+function pick(value, allowed, label) {
+	if (!allowed.includes(value)) {
+		throw new RouteError(400, "PARAM_INVALID", `${label} must be one of: ${allowed.join(", ")}`);
+	}
+	return value;
+}
+
+function match(value, pattern, label) {
+	if (typeof value !== "string" || !pattern.test(value)) {
+		throw new RouteError(400, "PARAM_INVALID", `${label} is missing or malformed`);
+	}
+	return value;
+}
+
+/**
+ * The complete set of things the browser can ask for. A request that does not
+ * match a key here is a 404 — there is no dynamic argv assembly, and no path
+ * from user input to a command name.
+ */
+export const ROUTES = {
+	"GET /api/status": { build: () => ({ args: ["status"] }), cacheMs: 2_000 },
+	// Preflight probes providers and models: ~25-30s on the reference machine,
+	// and slower still when a graph poll is competing for the same daemon. It
+	// gets its own timeout and a long TTL because its answer barely moves.
+	"GET /api/preflight": { build: () => ({ args: ["preflight", "--json"] }), cacheMs: 60_000, timeoutMs: 180_000 },
+	"GET /api/env": { build: () => ({ args: ["env", "list"] }), cacheMs: 10_000 },
+
+	"GET /api/agents": {
+		build: (q) => ({ args: q.all === "1" ? ["agents", "--all"] : ["agents"] }),
+		cacheMs: 4_000,
+	},
+	"GET /api/agent": {
+		build: (q) => ({ args: ["agent", "inspect", match(q.id, AGENT_REF, "id")] }),
+		cacheMs: 4_000,
+	},
+	"POST /api/agent/send": {
+		build: (q, body) => ({
+			args: ["agent", "send", match(body?.agentId, AGENT_REF, "agentId")],
+			stdin: String(body?.prompt ?? ""),
+		}),
+	},
+
+	"GET /api/graph": {
+		build: (q) => ({
+			args: [
+				"graph",
+				...(q.all === "1" ? ["--all"] : []),
+				...(q.maxInspect ? ["--max-inspect", match(q.maxInspect, /^\d{1,3}$/, "maxInspect")] : []),
+			],
+		}),
+		// Slightly under the UI's poll interval so a poll usually gets a fresh
+		// snapshot rather than the same one twice.
+		cacheMs: 4_000,
+	},
+
+	"GET /api/permits": { build: () => ({ args: ["permits", "list"] }), cacheMs: 3_000 },
+	"POST /api/permits/decide": {
+		build: (q, body) => ({
+			args: [
+				"permits",
+				pick(body?.action, ["allow", "deny"], "action"),
+				match(body?.agentId, AGENT_REF, "agentId"),
+				match(body?.requestId, TOKEN_LIKE, "requestId"),
+			],
+		}),
+	},
+
+	"GET /api/config": {
+		build: (q) => ({ args: ["config", "read", pick(q.section, CONFIG_SECTIONS, "section")] }),
+	},
+	"POST /api/config": {
+		build: (q, body, raw) => ({
+			args: ["config", "write", pick(q.section, CONFIG_SECTIONS, "section")],
+			stdin: raw,
+		}),
+	},
+	"GET /api/prompts": {
+		build: (q) => ({ args: ["prompts", "read", pick(q.role, ROLES, "role")] }),
+	},
+	"POST /api/prompts": {
+		build: (q, body) => ({
+			args: ["prompts", "write", pick(q.role, ROLES, "role")],
+			stdin: String(body?.content ?? ""),
+		}),
+	},
+	"GET /api/skills": { build: () => ({ args: ["skills", "list"] }), cacheMs: 5_000 },
+	"GET /api/skill": {
+		build: (q) => ({ args: ["skills", "read", match(q.name, SKILL_NAME, "name")] }),
+	},
+	"POST /api/skill": {
+		build: (q, body) => ({
+			args: ["skills", "write", match(body?.name, SKILL_NAME, "name")],
+			stdin: String(body?.content ?? ""),
+		}),
+	},
+
+	"GET /api/chat": { build: () => ({ args: ["chat", "list"] }), cacheMs: 5_000 },
+	"GET /api/chat/read": {
+		build: (q) => ({
+			args: ["chat", "read", match(q.room, TOKEN_LIKE, "room"), ...(q.limit ? ["--limit", match(q.limit, /^\d{1,4}$/, "limit")] : [])],
+		}),
+		cacheMs: 2_000,
+	},
+	"POST /api/chat/post": {
+		build: (q, body) => ({
+			args: ["chat", "post", match(body?.room, TOKEN_LIKE, "room")],
+			stdin: String(body?.message ?? ""),
+		}),
+	},
+
+	"GET /api/watchdog": { build: () => ({ args: ["watchdog"] }), cacheMs: 10_000 },
+};
+
+// --- CLI invocation --------------------------------------------------------
+
+/**
+ * Spawn the CLI. `shell: false` is the whole point: argv elements travel as
+ * argv, so no quoting rule anywhere can turn a config value into a command.
+ */
+export function runCli(args, stdin = null, options = {}) {
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [CLI, ...args], {
+			cwd: ROOT,
+			env: process.env,
+			shell: false,
+			windowsHide: true,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let out = "";
+		let err = "";
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (!settled) {
+				child.kill();
+				settled = true;
+				resolve({ exitCode: null, stdout: "", stderr: "paseo-team timed out", timedOut: true });
+			}
+		}, options.timeoutMs ?? 60_000);
+		child.stdout.on("data", (chunk) => { out += chunk; });
+		child.stderr.on("data", (chunk) => { err += chunk; });
+		child.on("error", (error) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ exitCode: null, stdout: "", stderr: String(error?.message ?? error) });
+		});
+		child.on("close", (code) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ exitCode: code, stdout: out, stderr: err });
+		});
+		if (stdin !== null) child.stdin.end(stdin, "utf8");
+		else child.stdin.end();
+	});
+}
+
+// --- cache + single flight -------------------------------------------------
+
+export function createCache() {
+	const entries = new Map();
+	const inflight = new Map();
+	return {
+		async run(key, ttlMs, producer) {
+			const now = Date.now();
+			const hit = entries.get(key);
+			if (hit && ttlMs > 0 && now - hit.at < ttlMs) return { ...hit.value, cached: true, ageMs: now - hit.at };
+			const pending = inflight.get(key);
+			if (pending) return { ...(await pending), coalesced: true };
+			const promise = producer().finally(() => inflight.delete(key));
+			inflight.set(key, promise);
+			const value = await promise;
+			// Only successful answers are cached: caching a failure would keep
+			// showing a stale error after the daemon came back.
+			if (value.exitCode === 0) entries.set(key, { at: Date.now(), value });
+			return value;
+		},
+		clear() { entries.clear(); },
+		size() { return entries.size; },
+	};
+}
+
+// --- HTTP plumbing ---------------------------------------------------------
+
+function safeEqual(a, b) {
+	const left = Buffer.from(String(a));
+	const right = Buffer.from(String(b));
+	if (left.length !== right.length) return false;
+	return timingSafeEqual(left, right);
+}
+
+export function bearerToken(req) {
+	const header = req.headers?.authorization ?? "";
+	const match = /^Bearer\s+(.+)$/i.exec(String(header).trim());
+	return match ? match[1] : null;
+}
+
+/**
+ * A browser will not let a cross-origin page set an Authorization header, so
+ * the token already blocks CSRF. The Host check closes the other door: a
+ * rebound DNS name resolving to 127.0.0.1 arrives with a Host that is not
+ * localhost, and is refused before any argv is built.
+ */
+export function isAllowedHost(req, port) {
+	const host = String(req.headers?.host ?? "");
+	const allowed = new Set([
+		`127.0.0.1:${port}`,
+		`localhost:${port}`,
+		`[::1]:${port}`,
+	]);
+	if (!allowed.has(host)) return false;
+	const origin = req.headers?.origin;
+	if (origin === undefined) return true;
+	return [`http://127.0.0.1:${port}`, `http://localhost:${port}`, `http://[::1]:${port}`].includes(String(origin));
+}
+
+function readBody(req) {
+	return new Promise((resolve, reject) => {
+		let size = 0;
+		const chunks = [];
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > MAX_BODY_BYTES) {
+				reject(new RouteError(413, "BODY_TOO_LARGE", `request body exceeds ${MAX_BODY_BYTES} bytes`));
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+		req.on("error", reject);
+	});
+}
+
+const MIME = {
+	".html": "text/html; charset=utf-8",
+	".js": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".svg": "image/svg+xml",
+	".json": "application/json; charset=utf-8",
+};
+
+async function serveStatic(pathname, res) {
+	const requested = pathname === "/" ? "/index.html" : pathname;
+	// normalize() then a prefix check: the classic ../ escape has to fail
+	// before readFile ever sees the path.
+	const resolved = join(PUBLIC_DIR, normalize(requested).replace(/^([/\\])+/, ""));
+	if (!resolved.startsWith(PUBLIC_DIR + sep)) {
+		res.writeHead(403, { "content-type": "text/plain" });
+		res.end("forbidden");
+		return;
+	}
+	try {
+		const body = await readFile(resolved);
+		const ext = resolved.slice(resolved.lastIndexOf("."));
+		res.writeHead(200, {
+			"content-type": MIME[ext] ?? "application/octet-stream",
+			"cache-control": "no-store",
+			// The SPA is entirely self-contained; nothing it renders should be
+			// able to pull in a remote script.
+			"content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+			"x-content-type-options": "nosniff",
+		});
+		res.end(body);
+	} catch {
+		res.writeHead(404, { "content-type": "text/plain" });
+		res.end("not found");
+	}
+}
+
+function sendJson(res, status, payload) {
+	const body = JSON.stringify(payload);
+	res.writeHead(status, {
+		"content-type": "application/json; charset=utf-8",
+		"cache-control": "no-store",
+		"x-content-type-options": "nosniff",
+	});
+	res.end(body);
+}
+
+/**
+ * Handle one /api request. Exported and dependency-injected so the contract
+ * (auth, route allowlist, argv shape) is testable without a socket.
+ */
+export async function handleApi({ method, pathname, query, rawBody, exec }) {
+	const key = `${method} ${pathname}`;
+	const route = ROUTES[key];
+	if (!route) throw new RouteError(404, "NO_ROUTE", `no route for ${key}`);
+	let body = null;
+	if (method === "POST" && rawBody) {
+		try {
+			body = JSON.parse(rawBody);
+		} catch {
+			// config write posts a raw JSON document; every other POST posts an
+			// envelope. An unparseable envelope is only an error for the latter.
+			body = null;
+		}
+	}
+	const { args, stdin = null } = route.build(query, body, rawBody ?? "");
+	return { route, args, stdin, result: await exec(args, stdin, route) };
+}
+
+export async function startServer(options = {}) {
+	const port = Number.isInteger(options.port) ? options.port : DEFAULT_PORT;
+	const requireToken = options.requireToken !== false;
+	const token = requireToken ? (options.token ?? randomBytes(24).toString("base64url")) : null;
+	const cache = options.cache ?? createCache();
+	const exec = options.runCli ?? runCli;
+	// Resolved after listen(): port 0 asks the OS to choose, and the Host
+	// check must compare against the port actually bound, not the request.
+	let boundPort = port;
+
+	const server = createServer(async (req, res) => {
+		const url = new URL(req.url ?? "/", `http://127.0.0.1:${boundPort}`);
+		const query = Object.fromEntries(url.searchParams.entries());
+		try {
+			if (!isAllowedHost(req, boundPort)) {
+				sendJson(res, 403, { ok: false, code: "HOST_NOT_ALLOWED", message: "this server only answers to localhost" });
+				return;
+			}
+			if (!url.pathname.startsWith("/api/")) {
+				await serveStatic(url.pathname, res);
+				return;
+			}
+			if (requireToken && !safeEqual(bearerToken(req) ?? "", token)) {
+				sendJson(res, 401, { ok: false, code: "UNAUTHORIZED", message: "missing or invalid bearer token" });
+				return;
+			}
+			const rawBody = req.method === "POST" ? await readBody(req) : "";
+			const { args, result } = await handleApi({
+				method: req.method ?? "GET",
+				pathname: url.pathname,
+				query,
+				rawBody,
+				exec: (argv, stdin, route) => {
+					const ttl = req.method === "GET" ? (route.cacheMs ?? 0) : 0;
+					const key = `${argv.join(" ")}`;
+					const options = route.timeoutMs ? { timeoutMs: route.timeoutMs } : {};
+					return ttl > 0
+						? cache.run(key, ttl, () => exec(argv, stdin, options))
+						: exec(argv, stdin, options);
+				},
+			});
+			if (req.method === "POST") cache.clear(); // a write invalidates every read
+			if (result.exitCode !== 0) {
+				sendJson(res, 502, {
+					ok: false,
+					code: "CLI_FAILED",
+					command: ["paseo-team", ...args].join(" "),
+					exitCode: result.exitCode,
+					stderr: result.stderr?.slice(0, 4000) ?? "",
+					stdout: result.stdout?.slice(0, 4000) ?? "",
+				});
+				return;
+			}
+			let parsed;
+			try {
+				parsed = JSON.parse(result.stdout);
+			} catch {
+				sendJson(res, 502, {
+					ok: false,
+					code: "CLI_OUTPUT_NOT_JSON",
+					command: ["paseo-team", ...args].join(" "),
+					stdout: result.stdout.slice(0, 4000),
+				});
+				return;
+			}
+			// `command` travels with every answer so the UI can show exactly
+			// which CLI call produced what is on screen.
+			sendJson(res, 200, {
+				ok: true,
+				command: ["paseo-team", ...args].join(" "),
+				cached: Boolean(result.cached),
+				ageMs: result.ageMs ?? 0,
+				data: parsed,
+			});
+		} catch (error) {
+			const status = error instanceof RouteError ? error.status : 500;
+			sendJson(res, status, {
+				ok: false,
+				code: error?.code ?? "SERVER_ERROR",
+				message: String(error?.message ?? error),
+			});
+		}
+	});
+
+	await new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(port, "127.0.0.1", resolve);
+	});
+	boundPort = server.address()?.port ?? port;
+
+	const base = `http://127.0.0.1:${boundPort}/`;
+	const url = token ? `${base}#token=${token}` : base;
+	if (!options.quiet) {
+		process.stdout.write(`paseo-team web: ${url}\n`);
+		if (!token) {
+			process.stdout.write("paseo-team web: WARNING — running with --no-token; anything on this machine can approve permissions through this port\n");
+		}
+	}
+	if (options.open) {
+		const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
+		spawn(opener[0], opener[1], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+	}
+	return { server, port: boundPort, token, url, close: () => new Promise((resolve) => server.close(resolve)) };
+}
