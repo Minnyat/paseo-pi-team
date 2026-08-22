@@ -14,7 +14,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { splitCommandLine } from "../../scripts/lib-common.mjs";
+import { resolveWindowsCliExec, splitCommandLine } from "../../scripts/lib-common.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -89,8 +89,27 @@ export function gitExec() {
 }
 
 export function npmExec() {
-	return resolveExec("PASEO_TEAM_NPM_EXEC", "npm");
+	const override = process.env.PASEO_TEAM_NPM_EXEC?.trim();
+	if (override) {
+		const { parts, unterminated } = splitCommandLine(override);
+		if (unterminated || parts.length === 0) throw new Error("PASEO_TEAM_NPM_EXEC is set but malformed");
+		return parts;
+	}
+	if (process.platform === "win32") {
+		// spawnSync refuses .cmd/.bat shims without a shell, so "npm" alone is
+		// ENOENT on Windows. Resolve the real npm-cli.js behind the shim and
+		// drive it with this process's node — same pattern as resolvePaseoExec.
+		const resolved = resolveWindowsCliExec({
+			exe: "npm.exe",
+			shims: ["npm.cmd", "npm.bat"],
+			conventionalCandidates: [NPM_CLI_ENTRY],
+		});
+		if (resolved) return resolved;
+	}
+	return ["npm"];
 }
+
+export const NPM_CLI_ENTRY = ["node_modules", "npm", "bin", "npm-cli.js"];
 
 function resolveExec(envVar, fallbackBin) {
 	const override = process.env[envVar]?.trim();
