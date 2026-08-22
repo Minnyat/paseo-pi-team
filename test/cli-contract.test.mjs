@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,7 @@ try {
 	{
 		const help = run(["--help"]);
 		assert.equal(help.status, 0);
-			for (const command of ["agents", "permits list", "graph", "web", "chat read", "update", "uninstall"]) {
+		for (const command of ["agents", "permits list", "graph", "web", "chat read", "update", "uninstall"]) {
 			assert.ok(help.stdout.includes(command), `help documents '${command}'`);
 		}
 
@@ -254,6 +254,10 @@ try {
 		const mcpAfter = JSON.parse(readFileSync(mcpPath, "utf8"));
 		assert.equal(mcpAfter.mcpServers["agent-browser"], undefined, "own MCP entry removed");
 		assert.ok(mcpAfter.mcpServers["other-tool"], "other tools' MCP entries must survive");
+		assert.ok(
+			readdirSync(agentRoot).some((f) => /^mcp\.json\.bak-\d+$/.test(f)),
+			"the mcp.json rewrite must leave a .bak-* sibling (recoverability claim)",
+		);
 		assert.ok(!existsSync(join(agentRoot, "extensions", "paseo-team-policy.ts")));
 		assert.ok(!existsSync(join(agentRoot, "skills", "paseo-team-lead")));
 		assert.ok(
@@ -274,6 +278,15 @@ try {
 		assert.equal(purged.status, 0);
 		assert.equal(purged.json.teamData.status, "removed");
 		assert.ok(!existsSync(teamDir));
+
+		// a present-but-corrupt mcp.json is reported and left byte-identical,
+		// never conflated with "no config" and never rewritten
+		writeFileSync(mcpPath, "{not json");
+		const corrupt = run(["uninstall"]);
+		assert.equal(corrupt.status, 0);
+		assert.equal(corrupt.json.mcp.status, "mcp-config-unreadable");
+		assert.ok(corrupt.json.mcp.error, "unreadable report carries the parse error");
+		assert.equal(readFileSync(mcpPath, "utf8"), "{not json", "corrupt file must stay untouched");
 
 		const badUninstallFlag = run(["uninstall", "--force"]);
 		assert.notEqual(badUninstallFlag.status, 0);

@@ -26,15 +26,42 @@ export function teamScriptsDir() {
 
 function removePath(kind, absPath) {
 	if (!existsSync(absPath)) return { kind, path: absPath, status: "missing" };
-	rmSync(absPath, { recursive: true, force: true });
+	try {
+		rmSync(absPath, { recursive: true, force: true });
+	} catch (error) {
+		// A locked file (editor/antivirus on Windows) fails that one target,
+		// not the whole command — same degrade-don't-crash contract as graph.
+		return { kind, path: absPath, status: "failed", error: String(error?.message ?? error) };
+	}
 	return { kind, path: absPath, status: "removed" };
 }
 
 /** Removes only the pack's own server entry; other tools' entries stay. */
 export function removeMcpEntry(mcpPath = cw.mcpConfigPath()) {
-	const cfg = cw.readJsonOrNull(mcpPath);
-	if (cfg === null) return { path: mcpPath, entry: MCP_ENTRY, status: "mcp-config-missing" };
-	if (!cfg.mcpServers || typeof cfg.mcpServers !== "object" || !(MCP_ENTRY in cfg.mcpServers)) {
+	// A present-but-corrupt file is NOT "no config": the entry may still be in
+	// there, and rewriting the file could destroy whatever else is. Report it
+	// and leave the bytes alone.
+	if (!existsSync(mcpPath)) return { path: mcpPath, entry: MCP_ENTRY, status: "mcp-config-missing" };
+	let cfg;
+	try {
+		cfg = JSON.parse(cw.readText(mcpPath));
+	} catch (error) {
+		return {
+			path: mcpPath,
+			entry: MCP_ENTRY,
+			status: "mcp-config-unreadable",
+			error: String(error?.message ?? error),
+		};
+	}
+	if (
+		cfg === null ||
+		typeof cfg !== "object" ||
+		Array.isArray(cfg) ||
+		!cfg.mcpServers ||
+		typeof cfg.mcpServers !== "object" ||
+		Array.isArray(cfg.mcpServers) ||
+		!(MCP_ENTRY in cfg.mcpServers)
+	) {
 		return { path: mcpPath, entry: MCP_ENTRY, status: "entry-missing" };
 	}
 	delete cfg.mcpServers[MCP_ENTRY];
@@ -75,6 +102,7 @@ export function uninstall({ purge = false } = {}) {
 		summary: {
 			removed: all.filter((t) => t.status === "removed").length,
 			missing: all.filter((t) => ["missing", "entry-missing", "mcp-config-missing"].includes(t.status)).length,
+			failed: all.filter((t) => t.status === "failed").length,
 			kept: all.filter((t) => t.status === "kept").length,
 		},
 	};
