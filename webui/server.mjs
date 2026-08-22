@@ -27,8 +27,8 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { join, dirname, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -74,28 +74,34 @@ function match(value, pattern, label) {
  * The complete set of things the browser can ask for. A request that does not
  * match a key here is a 404 — there is no dynamic argv assembly, and no path
  * from user input to a command name.
+ *
+ * Cached GETs carry a `tag`; each POST lists the tags its write can reach
+ * (`invalidates`), and a successful POST drops only those cache entries.
  */
 export const ROUTES = {
-	"GET /api/status": { build: () => ({ args: ["status"] }), cacheMs: 2_000 },
+	"GET /api/status": { build: () => ({ args: ["status"] }), cacheMs: 2_000, tag: "status" },
 	// Preflight probes providers and models: ~25-30s on the reference machine,
 	// and slower still when a graph poll is competing for the same daemon. It
 	// gets its own timeout and a long TTL because its answer barely moves.
-	"GET /api/preflight": { build: () => ({ args: ["preflight", "--json"] }), cacheMs: 60_000, timeoutMs: 180_000 },
-	"GET /api/env": { build: () => ({ args: ["env", "list"] }), cacheMs: 10_000 },
+	"GET /api/preflight": { build: () => ({ args: ["preflight", "--json"] }), cacheMs: 60_000, timeoutMs: 180_000, tag: "preflight" },
+	"GET /api/env": { build: () => ({ args: ["env", "list"] }), cacheMs: 10_000, tag: "env" },
 
 	"GET /api/agents": {
 		build: (q) => ({ args: q.all === "1" ? ["agents", "--all"] : ["agents"] }),
 		cacheMs: 4_000,
+		tag: "agents",
 	},
 	"GET /api/agent": {
 		build: (q) => ({ args: ["agent", "inspect", match(q.id, AGENT_REF, "id")] }),
 		cacheMs: 4_000,
+		tag: "agents",
 	},
 	"POST /api/agent/send": {
 		build: (q, body) => ({
 			args: ["agent", "send", match(body?.agentId, AGENT_REF, "agentId")],
 			stdin: String(body?.prompt ?? ""),
 		}),
+		invalidates: ["agents", "graph", "status", "watchdog"],
 	},
 
 	"GET /api/graph": {
@@ -109,9 +115,10 @@ export const ROUTES = {
 		// Slightly under the UI's poll interval so a poll usually gets a fresh
 		// snapshot rather than the same one twice.
 		cacheMs: 4_000,
+		tag: "graph",
 	},
 
-	"GET /api/permits": { build: () => ({ args: ["permits", "list"] }), cacheMs: 3_000 },
+	"GET /api/permits": { build: () => ({ args: ["permits", "list"] }), cacheMs: 3_000, tag: "permits" },
 	"POST /api/permits/decide": {
 		build: (q, body) => ({
 			args: [
@@ -121,6 +128,7 @@ export const ROUTES = {
 				match(body?.requestId, TOKEN_LIKE, "requestId"),
 			],
 		}),
+		invalidates: ["permits", "graph", "agents", "status"],
 	},
 
 	"GET /api/config": {
@@ -131,6 +139,7 @@ export const ROUTES = {
 			args: ["config", "write", pick(q.section, CONFIG_SECTIONS, "section")],
 			stdin: raw,
 		}),
+		invalidates: ["config", "env", "status", "preflight"],
 	},
 	"GET /api/prompts": {
 		build: (q) => ({ args: ["prompts", "read", pick(q.role, ROLES, "role")] }),
@@ -140,8 +149,9 @@ export const ROUTES = {
 			args: ["prompts", "write", pick(q.role, ROLES, "role")],
 			stdin: String(body?.content ?? ""),
 		}),
+		invalidates: ["prompts", "agents"],
 	},
-	"GET /api/skills": { build: () => ({ args: ["skills", "list"] }), cacheMs: 5_000 },
+	"GET /api/skills": { build: () => ({ args: ["skills", "list"] }), cacheMs: 5_000, tag: "skills" },
 	"GET /api/skill": {
 		build: (q) => ({ args: ["skills", "read", match(q.name, SKILL_NAME, "name")] }),
 	},
@@ -150,23 +160,26 @@ export const ROUTES = {
 			args: ["skills", "write", match(body?.name, SKILL_NAME, "name")],
 			stdin: String(body?.content ?? ""),
 		}),
+		invalidates: ["skills"],
 	},
 
-	"GET /api/chat": { build: () => ({ args: ["chat", "list"] }), cacheMs: 5_000 },
+	"GET /api/chat": { build: () => ({ args: ["chat", "list"] }), cacheMs: 5_000, tag: "chat" },
 	"GET /api/chat/read": {
 		build: (q) => ({
 			args: ["chat", "read", match(q.room, TOKEN_LIKE, "room"), ...(q.limit ? ["--limit", match(q.limit, /^\d{1,4}$/, "limit")] : [])],
 		}),
 		cacheMs: 2_000,
+		tag: "chat",
 	},
 	"POST /api/chat/post": {
 		build: (q, body) => ({
 			args: ["chat", "post", match(body?.room, TOKEN_LIKE, "room")],
 			stdin: String(body?.message ?? ""),
 		}),
+		invalidates: ["chat"],
 	},
 
-	"GET /api/watchdog": { build: () => ({ args: ["watchdog"] }), cacheMs: 10_000 },
+	"GET /api/watchdog": { build: () => ({ args: ["watchdog"] }), cacheMs: 10_000, tag: "watchdog" },
 };
 
 // --- CLI invocation --------------------------------------------------------
@@ -184,8 +197,8 @@ export function runCli(args, stdin = null, options = {}) {
 			windowsHide: true,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
-		let out = "";
-		let err = "";
+		const outChunks = [];
+		const errChunks = [];
 		let settled = false;
 		const timer = setTimeout(() => {
 			if (!settled) {
@@ -194,8 +207,8 @@ export function runCli(args, stdin = null, options = {}) {
 				resolve({ exitCode: null, stdout: "", stderr: "paseo-team timed out", timedOut: true });
 			}
 		}, options.timeoutMs ?? 60_000);
-		child.stdout.on("data", (chunk) => { out += chunk; });
-		child.stderr.on("data", (chunk) => { err += chunk; });
+		child.stdout.on("data", (chunk) => { outChunks.push(chunk); });
+		child.stderr.on("data", (chunk) => { errChunks.push(chunk); });
 		child.on("error", (error) => {
 			if (settled) return;
 			settled = true;
@@ -206,7 +219,11 @@ export function runCli(args, stdin = null, options = {}) {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			resolve({ exitCode: code, stdout: out, stderr: err });
+			resolve({
+				exitCode: code,
+				stdout: Buffer.concat(outChunks).toString("utf8"),
+				stderr: Buffer.concat(errChunks).toString("utf8"),
+			});
 		});
 		if (stdin !== null) child.stdin.end(stdin, "utf8");
 		else child.stdin.end();
@@ -219,10 +236,11 @@ export function createCache() {
 	const entries = new Map();
 	const inflight = new Map();
 	return {
-		async run(key, ttlMs, producer) {
+		async run(key, ttlMs, producer, tag = null) {
 			const now = Date.now();
 			const hit = entries.get(key);
 			if (hit && ttlMs > 0 && now - hit.at < ttlMs) return { ...hit.value, cached: true, ageMs: now - hit.at };
+			if (hit) entries.delete(key); // an expired entry leaves instead of lingering
 			const pending = inflight.get(key);
 			if (pending) return { ...(await pending), coalesced: true };
 			const promise = producer().finally(() => inflight.delete(key));
@@ -230,8 +248,15 @@ export function createCache() {
 			const value = await promise;
 			// Only successful answers are cached: caching a failure would keep
 			// showing a stale error after the daemon came back.
-			if (value.exitCode === 0) entries.set(key, { at: Date.now(), value });
+			if (value.exitCode === 0) entries.set(key, { at: Date.now(), value, tag });
 			return value;
+		},
+		// A POST drops only the reads its write can reach (ROUTES `invalidates`),
+		// so posting a chat message no longer throws away a 60s preflight answer.
+		invalidate(tags) {
+			for (const [key, entry] of entries) {
+				if (entry.tag !== null && tags.includes(entry.tag)) entries.delete(key);
+			}
 		},
 		clear() { entries.clear(); },
 		size() { return entries.size; },
@@ -298,7 +323,12 @@ const MIME = {
 	".json": "application/json; charset=utf-8",
 };
 
-async function serveStatic(pathname, res) {
+// Static files change only when pteam is updated or a developer edits them,
+// so bodies live in memory and are re-read only when mtime moves. A strong
+// content-hash ETag turns every reload into a 304 instead of a re-download.
+const staticCache = new Map();
+
+async function serveStatic(pathname, res, headers = {}) {
 	const requested = pathname === "/" ? "/index.html" : pathname;
 	// normalize() then a prefix check: the classic ../ escape has to fail
 	// before readFile ever sees the path.
@@ -309,17 +339,30 @@ async function serveStatic(pathname, res) {
 		return;
 	}
 	try {
-		const body = await readFile(resolved);
+		const mtimeMs = (await stat(resolved)).mtimeMs;
+		let entry = staticCache.get(resolved);
+		if (!entry || entry.mtimeMs !== mtimeMs) {
+			const body = await readFile(resolved);
+			const etag = `"${createHash("sha256").update(body).digest("hex").slice(0, 16)}"`;
+			entry = { mtimeMs, body, etag };
+			staticCache.set(resolved, entry);
+		}
+		if (headers["if-none-match"] === entry.etag) {
+			res.writeHead(304, { "cache-control": "no-cache", etag: entry.etag });
+			res.end();
+			return;
+		}
 		const ext = resolved.slice(resolved.lastIndexOf("."));
 		res.writeHead(200, {
 			"content-type": MIME[ext] ?? "application/octet-stream",
-			"cache-control": "no-store",
+			"cache-control": "no-cache",
+			etag: entry.etag,
 			// The SPA is entirely self-contained; nothing it renders should be
 			// able to pull in a remote script.
 			"content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
 			"x-content-type-options": "nosniff",
 		});
-		res.end(body);
+		res.end(entry.body);
 	} catch {
 		res.writeHead(404, { "content-type": "text/plain" });
 		res.end("not found");
@@ -377,7 +420,7 @@ export async function startServer(options = {}) {
 				return;
 			}
 			if (!url.pathname.startsWith("/api/")) {
-				await serveStatic(url.pathname, res);
+				await serveStatic(url.pathname, res, req.headers);
 				return;
 			}
 			if (requireToken && !safeEqual(bearerToken(req) ?? "", token)) {
@@ -385,7 +428,7 @@ export async function startServer(options = {}) {
 				return;
 			}
 			const rawBody = req.method === "POST" ? await readBody(req) : "";
-			const { args, result } = await handleApi({
+			const { args, route, result } = await handleApi({
 				method: req.method ?? "GET",
 				pathname: url.pathname,
 				query,
@@ -395,11 +438,11 @@ export async function startServer(options = {}) {
 					const key = `${argv.join(" ")}`;
 					const options = route.timeoutMs ? { timeoutMs: route.timeoutMs } : {};
 					return ttl > 0
-						? cache.run(key, ttl, () => exec(argv, stdin, options))
+						? cache.run(key, ttl, () => exec(argv, stdin, options), route.tag ?? null)
 						: exec(argv, stdin, options);
 				},
 			});
-			if (req.method === "POST") cache.clear(); // a write invalidates every read
+			if (req.method === "POST") cache.invalidate(route?.invalidates ?? []); // a write drops only the reads it can affect
 			if (result.exitCode !== 0) {
 				sendJson(res, 502, {
 					ok: false,

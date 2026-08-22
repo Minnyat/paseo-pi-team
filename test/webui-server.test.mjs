@@ -122,6 +122,15 @@ assert.equal(bearerToken({ headers: {} }), null);
 	await cache.run("bad", 10_000, failing);
 	await cache.run("bad", 10_000, failing);
 	assert.equal(failures, 2, "failed answers are never cached");
+
+	// Scoped invalidation: a POST drops only the reads its write can reach,
+	// so a chat message must not throw away a 60s preflight answer.
+	const fresh = () => Promise.resolve({ exitCode: 0, stdout: "{}" });
+	await cache.run("chat list", 60_000, fresh, "chat");
+	await cache.run("preflight --json", 60_000, fresh, "preflight");
+	cache.invalidate(["chat"]);
+	assert.ok(!(await cache.run("chat list", 60_000, fresh, "chat")).cached, "the invalidated tag re-runs");
+	assert.equal((await cache.run("preflight --json", 60_000, fresh, "preflight")).cached, true, "an untouched tag survives");
 }
 
 // --- end to end over a real socket ----------------------------------------
@@ -164,6 +173,62 @@ assert.equal(bearerToken({ headers: {} }), null);
 		assert.match(await page.text(), /paseo-team/);
 		const escape = await fetch(`${base}/..%2Fserver.mjs`);
 		assert.ok(escape.status === 403 || escape.status === 404, `traversal blocked (got ${escape.status})`);
+	} finally {
+		await handle.close();
+	}
+}
+
+// --- a POST invalidates only the reads its write can reach -----------------
+{
+	const calls = [];
+	const handle = await startServer({
+		port: 0,
+		quiet: true,
+		token: "t",
+		runCli: (args) => {
+			calls.push(args.join(" "));
+			return Promise.resolve({ exitCode: 0, stdout: JSON.stringify({ args }), stderr: "" });
+		},
+	});
+	const auth = { authorization: "Bearer t" };
+	const base = `http://127.0.0.1:${handle.port}`;
+	try {
+		const chatFirst = await (await fetch(`${base}/api/chat`, { headers: auth })).json();
+		const preflightFirst = await (await fetch(`${base}/api/preflight`, { headers: auth })).json();
+		assert.equal(chatFirst.cached, false);
+		assert.equal(preflightFirst.cached, false);
+
+		const posted = await fetch(`${base}/api/chat/post`, {
+			method: "POST",
+			headers: { ...auth, "content-type": "application/json" },
+			body: JSON.stringify({ room: "team", message: "hello" }),
+		});
+		assert.equal(posted.status, 200);
+
+		const chatAgain = await (await fetch(`${base}/api/chat`, { headers: auth })).json();
+		assert.equal(chatAgain.cached, false, "chat answers were invalidated by the post");
+
+		const preflightAgain = await (await fetch(`${base}/api/preflight`, { headers: auth })).json();
+		assert.equal(preflightAgain.cached, true, "a chat post must not throw away the 60s preflight answer");
+		assert.equal(calls.filter((call) => call.startsWith("preflight")).length, 1, "preflight ran exactly once");
+	} finally {
+		await handle.close();
+	}
+}
+
+// --- static assets: ETag revalidation instead of a re-download -------------
+{
+	const handle = await startServer({ port: 0, quiet: true, token: "t" });
+	try {
+		const base = `http://127.0.0.1:${handle.port}`;
+		const first = await fetch(`${base}/app.js`);
+		assert.equal(first.status, 200);
+		assert.equal(first.headers.get("cache-control"), "no-cache", "revalidate every time, never serve blind");
+		const etag = first.headers.get("etag");
+		assert.ok(etag, "a strong content-hash etag accompanies every static asset");
+		const revalidate = await fetch(`${base}/app.js`, { headers: { "if-none-match": etag } });
+		assert.equal(revalidate.status, 304, "an unchanged asset costs a 304, not a re-download");
+		assert.equal(await revalidate.text(), "");
 	} finally {
 		await handle.close();
 	}

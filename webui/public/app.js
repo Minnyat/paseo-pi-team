@@ -399,7 +399,14 @@ function permitCard(permit) {
 	return card;
 }
 
+let permitsRenderedSig = "";
+
 function renderPermits() {
+	// The 20s poll calls this even when nothing changed; a rebuild would
+	// collapse an open disclosure mid-read, so an identical payload is a no-op.
+	const sig = `${advanced}|${lastPermits ? JSON.stringify(lastPermits) : "loading"}`;
+	if (sig === permitsRenderedSig) return;
+	permitsRenderedSig = sig;
 	const body = clear($("permits-body"));
 	if (!lastPermits) {
 		body.appendChild(el("p", { class: "hint", text: "Đang tải…" }));
@@ -606,9 +613,20 @@ function renderList(graph) {
 	wrap.appendChild(table);
 }
 
+let teamRenderedSig = "";
+
 function renderTeam(graph) {
-	if (viewMode === "diagram") renderDiagram(graph);
-	else renderList(graph);
+	// Same payload, same picture: skip the diagram/list rebuild so the 5s poll
+	// does not wipe hover state while idle. collectedAt / pendingParents /
+	// inspectSpent move on every snapshot but only feed the meta line, the
+	// degraded notice and diagnostics, which repaint below regardless.
+	const { collectedAt, pendingParents, inspectSpent, ...stable } = graph;
+	const sig = `${viewMode}|${advanced}|${JSON.stringify(stable)}`;
+	if (sig !== teamRenderedSig) {
+		teamRenderedSig = sig;
+		if (viewMode === "diagram") renderDiagram(graph);
+		else renderList(graph);
+	}
 
 	const counts = graph.counts ?? {};
 	$("graph-meta").textContent = `${counts.agents ?? 0} agent · cập nhật ${relativeTime(graph.collectedAt)}`;
