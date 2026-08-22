@@ -164,6 +164,62 @@ try {
 		const invalid = run(["config", "write", "routing"], { __stdin: "{not json" });
 		assert.notEqual(invalid.status, 0);
 	}
+
+	// --- version + update -----------------------------------------------------
+	{
+		const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
+		const FAKE_GIT = join(HERE, "fixtures", "fake-git.mjs");
+		const gitEnv = (tags, extra = {}) => ({
+			PASEO_TEAM_GIT_EXEC: `node "${FAKE_GIT}"`,
+			FAKE_GIT_TAGS: tags,
+			...extra,
+		});
+
+		const v = run(["--version"]);
+		assert.equal(v.status, 0);
+		assert.equal(v.stdout.trim(), `pteam ${pkg.version}`);
+
+		const status = run(["status"]);
+		assert.equal(
+			status.json.version,
+			pkg.version,
+			"status.version must read package.json (the old hardcoded drift bug)",
+		);
+
+		const helpUpdate = run(["--help"]);
+		assert.ok(helpUpdate.stdout.includes("update"), "help documents 'update'");
+
+		const newer = run(["update", "--check"], gitEnv("sha\trefs/tags/v99.0.0\n"));
+		assert.equal(newer.status, 0);
+		assert.equal(newer.json.latest, "v99.0.0");
+		assert.equal(newer.json.updateAvailable, true);
+
+		const older = run(["update", "--check"], gitEnv("sha\trefs/tags/v0.0.1\n"));
+		assert.equal(older.status, 0);
+		assert.equal(older.json.updateAvailable, false);
+		assert.equal(older.json.upToDate, true);
+
+		// an unreachable remote degrades to JSON + exit 0; it must not crash
+		const down = run(["update", "--check"], gitEnv("", { FAKE_GIT_FAIL: "1" }));
+		assert.equal(down.status, 0);
+		assert.equal(down.json.updateAvailable, null);
+		assert.ok(Array.isArray(down.json.degraded) && down.json.degraded.length === 1);
+
+		// from the test sandbox the CLI lives in a checkout: an actual update
+		// must hand the pull back to the user instead of spawning npm
+		const manual = run(["update"], gitEnv("sha\trefs/tags/v99.0.0\n"));
+		assert.equal(manual.status, 0);
+		assert.equal(manual.json.action, "manual");
+		assert.equal(manual.json.mode, "checkout");
+
+		const noop = run(["update"], gitEnv("sha\trefs/tags/v0.0.1\n"));
+		assert.equal(noop.status, 0);
+		assert.equal(noop.json.action, "none");
+
+		const badUpdateFlag = run(["update", "--yes"]);
+		assert.notEqual(badUpdateFlag.status, 0);
+		assert.match(badUpdateFlag.stderr, /unknown flag/);
+	}
 } finally {
 	rmSync(sandbox, { recursive: true, force: true });
 }

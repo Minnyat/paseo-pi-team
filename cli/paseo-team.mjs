@@ -32,6 +32,7 @@ import * as cw from "./lib/config-walker.mjs";
 import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, normalizePermits } from "./lib/graph.mjs";
+import * as su from "./lib/self-update.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -62,7 +63,7 @@ function cmdStatus() {
 	const providers = paseoCfg?.agents?.providers ?? {};
 	json({
 		repoRoot: ROOT,
-		version: "0.1.0",
+		version: su.currentVersion(),
 		pi: { home: cw.piHome(), agentDir: cw.agentDir() },
 		paths: {
 			paseoConfig: cw.paseoConfigPath(),
@@ -421,6 +422,42 @@ async function cmdWatchdog(argv) {
 	json(await collectWatchdogSnapshot(staleAfter === undefined ? {} : { staleAfterMs: Number(staleAfter) }));
 }
 
+// --- update ----------------------------------------------------------------
+
+async function cmdUpdate(argv) {
+	rejectUnknownFlags(argv, ["--check"]);
+	const info = await su.checkForUpdate();
+	if (flag(argv, "--check")) {
+		json(info);
+		return;
+	}
+	if (info.degraded.length > 0) {
+		fail(`could not check for updates (${info.degraded[0].reason}): ${info.degraded[0].error ?? "no detail"}`);
+	}
+	if (!info.updateAvailable) {
+		json({ ...info, action: "none", message: `already up to date (${info.current})` });
+		return;
+	}
+	// Never `git pull` inside a checkout the user owns, and never npm-install
+	// over one — the two install modes need opposite update paths.
+	const mode = su.detectInstallMode();
+	if (mode === "checkout") {
+		json({
+			...info,
+			action: "manual",
+			mode,
+			message: "running from a git checkout — pull the latest yourself (`git pull`), then restart the CLI",
+		});
+		return;
+	}
+	process.stderr.write(`[paseo-team] installing ${info.latest} (npm install -g github:${info.slug}#${info.latest})…\n`);
+	const res = su.runNpmUpdate(info.slug, info.latest);
+	if (res.error || res.status !== 0) {
+		fail(`npm update failed (exit ${res.status ?? "?"}${res.error ? `: ${res.error.message}` : ""})`);
+	}
+	json({ ...info, action: "updated", mode, message: `updated ${info.current} -> ${info.latest}` });
+}
+
 // --- web -------------------------------------------------------------------
 
 async function cmdWeb(argv) {
@@ -442,7 +479,7 @@ async function cmdWeb(argv) {
 // ---------------------------------------------------------------------------
 
 function help() {
-	process.stdout.write(`pteam — role pack CLI (Paseo + Pi)          (alias: paseo-team)
+	process.stdout.write(`pteam ${su.currentVersion()} — role pack CLI (Paseo + Pi)   (alias: paseo-team)
 
 usage:
   pteam status
@@ -456,6 +493,7 @@ usage:
   pteam skills write <name>                (markdown body on stdin)
   pteam env list
   pteam install [--attach-cdp-port <port>]
+  pteam update [--check]                    (compare with the latest GitHub release tag)
 
 live plane (talks to the Paseo daemon):
   pteam agents [--all]
@@ -494,6 +532,11 @@ async function main() {
 		case "graph": return cmdGraph(argv);
 		case "watchdog": return cmdWatchdog(argv);
 		case "web": return cmdWeb(argv);
+		case "update": return cmdUpdate(argv);
+		case "--version":
+		case "-v":
+			process.stdout.write(`pteam ${su.currentVersion()}\n`);
+			return;
 		case "--help":
 		case "-h":
 		case "help":
