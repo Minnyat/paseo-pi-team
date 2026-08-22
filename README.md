@@ -11,6 +11,30 @@ owns the orchestration procedure.
 Full design reference:
 [`docs/demonthorn-agent-orchestration-deep-dive.md`](docs/demonthorn-agent-orchestration-deep-dive.md).
 
+## Quick start
+
+Zero runtime dependencies, Node >= 22.18. The repository is private, so the
+machine needs GitHub git credentials for the fetch (an SSH key, or
+`gh auth login` if git uses the `gh` credential helper).
+
+```bash
+# run it once straight from GitHub — nothing to clone, nothing installed
+npx --package github:Minnyat/paseo-pi-team pteam status
+
+# or install it globally — puts both `pteam` and `paseo-team` on your PATH
+npm install -g github:Minnyat/paseo-pi-team
+pteam web --open                         # opens http://127.0.0.1:PORT/#token=...
+```
+
+From a checkout instead:
+
+```bash
+node cli/paseo-team.mjs --help           # or `npm link` once, then `pteam`
+npm test
+```
+
+Full CLI/WebUI reference: [CLI and WebUI](#cli-and-webui) below.
+
 ## Structure
 
 ```text
@@ -457,25 +481,8 @@ the JSON. It never touches a file and never calls `paseo` itself, so anything
 you see in the browser can be reproduced in a terminal — the UI prints the exact
 command behind every panel.
 
-### Run it straight from GitHub (no clone)
-
-The package has zero runtime dependencies, so npm can fetch and run it directly
-from the repository:
-
-```bash
-# try it once, nothing installed
-npx --package github:Minnyat/paseo-pi-team pteam status
-
-# or install it globally — puts both `pteam` and `paseo-team` on your PATH
-npm install -g github:Minnyat/paseo-pi-team
-pteam web --open
-```
-
-Requires Node >= 22.18. The repository is private, so the machine needs GitHub
-git credentials for the fetch (an SSH key, or `gh auth login` if git uses the
-`gh` credential helper).
-
-### From a checkout
+Install and quick start: see [Quick start](#quick-start) at the top of this
+README.
 
 ```bash
 node cli/paseo-team.mjs --help          # or `npm link` once, then `pteam`
