@@ -359,7 +359,7 @@ export async function handleApi({ method, pathname, query, rawBody, exec }) {
 }
 
 export async function startServer(options = {}) {
-	const port = Number.isInteger(options.port) ? options.port : DEFAULT_PORT;
+	let port = Number.isInteger(options.port) ? options.port : DEFAULT_PORT;
 	const requireToken = options.requireToken !== false;
 	const token = requireToken ? (options.token ?? randomBytes(24).toString("base64url")) : null;
 	const cache = options.cache ?? createCache();
@@ -442,10 +442,40 @@ export async function startServer(options = {}) {
 		}
 	});
 
-	await new Promise((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(port, "127.0.0.1", resolve);
-	});
+	// A busy port must degrade to a notice, not a stack trace. Without an
+	// explicit --port we fall forward like a dev server (4321 -> 4322 -> …);
+	// an explicit port is the user's decision, so it fails with actionable
+	// text instead of silently moving.
+	const autoPort = options.autoPort === true;
+	const maxAttempts = autoPort ? 9 : 1;
+	let listenError = null;
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		const candidate = port + attempt;
+		try {
+			await new Promise((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(candidate, "127.0.0.1", resolve);
+			});
+			listenError = null;
+			port = candidate;
+			break;
+		} catch (error) {
+			listenError = error;
+			if (error?.code !== "EADDRINUSE" || attempt === maxAttempts - 1) break;
+			if (!options.quiet) {
+				process.stdout.write(`paseo-team web: port ${candidate} is busy, trying ${candidate + 1}…\n`);
+			}
+		}
+	}
+	if (listenError !== null) {
+		const busy = listenError.code === "EADDRINUSE";
+		const message = busy
+			? `port ${port} is already in use — a WebUI may already be running there (open http://127.0.0.1:${port}/ in your browser), or pass --port <other-port>`
+			: `could not listen on 127.0.0.1:${port}: ${listenError.message}`;
+		const failure = new Error(message);
+		failure.code = busy ? "WEB_PORT_BUSY" : "WEB_LISTEN_FAILED";
+		throw failure;
+	}
 	boundPort = server.address()?.port ?? port;
 
 	const base = `http://127.0.0.1:${boundPort}/`;
