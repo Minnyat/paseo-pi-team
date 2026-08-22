@@ -42,7 +42,7 @@ export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 // --- request -> argv -------------------------------------------------------
 
-const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo"];
+const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings"];
 const ROLES = ["supervisor", "lead", "peer"];
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;

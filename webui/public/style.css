@@ -345,6 +345,108 @@ table.list .row-error td { background: color-mix(in srgb, var(--danger) 8%, tran
 
 .cmd { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 16px; word-break: break-all; }
 
+/* --- config form --------------------------------------------------------- */
+
+.presets { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.preset-item { display: flex; flex-direction: column; gap: 3px; }
+.preset-item .preset-hint { margin: 0; }
+button.preset {
+	border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+	color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 10%, transparent);
+	align-self: flex-start;
+}
+button.preset:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+
+.cfg-group {
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--panel);
+	padding: 12px 18px 14px;
+	margin: 0 0 14px;
+}
+.cfg-group > legend {
+	padding: 0 8px;
+	font-size: 12.5px;
+	text-transform: uppercase;
+	letter-spacing: 0.09em;
+	color: var(--muted);
+	font-weight: 600;
+}
+.cfg-group > .cfg-hint { margin: 0 0 4px; }
+
+.cfg-field {
+	display: grid;
+	grid-template-columns: minmax(200px, 270px) 1fr;
+	gap: 4px 18px;
+	align-items: center;
+	padding: 9px 0;
+	border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+}
+.cfg-field:last-child { border-bottom: none; padding-bottom: 2px; }
+.cfg-field-wide { display: block; padding-bottom: 12px; }
+.cfg-field-wide .cfg-map { margin-top: 8px; }
+
+.cfg-label { display: flex; flex-direction: column; gap: 2px; }
+.cfg-label label { font-size: 14px; font-weight: 570; }
+.cfg-default { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.cfg-hint { margin: 0 0 8px; color: var(--muted); font-size: 12.5px; }
+.cfg-field > .cfg-hint { grid-column: 1 / -1; margin: -2px 0 4px; }
+
+.cfg-input {
+	width: 100%;
+	background: var(--panel-2);
+	color: var(--text);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 8px 12px;
+	font-size: 14px;
+	font-family: inherit;
+}
+input[type="number"].cfg-input { font-family: var(--mono); max-width: 230px; }
+textarea.cfg-lines {
+	min-height: 72px;
+	font-family: var(--mono);
+	font-size: 13px;
+	padding: 9px 12px;
+}
+
+.cfg-bool { display: inline-flex; gap: 9px; align-items: center; cursor: pointer; }
+.cfg-bool input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+.cfg-kv { display: flex; flex-direction: column; gap: 6px; }
+.cfg-kv-row { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: center; }
+
+.cfg-map { display: flex; flex-direction: column; gap: 10px; }
+.cfg-card {
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--panel-2);
+	padding: 12px 14px;
+}
+.cfg-card-head { display: flex; gap: 10px; align-items: center; margin-bottom: 4px; }
+.cfg-card-key { max-width: 320px; }
+.cfg-card-title { font-family: var(--mono); font-size: 13.5px; color: var(--accent); }
+.cfg-card-body .cfg-field { grid-template-columns: minmax(170px, 220px) 1fr; }
+.cfg-icon {
+	background: transparent;
+	border: none;
+	color: var(--muted);
+	font-size: 19px;
+	line-height: 1;
+	padding: 2px 9px;
+	cursor: pointer;
+}
+.cfg-icon:hover { color: var(--danger); }
+.cfg-add { align-self: flex-start; }
+
+@media (max-width: 700px) {
+	.cfg-field { grid-template-columns: 1fr; align-items: start; }
+	.cfg-card-body .cfg-field { grid-template-columns: 1fr; }
+	.cfg-kv-row { grid-template-columns: 1fr auto; }
+	.cfg-kv-value { grid-column: 1 / -1; }
+}
+
 /* --- toast -------------------------------------------------------------- */
 
 .toast {

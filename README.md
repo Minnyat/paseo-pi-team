@@ -206,6 +206,13 @@ split is by whether a repeat can duplicate work:
 | `send`, `run` | **never** — delivery ambiguity would duplicate the message or task |
 | usage / authority / model / workspace / endpoint / malformed request | **never** — fails immediately |
 
+Model-API transient errors (overloaded, rate limit, 5xx, timeout) are retried
+by Pi itself per its `settings.retry` policy (defaults: 3 attempts, 2s base
+delay). The WebUI's **Pi — cấu hình chính** editor tunes that policy without
+reading Pi's docs — including a one-click preset for unstable providers — via
+`pteam config read/write pi-settings` (`~/.pi/agent/settings.json`). Changes
+take effect for agent sessions started after the save.
+
 ## OpenCodeReview delegation (Phase 1)
 
 `paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill.

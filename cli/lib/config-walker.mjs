@@ -43,6 +43,14 @@ export function mcpConfigPath() {
 	return join(agentDir(), "mcp.json");
 }
 
+/**
+ * Pi's own settings file (`~/.pi/agent/settings.json`). It is shared with the
+ * interactive `pi` CLI, so every write must merge, never clobber.
+ */
+export function piSettingsPath() {
+	return join(agentDir(), "settings.json");
+}
+
 export function promptsDir() {
 	return join(agentDir(), "extensions", "prompts");
 }

@@ -176,16 +176,26 @@
 				</div>
 				<div class="toolbar">
 					<select id="config-section" aria-label="Chọn nhóm cấu hình">
-						<option value="providers">Nhà cung cấp mô hình</option>
+						<option value="pi-settings">Pi — cấu hình chính</option>
+						<option value="mcp">Pi — công cụ MCP</option>
+						<option value="providers">Paseo — nhà cung cấp</option>
 						<option value="routing">Định tuyến mô hình</option>
 						<option value="cluster">Nhiều máy (cluster)</option>
-						<option value="mcp">Công cụ MCP</option>
 					</select>
+					<div class="segmented" role="group" aria-label="Kiểu chỉnh">
+						<button id="config-mode-form" class="active" type="button">Form</button>
+						<button id="config-mode-raw" type="button">JSON thô</button>
+					</div>
 					<button id="config-load">Tải lại</button>
 					<button id="config-save" class="primary">Lưu</button>
 					<span id="config-meta" class="meta"></span>
 				</div>
-				<textarea id="config-editor" spellcheck="false" aria-label="Nội dung cấu hình"></textarea>
+				<p class="lead-in" id="config-intro"></p>
+				<div id="config-presets" class="presets"></div>
+				<div id="config-form" aria-live="polite"></div>
+				<div id="config-raw" class="hidden">
+					<textarea id="config-editor" spellcheck="false" aria-label="Nội dung cấu hình"></textarea>
+				</div>
 			</section>
 		</main>
 

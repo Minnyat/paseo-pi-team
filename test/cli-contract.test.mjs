@@ -165,6 +165,47 @@ try {
 		assert.notEqual(invalid.status, 0);
 	}
 
+	// --- every section carries the form schema the WebUI renders -------------
+	{
+		for (const section of ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings"]) {
+			const read = run(["config", "read", section]);
+			assert.equal(read.status, 0, `${section}: ${read.stderr}`);
+			assert.ok(Array.isArray(read.json.schema?.groups), `${section} read carries a form schema`);
+		}
+
+		// pi-settings points at Pi's own settings file and works before it exists
+		const pi = run(["config", "read", "pi-settings"]);
+		assert.equal(pi.json.exists, false);
+		assert.match(pi.json.path, /[\\/]settings\.json$/);
+		const retryGroup = pi.json.schema.groups.find((group) => group.id === "retry");
+		assert.ok(retryGroup, "the retry group is described even before any file exists");
+		const preset = pi.json.schema.presets.find((entry) => entry.id === "unstable-provider");
+		assert.equal(preset?.patch?.retry?.maxRetries, 6, "the unstable-provider preset ships its retry budget");
+
+		// A save must never drop keys the form does not know about.
+		const settingsPath = join(sandbox, "pi", "agent", "settings.json");
+		mkdirSync(dirname(settingsPath), { recursive: true });
+		writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:pi-web-access"], theme: "dark" }));
+		const saved = run(["config", "write", "pi-settings"], {
+			__stdin: JSON.stringify({ packages: ["npm:pi-web-access"], theme: "dark", retry: { maxRetries: 6 } }),
+		});
+		assert.equal(saved.status, 0, saved.stderr);
+		const after = JSON.parse(readFileSync(settingsPath, "utf8"));
+		assert.equal(after.packages[0], "npm:pi-web-access", "alien keys survive the write");
+		assert.equal(after.retry.maxRetries, 6);
+		assert.ok(
+			readdirSync(dirname(settingsPath)).some((file) => /^settings\.json\.bak-\d+$/.test(file)),
+			"a pi-settings rewrite leaves a .bak-* sibling",
+		);
+
+		const help = run(["--help"]);
+		assert.ok(help.stdout.includes("pi-settings"), "help lists the pi-settings section");
+
+		const unknown = run(["config", "read", "pi"]);
+		assert.notEqual(unknown.status, 0);
+		assert.match(unknown.stderr, /unknown config section/);
+	}
+
 	// --- version + update -----------------------------------------------------
 	{
 		const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
