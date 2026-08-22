@@ -481,13 +481,21 @@ async function cmdWeb(argv) {
 	const port = flagValue(argv, "--port");
 	if (port !== undefined && !/^\d{1,5}$/.test(port)) fail("--port must be a number");
 	const { startServer } = await import("../webui/server.mjs");
-	await startServer({
-		port: port === undefined ? undefined : Number(port),
-		open: flag(argv, "--open"),
-		// --no-token is for a throwaway demo on a machine you already trust.
-		// It is opt-in and loud, because this UI approves permission requests.
-		requireToken: !flag(argv, "--no-token"),
-	});
+	try {
+		await startServer({
+			port: port === undefined ? undefined : Number(port),
+			// No --port means the default is ours to move: fall forward to the
+			// next free port instead of dying on a stale instance. A pinned
+			// --port is the user's decision — fail with actionable text.
+			autoPort: port === undefined,
+			open: flag(argv, "--open"),
+			// --no-token is for a throwaway demo on a machine you already trust.
+			// It is opt-in and loud, because this UI approves permission requests.
+			requireToken: !flag(argv, "--no-token"),
+		});
+	} catch (error) {
+		fail(String(error?.message ?? error), 1);
+	}
 }
 
 // ---------------------------------------------------------------------------

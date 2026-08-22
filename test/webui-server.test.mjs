@@ -202,4 +202,28 @@ assert.equal(bearerToken({ headers: {} }), null);
 	}
 }
 
+// --- busy port: fall forward by default, fail friendly when pinned ----------
+{
+	const blocker = await startServer({ port: 0, quiet: true, token: "t" });
+	try {
+		const handle = await startServer({ port: blocker.port, quiet: true, token: "t", autoPort: true });
+		assert.ok(
+			handle.port > blocker.port && handle.port <= blocker.port + 8,
+			`autoPort must fall forward past the busy port (blocked ${blocker.port}, got ${handle.port})`,
+		);
+		await handle.close();
+	} finally {
+		await blocker.close();
+	}
+
+	// a pinned port is the user's decision: reject with actionable text,
+	// never a raw EADDRINUSE stack
+	const pinnedBlocker = await startServer({ port: 0, quiet: true, token: "t" });
+	await assert.rejects(
+		() => startServer({ port: pinnedBlocker.port, quiet: true, token: "t" }),
+		(err) => err.code === "WEB_PORT_BUSY" && /already in use/.test(err.message) && /--port/.test(err.message),
+	);
+	await pinnedBlocker.close();
+}
+
 console.log("webui-server tests passed");
