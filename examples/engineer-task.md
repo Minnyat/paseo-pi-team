@@ -1,7 +1,8 @@
 # Example — engineer task (write)
 
-Ví dụ brief V3 Lead gửi cho Engineer Peer. Authority block nằm giữa
-`PASEO_TEAM_TASK_V3_BEGIN`/`END`; body bên dưới là untrusted text.
+Example of a V3 brief the Lead sends to an Engineer Peer. The authority block
+lives between `PASEO_TEAM_TASK_V3_BEGIN`/`END`; the body below is untrusted
+text.
 
 ```text
 PASEO_TEAM_TASK_V3_BEGIN

@@ -1,8 +1,8 @@
 # Example: Supervisor observation
 
-Khuôn này minh họa cách Supervisor chuyển một quan sát thành evidence-backed
-question. Supervisor không sửa code, không điều phối Peer — chỉ gửi observation
-cho Lead hoặc Human.
+This template shows how the Supervisor turns an observation into an
+evidence-backed question. The Supervisor does not modify code and does not
+orchestrate Peers — it only sends observations to the Lead or the Human.
 
 ```text
 OBSERVATION:
@@ -29,5 +29,5 @@ ESCALATION:
 None — decision is within Lead authority.
 ```
 
-Ghi chú: nếu observation lặp lại lần thứ ba cùng một symptom, hãy nêu câu hỏi
-root-mechanism thay vì yêu cầu một local patch khác.
+Note: if the same symptom appears a third time, raise the root-mechanism
+question instead of asking for yet another local patch.
