@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	compareVersions,
 	currentVersion,
 	detectInstallMode,
+	npmExec,
 	pickLatestTag,
 	repoSlug,
 } from "../cli/lib/self-update.mjs";
@@ -42,5 +43,16 @@ assert.throws(() => repoSlug({}), /repository\.url/);
 // --- version truth -----------------------------------------------------------
 assert.equal(currentVersion(), PKG.version, "currentVersion reads package.json, the single source");
 assert.equal(detectInstallMode(), "checkout", "the test run lives inside the repo checkout");
+
+// --- npmExec (Windows .cmd shims cannot be spawned with argv) -----------------
+if (process.platform === "win32") {
+	const [npmBin, ...npmPrefix] = npmExec();
+	assert.equal(npmBin, process.execPath, "npm is driven through node itself, not the .cmd shim");
+	const npmEntry = join(...npmPrefix);
+	assert.ok(/npm-cli\.js$/.test(npmEntry), `resolves the real npm entry, got '${npmEntry}'`);
+	assert.ok(existsSync(npmEntry), "the resolved npm-cli.js actually exists on this machine");
+} else {
+	assert.deepEqual(npmExec(), ["npm"], "non-Windows spawns npm directly");
+}
 
 console.log("self-update tests passed");
