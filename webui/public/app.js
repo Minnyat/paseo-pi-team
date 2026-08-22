@@ -970,7 +970,8 @@ function mapControl(field, path) {
 					while (key in existing()) key = `moi-${(index += 1)}`;
 					setPath(configState.doc, joinPath(path, key), clone(field.item?.seed ?? {}));
 					renderConfigForm();
-					const fresh = wrap.querySelector(`.cfg-card[data-key="${key}"] .cfg-card-key`);
+					// A key with quotes or spaces would break a naive selector.
+					const fresh = wrap.querySelector(`.cfg-card[data-key="${CSS.escape(key)}"] .cfg-card-key`);
 					fresh?.focus();
 					fresh?.select();
 				},
