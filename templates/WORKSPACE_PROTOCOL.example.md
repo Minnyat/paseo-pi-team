@@ -1,8 +1,8 @@
 # Workspace Protocol — example
 
-Đặt file này tại `.orchestration/WORKSPACE_PROTOCOL.md` trong repo được team
-orchestrate. Đây là contract cứng giữa Human, Lead và Peer; preflight của
-project có thể đọc nó để validate giá trị.
+Place this file at `.orchestration/WORKSPACE_PROTOCOL.md` in the repo being
+orchestrated by the team. It is the hard contract between the Human, the Lead,
+and the Peers; the project's preflight may read it to validate values.
 
 ```text
 WORKSPACE_PROTOCOL_VERSION: 1

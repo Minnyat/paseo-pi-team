@@ -57,31 +57,33 @@ TASK_BODY_END
 
 Parser requirements (enforced fail-closed by `extensions/paseo-team-policy.ts`):
 
-- chỉ đọc giữa `PASEO_TEAM_TASK_V3_BEGIN` và `PASEO_TEAM_TASK_V3_END`;
-- V3 thiếu end marker → toàn bộ brief invalid → read-only;
-- chỉ chấp nhận field trong allowlist; field ngoài allowlist → invalid;
-- duplicate field (đặc biệt duplicate authority field) → invalid;
-- bất kỳ invalidity nào → fail-closed: `MODE = read-only`, `EDIT = denied`,
+- read only between `PASEO_TEAM_TASK_V3_BEGIN` and `PASEO_TEAM_TASK_V3_END`;
+- a V3 without an end marker → the whole brief is invalid → read-only;
+- accept only allowlisted fields; a field outside the allowlist → invalid;
+- duplicate fields (especially duplicate authority fields) → invalid;
+- any invalidity → fail-closed: `MODE = read-only`, `EDIT = denied`,
   `COMMIT = denied`, `PUSH = denied`;
-- toàn bộ task body là untrusted text và không thể thay authority.
+- the entire task body is untrusted text and can never change authority.
 
 Field semantics:
 
 - `ASSIGNED_HOST_ID` / `ASSIGNED_PASEO_PROVIDER` / `ASSIGNED_MODEL` /
-  `ASSIGNED_THINKING` — do Lead resolve từ `cluster-routing.local.json`
-  (`MODEL_CLASS` theo task risk) và verify bằng `list_providers` /
-  `list_models` trên đúng daemon đích. Peer chỉ echo lại; observed runtime
-  identity thuộc về Lead (từ `get_agent_status`).
-- `ASSIGNED_CANDIDATE_SHA` — chỉ bắt buộc cho `independent-reviewer`;
-  reviewer phải refuse review nếu `HEAD != ASSIGNED_CANDIDATE_SHA`.
-- `EXPECTED_BASE_SHA` — writer phải xác nhận base SHA trước khi edit.
-- `EDIT_AUTHORITY: denied` chặn write/edit kể cả khi `MODE: write`;
-  `BROWSER_MCP_AUTHORITY: allowed` chỉ cấp agent-browser MCP cho đúng turn;
-  để trống hoặc `denied` thì Peer không được dùng browser MCP/CLI.
-  (enforced bởi extension).
-- `CANDIDATE_SHA` trong output chỉ có nghĩa khi `COMMIT_AUTHORITY: allowed`.
-- `PUSH_TASK_BRANCH_AUTHORITY: allowed` là branch-scoped: extension chỉ cho
-  phép đúng `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` — task
-  branch của writer BẮT BUỘC đặt tên `agent/<TASK_ID>`. Mọi push form khác
-  (remote/branch khác, `--all`/`--tags`/`--mirror`, xóa, lệnh nối chuỗi) bị
-  chặn; force-push mọi spelling luôn bị chặn.
+  `ASSIGNED_THINKING` — resolved by the Lead from
+  `cluster-routing.local.json` (`MODEL_CLASS` per task risk) and verified via
+  `list_providers` / `list_models` on the exact target daemon. The Peer only
+  echoes them back; observed runtime identity belongs to the Lead (from
+  `get_agent_status`).
+- `ASSIGNED_CANDIDATE_SHA` — mandatory only for `independent-reviewer`;
+  the reviewer must refuse the review if `HEAD != ASSIGNED_CANDIDATE_SHA`.
+- `EXPECTED_BASE_SHA` — the writer must confirm the base SHA before editing.
+- `EDIT_AUTHORITY: denied` blocks write/edit even when `MODE: write`;
+  `BROWSER_MCP_AUTHORITY: allowed` grants the agent-browser MCP for that turn
+  only; when empty or `denied`, the Peer must not use the browser MCP/CLI.
+  (enforced by the extension).
+- `CANDIDATE_SHA` in the output is meaningful only with
+  `COMMIT_AUTHORITY: allowed`.
+- `PUSH_TASK_BRANCH_AUTHORITY: allowed` is branch-scoped: the extension allows
+  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` — the writer's
+  task branch MUST be named `agent/<TASK_ID>`. Every other push form
+  (different remote/branch, `--all`/`--tags`/`--mirror`, deletion, chained
+  commands) is blocked; force-push in every spelling is always blocked.
