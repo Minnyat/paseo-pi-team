@@ -5,13 +5,20 @@
   "description": "Paseo/pi multi-agent role pack — policy extension, role prompts, support scripts.",
   "type": "module",
   "license": "MIT",
+  "bin": {
+    "pteam": "cli/paseo-team.mjs",
+    "paseo-team": "cli/paseo-team.mjs"
+  },
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\" \"test/*.test.mts\"",
     "typecheck": "tsc --noEmit -p tsconfig.ci.json",
-    "check": "npm run test && npm run typecheck"
+    "check": "npm run test && npm run typecheck",
+    "web": "node cli/paseo-team.mjs web",
+    "paseo-team": "node cli/paseo-team.mjs",
+    "pteam": "node cli/paseo-team.mjs"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.83.0",

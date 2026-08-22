@@ -45,6 +45,16 @@ paseo-pi-team/
 │   ├── architect-task.md           # solution-architect brief (read-only)
 │   ├── scout-task.md               # repository-scout brief (read-only)
 │   └── supervisor-observation.md   # observation template
+├── cli/
+│   ├── paseo-team.mjs              # the CLI: every config read/write and every daemon query
+│   └── lib/
+│       ├── config-walker.mjs       # path resolution + atomic write with backup
+│       ├── paseo-bridge.mjs        # the only place that spawns `paseo` (argv, timeouts, fan-out)
+│       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
+│       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
+├── webui/
+│   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
+│   └── public/                     # zero-dependency SPA (index.html / app.js / style.css)
 ├── scripts/
 │   ├── install.ps1 / install.sh    # installers
 │   ├── lib-common.mjs              # shared helpers: exec/shim resolution, entrypoint, versions
@@ -72,12 +82,17 @@ paseo-pi-team/
 │   ├── browser-setup.test.mjs      # MCP config merge + skill install
 │   ├── installer-contract.test.mjs # shipped files must exist and carry their dependencies
 │   ├── paseo-contract.test.mjs     # Paseo JSON field contract (needs a live daemon — see below)
+│   ├── paseo-bridge.test.mjs       # argv validation, error codes, bounded concurrency
+│   ├── graph.test.mjs              # role inference, PEER_MESSAGE_V1 parse, graph assembly, cache
+│   ├── cli-contract.test.mjs       # the CLI end to end against a fake paseo + throwaway HOME
+│   ├── webui-server.test.mjs       # route allowlist, token, host check, cache, CLI failures
 │   └── fixtures/                   # fake CLIs (paseo, ocr) + version-pinned OCR output
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # original design
     ├── model-routing.md            # the 4 model-routing layers, verified commands
     ├── multi-host.md               # N-host routing + cross-host test plan
-    └── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
+    ├── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
+    └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
 ```
 
 ## Roles
@@ -432,6 +447,71 @@ cluster contract), each route against the real inventory, provider status, empty
 model segments, pi's per-model `thinkingLevelMap` (a `null` level means the
 level gets clamped), endpoint env vars, and repository state (a writer host must
 be clean in strict mode). No secret is ever printed.
+
+## CLI and WebUI
+
+`pteam` (long alias: `paseo-team`) is the pack's CLI and the single writer for
+everything the pack configures. The WebUI is an extension of that CLI, not an application beside
+it: it maps an HTTP route onto a fixed `pteam` argv, spawns it, and renders
+the JSON. It never touches a file and never calls `paseo` itself, so anything
+you see in the browser can be reproduced in a terminal — the UI prints the exact
+command behind every panel.
+
+### Run it straight from GitHub (no clone)
+
+The package has zero runtime dependencies, so npm can fetch and run it directly
+from the repository:
+
+```bash
+# try it once, nothing installed
+npx --package github:Minnyat/paseo-pi-team pteam status
+
+# or install it globally — puts both `pteam` and `paseo-team` on your PATH
+npm install -g github:Minnyat/paseo-pi-team
+pteam web --open
+```
+
+Requires Node >= 22.18. The repository is private, so the machine needs GitHub
+git credentials for the fetch (an SSH key, or `gh auth login` if git uses the
+`gh` credential helper).
+
+### From a checkout
+
+```bash
+node cli/paseo-team.mjs --help          # or `npm link` once, then `pteam`
+pteam status                            # paths + presence, machine readable
+pteam graph                             # agents, spawn tree, pending permits
+pteam permits list
+pteam web --port 4321 --open            # prints http://127.0.0.1:PORT/#token=...
+```
+
+The web server binds `127.0.0.1`, requires a per-run bearer token (handed to the
+page through the URL fragment so it never reaches a server log), and checks
+`Origin`/`Host` against DNS rebinding. `--no-token` exists for a throwaway demo
+and says so loudly: this UI can approve permission requests.
+
+Two different things are called "permission", and the UI keeps them apart:
+
+- **Runtime permit** — one tool call is blocked right now and a human has to
+  answer: `paseo-team permits list|allow|deny`, delegating to `paseo permit`.
+  Every decision is appended to `~/.paseo-pi-team/permit-audit.jsonl` *before*
+  the daemon is asked, so a decision that was made stays visible even if the
+  delegate call then fails.
+- **Policy authority** — what a role may do at all: the allowlists in
+  `extensions/paseo-team-policy.ts`, `PASEO_TEAM_LEAD_WRITE`,
+  `PASEO_TEAM_EXTRA_TOOLS`, and the V3 brief authority fields. The UI shows this
+  read-only; there is no "grant everything" button.
+
+Cost note, because it shapes the whole design: every `paseo` invocation costs
+~3s of process startup on Windows regardless of the query. `paseo-team graph`
+therefore batches a whole snapshot per call, caches the spawn tree in
+`~/.paseo-pi-team/graph-cache.json` (`paseo ls` does not carry the parent link —
+only `inspect` does), and spends at most `--max-inspect` lookups per run. A cold
+cache fills over a few polls; a warm one answers in ~3.8s. Anything that could
+not be collected is reported in `degraded[]` rather than quietly missing.
+
+See `docs/webui-architecture.md` for the full contract, the graph schema, and
+what is still missing (agent-to-agent message edges, multi-host).
 
 ## Debug commands
 

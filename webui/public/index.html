@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="vi">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Bảng điều khiển nhóm agent</title>
+		<link rel="stylesheet" href="/style.css" />
+	</head>
+	<body>
+		<header class="topbar">
+			<div class="brand">Nhóm agent</div>
+			<nav id="tabs" aria-label="Điều hướng chính">
+				<button data-tab="home" class="active">Trang chủ</button>
+				<button data-tab="graph">Nhóm agent</button>
+				<button data-tab="permissions">
+					Chờ duyệt<span id="permit-badge" class="badge hidden">0</span>
+				</button>
+				<button data-tab="chat">Trao đổi</button>
+				<button data-tab="roles" data-advanced>Vai trò</button>
+				<button data-tab="config" data-advanced>Cấu hình</button>
+			</nav>
+			<div class="status">
+				<label class="switch" title="Chế độ nâng cao hiện thêm phần chỉnh cấu hình và mô tả vai trò">
+					<input type="checkbox" id="advanced-toggle" />
+					<span>Chế độ nâng cao</span>
+				</label>
+				<span id="conn" class="conn">đang kết nối…</span>
+			</div>
+		</header>
+
+		<main>
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-home" class="tab active">
+				<div id="health" class="health">
+					<div class="health-icon" id="health-icon">…</div>
+					<div class="health-text">
+						<h1 id="health-headline">Đang kiểm tra hệ thống…</h1>
+						<p id="health-detail">Việc này mất khoảng vài giây.</p>
+					</div>
+					<div class="health-actions" id="health-actions"></div>
+				</div>
+
+				<div class="grid">
+					<article class="card stat">
+						<h2>Đang làm việc</h2>
+						<div class="stat-value" id="stat-running">–</div>
+						<p class="stat-hint">Agent đang thực sự chạy ngay lúc này.</p>
+					</article>
+					<article class="card stat">
+						<h2>Chờ bạn duyệt</h2>
+						<div class="stat-value" id="stat-permits">–</div>
+						<p class="stat-hint">Agent dừng lại vì cần bạn đồng ý.</p>
+					</article>
+					<article class="card stat">
+						<h2>Gặp lỗi</h2>
+						<div class="stat-value" id="stat-errors">–</div>
+						<p class="stat-hint">Agent dừng giữa chừng, cần xem lại.</p>
+					</article>
+					<article class="card stat">
+						<h2>Tổng số agent</h2>
+						<div class="stat-value" id="stat-total">–</div>
+						<p class="stat-hint">Gồm cả agent đang rảnh.</p>
+					</article>
+				</div>
+
+				<article class="card" id="setup-card">
+					<h2>Tình trạng cài đặt</h2>
+					<div id="setup-body" class="body">Đang kiểm tra…</div>
+				</article>
+
+				<details class="tech" data-advanced>
+					<summary>Kiểm tra kỹ thuật (preflight)</summary>
+					<div class="toolbar">
+						<button id="preflight-run">Chạy kiểm tra</button>
+						<span class="meta">Mất khoảng 30 giây vì phải hỏi từng nhà cung cấp mô hình.</span>
+					</div>
+					<div id="preflight-body" class="body">Chưa chạy lần nào.</div>
+				</details>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-graph" class="tab">
+				<div class="toolbar">
+					<div class="segmented" role="group" aria-label="Kiểu hiển thị">
+						<button id="view-diagram" class="active">Sơ đồ</button>
+						<button id="view-list">Danh sách</button>
+					</div>
+					<button id="graph-refresh">Cập nhật</button>
+					<label class="check" data-advanced>
+						<input type="checkbox" id="graph-all" /> Hiện cả agent đã lưu trữ
+					</label>
+					<span id="graph-meta" class="meta"></span>
+				</div>
+
+				<p class="lead-in">
+					Sơ đồ đọc từ trái sang phải: người ở bên trái là người giao việc,
+					người bên phải là người nhận việc.
+				</p>
+
+				<div class="graph-wrap" id="diagram-wrap">
+					<svg id="graph" role="img" aria-label="Sơ đồ ai giao việc cho ai"></svg>
+					<aside id="node-drawer" class="drawer hidden" aria-label="Chi tiết agent">
+						<button id="drawer-close" class="close" aria-label="Đóng">×</button>
+						<div id="drawer-body"></div>
+					</aside>
+				</div>
+
+				<div id="list-wrap" class="hidden"><div id="agent-list"></div></div>
+
+				<div id="graph-degraded" class="notice hidden"></div>
+
+				<div class="legend">
+					<span><i class="swatch role-supervisor"></i>Giám sát</span>
+					<span><i class="swatch role-lead"></i>Trưởng nhóm</span>
+					<span><i class="swatch role-peer"></i>Thành viên</span>
+					<span><i class="swatch role-unknown"></i>Chưa rõ vai trò</span>
+					<span><i class="line solid"></i>giao việc</span>
+				</div>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-permissions" class="tab">
+				<div class="toolbar">
+					<button id="permits-refresh">Cập nhật</button>
+					<span class="meta">Mỗi thẻ là một agent đang dừng lại chờ bạn trả lời.</span>
+				</div>
+				<div id="permits-body" class="body">Đang tải…</div>
+				<p class="footnote" data-advanced>
+					Đây là quyền cho <em>một hành động cụ thể, ngay lúc này</em>. Quyền chung
+					của từng vai trò nằm ở tab “Vai trò”.
+				</p>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-chat" class="tab">
+				<div class="toolbar">
+					<select id="chat-room" aria-label="Chọn phòng"></select>
+					<button id="chat-load">Đọc tin nhắn</button>
+					<span class="meta">Nơi các agent trao đổi với nhau.</span>
+				</div>
+				<div id="chat-body" class="body">Đang tải…</div>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-roles" class="tab">
+				<div class="toolbar">
+					<select id="role-select" aria-label="Chọn vai trò">
+						<option value="supervisor">Giám sát</option>
+						<option value="lead">Trưởng nhóm</option>
+						<option value="peer">Thành viên</option>
+					</select>
+					<button id="prompt-load">Tải lại</button>
+					<button id="prompt-save" class="primary">Lưu</button>
+					<span id="prompt-meta" class="meta"></span>
+				</div>
+				<p class="lead-in" id="role-hint"></p>
+				<textarea id="prompt-editor" spellcheck="false" aria-label="Mô tả vai trò"></textarea>
+				<article class="card">
+					<h2>Quyền chung của vai trò (chỉ xem)</h2>
+					<div class="body">
+						<p class="hint">
+							Đây là những gì một vai trò được phép làm nói chung. Nó do file
+							<code>extensions/paseo-team-policy.ts</code> và các biến môi trường
+							quyết định — sửa xong phải khởi động lại agent mới có hiệu lực.
+						</p>
+						<div id="env-table"></div>
+					</div>
+				</article>
+			</section>
+
+			<!-- ------------------------------------------------------------ -->
+			<section id="tab-config" class="tab">
+				<div class="notice warn">
+					Phần này sửa trực tiếp file cấu hình. Mỗi lần lưu đều tạo bản sao lưu
+					kèm thời gian, nhưng nếu không chắc thì đừng sửa.
+				</div>
+				<div class="toolbar">
+					<select id="config-section" aria-label="Chọn nhóm cấu hình">
+						<option value="providers">Nhà cung cấp mô hình</option>
+						<option value="routing">Định tuyến mô hình</option>
+						<option value="cluster">Nhiều máy (cluster)</option>
+						<option value="mcp">Công cụ MCP</option>
+					</select>
+					<button id="config-load">Tải lại</button>
+					<button id="config-save" class="primary">Lưu</button>
+					<span id="config-meta" class="meta"></span>
+				</div>
+				<textarea id="config-editor" spellcheck="false" aria-label="Nội dung cấu hình"></textarea>
+			</section>
+		</main>
+
+		<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+		<script type="module" src="/app.js"></script>
+	</body>
+</html>
