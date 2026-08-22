@@ -78,6 +78,24 @@ import {
 	assert.equal(seen.stdin, raw, "the CLI receives the document byte-for-byte");
 }
 
+// --- pi-settings is a first-class section: same argv shape as the others ---
+{
+	const echo = () => Promise.resolve({ exitCode: 0, stdout: "{}", stderr: "" });
+	const read = await handleApi({ method: "GET", pathname: "/api/config", query: { section: "pi-settings" }, exec: echo });
+	assert.deepEqual(read.args, ["config", "read", "pi-settings"]);
+
+	const raw = '{"retry":{"maxRetries":6}}';
+	const written = await handleApi({
+		method: "POST",
+		pathname: "/api/config",
+		query: { section: "pi-settings" },
+		rawBody: raw,
+		exec: (args, stdin) => Promise.resolve({ exitCode: 0, stdout: "{}", stderr: "", stdin }),
+	});
+	assert.deepEqual(written.args, ["config", "write", "pi-settings"]);
+	assert.equal(written.stdin, raw);
+}
+
 // --- host / origin checks --------------------------------------------------
 assert.equal(isAllowedHost({ headers: { host: "127.0.0.1:4321" } }, 4321), true);
 assert.equal(isAllowedHost({ headers: { host: "localhost:4321" } }, 4321), true);

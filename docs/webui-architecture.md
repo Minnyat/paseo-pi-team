@@ -82,6 +82,9 @@ CLI hiện có: `status`, `preflight`, `config read|write`, `prompts read|write`
 một-JSON-object-mỗi-lệnh):
 
 ```text
+paseo-team config read|write pi-settings       -> ~/.pi/agent/settings.json (file riêng của Pi; ghi nguyên file + backup)
+                                               -> response kem `schema`: bang field (label/hint/default/enum/min/max)
+                                                  de WebUI render form; field nao CLI khong mo ta thi UI khong hien thi
 paseo-team agents [--all]                      -> node list chuan hoa + role suy ra tu provider
 paseo-team agent inspect <ref>                 -> inspect + pending permit + parent
 paseo-team agent send <ref>                    -> prompt qua stdin -> file -> paseo send --prompt-file

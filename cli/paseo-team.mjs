@@ -29,6 +29,7 @@ import { existsSync, readFileSync, readdirSync, appendFileSync, unlinkSync, writ
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cw from "./lib/config-walker.mjs";
+import { schemaForSection } from "./lib/config-schema.mjs";
 import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, normalizePermits } from "./lib/graph.mjs";
@@ -116,6 +117,7 @@ const CONFIG_SECTIONS = {
 	cluster: () => join(cw.teamConfigDir(), "cluster-routing.local.json"),
 	mcp: () => cw.mcpConfigPath(),
 	paseo: () => cw.paseoConfigPath(),
+	"pi-settings": () => cw.piSettingsPath(),
 };
 
 function resolveSection(section) {
@@ -128,11 +130,14 @@ function resolveSection(section) {
 function cmdConfigRead(section) {
 	const path = resolveSection(section);
 	const data = cw.readJsonOrNull(path);
+	// The form schema rides along with the data: the WebUI renders fields the
+	// CLI described and nothing else, so a form is reproducible from a terminal.
+	const schema = schemaForSection(section);
 	if (data === null) {
-		json({ exists: false, path, data: {} });
+		json({ exists: false, path, data: {}, ...(schema ? { schema } : {}) });
 		return;
 	}
-	json({ exists: true, path, data });
+	json({ exists: true, path, data, ...(schema ? { schema } : {}) });
 }
 
 function cmdConfigWrite(section) {

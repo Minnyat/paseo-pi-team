@@ -17,6 +17,16 @@
  */
 
 import {
+	clone,
+	deepMerge,
+	deletePath,
+	getPath,
+	numberRangeProblems,
+	parseLines,
+	pruneEmpty,
+	setPath,
+} from "./config-form.js";
+import {
 	ROLE_HINT,
 	degradedSentence,
 	humanizeError,
@@ -768,13 +778,320 @@ async function loadEnvTable() {
 }
 
 // --- config ----------------------------------------------------------------
+//
+// The tab is a schema-driven form editor: the CLI describes every field
+// (label, hint, default, type) in `config read <section>`, and this engine
+// renders controls for exactly those fields. An empty control means "key
+// absent — the default applies"; saving always starts from the file's own
+// JSON, so a key the schema does not know about survives every edit.
+
+const configState = {
+	section: null,
+	schema: null,
+	doc: {},
+	mode: "form",
+};
+
+function joinPath(prefix, path) {
+	return prefix ? `${prefix}.${path}` : path;
+}
+
+function defaultValueLabel(field) {
+	if (field.default === undefined) return "";
+	const shown = field.type === "bool" ? (field.default ? "có" : "không") : String(field.default);
+	return `mặc định: ${shown}`;
+}
+
+function stringControl(field, path) {
+	const input = el("input", { type: "text", class: "cfg-input" });
+	input.placeholder = field.default !== undefined ? String(field.default) : "";
+	input.value = String(getPath(configState.doc, path) ?? "");
+	input.addEventListener("input", () => {
+		if (input.value === "") deletePath(configState.doc, path);
+		else setPath(configState.doc, path, input.value);
+	});
+	return input;
+}
+
+function boolControl(field, path) {
+	const box = el("input", { type: "checkbox" });
+	const label = el("span");
+	const paint = () => {
+		label.textContent = box.checked ? "Bật" : "Tắt";
+	};
+	box.checked = getPath(configState.doc, path) === undefined ? Boolean(field.default) : Boolean(getPath(configState.doc, path));
+	box.addEventListener("change", () => {
+		setPath(configState.doc, path, box.checked);
+		paint();
+	});
+	paint();
+	return el("label", { class: "cfg-bool" }, [box, label]);
+}
+
+function numberControl(field, path) {
+	const input = el("input", { type: "number", class: "cfg-input", step: "1" });
+	if (field.min !== undefined) input.min = String(field.min);
+	if (field.max !== undefined) input.max = String(field.max);
+	input.placeholder = field.default !== undefined ? String(field.default) : "";
+	const current = getPath(configState.doc, path);
+	if (current !== undefined && current !== null) input.value = String(current);
+	input.addEventListener("input", () => {
+		if (input.value.trim() === "") deletePath(configState.doc, path);
+		else setPath(configState.doc, path, Number(input.value));
+	});
+	return input;
+}
+
+function enumControl(field, path) {
+	const select = el("select", { class: "cfg-input" });
+	select.appendChild(
+		el("option", { value: "", text: field.default !== undefined ? `— mặc định (${field.default}) —` : "— mặc định —" }),
+	);
+	for (const value of field.enum ?? []) select.appendChild(el("option", { value, text: value }));
+	const current = getPath(configState.doc, path);
+	select.value = current === undefined ? "" : String(current);
+	if (current !== undefined && ![...select.options].some((option) => option.value === select.value)) {
+		// A value outside the enum (hand-written, or from a newer version) stays
+		// visible instead of silently snapping back to the default.
+		select.appendChild(el("option", { value: String(current), text: `${String(current)} (ngoài danh sách)` }));
+	}
+	select.addEventListener("change", () => {
+		if (select.value === "") deletePath(configState.doc, path);
+		else setPath(configState.doc, path, select.value);
+	});
+	return select;
+}
+
+function linesControl(field, path) {
+	const area = el("textarea", { class: "cfg-lines", rows: "3", spellcheck: "false" });
+	const current = getPath(configState.doc, path);
+	if (Array.isArray(current)) area.value = current.join("\n");
+	area.addEventListener("input", () => {
+		const lines = parseLines(area.value);
+		if (lines.length === 0) deletePath(configState.doc, path);
+		else setPath(configState.doc, path, lines);
+	});
+	return area;
+}
+
+function kvControl(field, path) {
+	const wrap = el("div", { class: "cfg-kv" });
+	const rebuild = () => {
+		const next = {};
+		for (const row of wrap.querySelectorAll(".cfg-kv-row")) {
+			const key = row.querySelector(".cfg-kv-key").value.trim();
+			if (key) next[key] = row.querySelector(".cfg-kv-value").value;
+		}
+		if (Object.keys(next).length === 0) deletePath(configState.doc, path);
+		else setPath(configState.doc, path, next);
+	};
+	const addRow = (key = "", value = "") => {
+		const keyInput = el("input", { type: "text", class: "cfg-input cfg-kv-key", placeholder: "TÊN_BIẾN" });
+		const valueInput = el("input", { type: "text", class: "cfg-input cfg-kv-value", placeholder: "giá trị" });
+		keyInput.value = key;
+		valueInput.value = value;
+		keyInput.addEventListener("input", rebuild);
+		valueInput.addEventListener("input", rebuild);
+		const row = el("div", { class: "cfg-kv-row" }, [
+			keyInput,
+			valueInput,
+			el("button", { type: "button", class: "cfg-icon", text: "×", title: "Bỏ dòng này", onclick: () => { row.remove(); rebuild(); } }),
+		]);
+		wrap.insertBefore(row, wrap.querySelector(".cfg-add"));
+	};
+	for (const [key, value] of Object.entries(getPath(configState.doc, path) ?? {})) addRow(key, String(value ?? ""));
+	wrap.appendChild(el("button", { type: "button", class: "cfg-add", text: "+ Thêm biến", onclick: () => addRow() }));
+	return wrap;
+}
+
+function mapControl(field, path) {
+	const wrap = el("div", { class: "cfg-map" });
+	const fixed = field.fixedKeys ?? null;
+	const existing = () => getPath(configState.doc, path) ?? {};
+
+	const cardForKey = (key, isFixed) => {
+		const card = el("div", { class: "cfg-card" });
+		card.dataset.key = key;
+		const head = el("div", { class: "cfg-card-head" });
+		if (isFixed) {
+			head.appendChild(el("span", { class: "cfg-card-title", text: key }));
+		} else {
+			const keyInput = el("input", { type: "text", class: "cfg-input cfg-card-key", placeholder: field.keyLabel ?? "Khóa" });
+			keyInput.value = key;
+			keyInput.addEventListener("change", () => {
+				const next = keyInput.value.trim();
+				if (!next || next === key) {
+					keyInput.value = key;
+					return;
+				}
+				if (next in existing()) {
+					toast(`Đã có mục tên "${next}" rồi.`, true);
+					keyInput.value = key;
+					return;
+				}
+				setPath(configState.doc, joinPath(path, next), existing()[key]);
+				deletePath(configState.doc, joinPath(path, key));
+				renderConfigForm();
+			});
+			head.appendChild(keyInput);
+			head.appendChild(
+				el("button", {
+					type: "button",
+					class: "cfg-icon",
+					text: "×",
+					title: "Xóa mục này",
+					onclick: () => {
+						deletePath(configState.doc, joinPath(path, card.dataset.key));
+						renderConfigForm();
+					},
+				}),
+			);
+		}
+		card.appendChild(head);
+		const body = el("div", { class: "cfg-card-body" });
+		for (const child of field.item?.fields ?? []) body.appendChild(fieldRow(child, joinPath(path, key)));
+		card.appendChild(body);
+		return card;
+	};
+
+	const keys = fixed
+		? [...fixed, ...Object.keys(existing()).filter((key) => !fixed.includes(key))]
+		: Object.keys(existing());
+	for (const key of keys) wrap.appendChild(cardForKey(key, fixed?.includes(key) === true));
+	if (!fixed) {
+		wrap.appendChild(
+			el("button", {
+				type: "button",
+				class: "cfg-add",
+				text: field.addLabel ?? "+ Thêm mục",
+				onclick: () => {
+					let key = "moi";
+					let index = 1;
+					while (key in existing()) key = `moi-${(index += 1)}`;
+					setPath(configState.doc, joinPath(path, key), clone(field.item?.seed ?? {}));
+					renderConfigForm();
+					const fresh = wrap.querySelector(`.cfg-card[data-key="${key}"] .cfg-card-key`);
+					fresh?.focus();
+					fresh?.select();
+				},
+			}),
+		);
+	}
+	return wrap;
+}
+
+function fieldControl(field, path) {
+	if (field.type === "bool") return boolControl(field, path);
+	if (field.type === "number") return numberControl(field, path);
+	if (field.type === "enum") return enumControl(field, path);
+	if (field.type === "lines") return linesControl(field, path);
+	if (field.type === "kv") return kvControl(field, path);
+	if (field.type === "map") return mapControl(field, path);
+	return stringControl(field, path);
+}
+
+function fieldRow(field, prefix) {
+	const path = joinPath(prefix, field.path);
+	const row = el("div", { class: `cfg-field${field.type === "map" ? " cfg-field-wide" : ""}` });
+	row.appendChild(
+		el("div", { class: "cfg-label" }, [
+			el("label", { text: field.label }),
+			field.default !== undefined ? el("span", { class: "cfg-default", text: defaultValueLabel(field) }) : null,
+		]),
+	);
+	if (field.hint && field.type !== "map") row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
+	row.appendChild(fieldControl(field, path));
+	if (field.type === "map" && field.hint) row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
+	if (field.showIf) {
+		row.dataset.showIfPath = joinPath(prefix, field.showIf.path);
+		row.dataset.showIfEquals = String(field.showIf.equals);
+	}
+	return row;
+}
+
+/** showIf rows hide and show as the field they depend on changes. */
+function refreshShowIf() {
+	for (const row of $("config-form").querySelectorAll(".cfg-field[data-show-if-path]")) {
+		const current = getPath(configState.doc, row.dataset.showIfPath);
+		row.classList.toggle("hidden", String(current) !== row.dataset.showIfEquals);
+	}
+}
+
+function renderConfigForm() {
+	const schema = configState.schema;
+	const form = clear($("config-form"));
+	clear($("config-presets"));
+	$("config-intro").textContent = schema?.intro ?? "";
+	if (!schema) return;
+
+	for (const preset of schema.presets ?? []) {
+		$("config-presets").appendChild(
+			el("div", { class: "preset-item" }, [
+				el("button", {
+					type: "button",
+					class: "preset",
+					text: preset.label,
+					onclick: () => {
+						deepMerge(configState.doc, clone(preset.patch));
+						renderConfigForm();
+						toast(`Đã điền sẵn: ${preset.label}. Xem lại rồi bấm Lưu.`);
+					},
+				}),
+				preset.hint ? el("span", { class: "cfg-hint preset-hint", text: preset.hint }) : null,
+			]),
+		);
+	}
+
+	for (const group of schema.groups ?? []) {
+		const fieldset = el("fieldset", { class: "cfg-group" });
+		fieldset.appendChild(el("legend", { text: group.label }));
+		if (group.hint) fieldset.appendChild(el("p", { class: "cfg-hint", text: group.hint }));
+		for (const field of group.fields ?? []) fieldset.appendChild(fieldRow(field, ""));
+		form.appendChild(fieldset);
+	}
+	refreshShowIf();
+}
+
+/** Flip visibility only. `loadConfig` uses this directly: the freshly loaded
+ *  document is the truth, so it must not round-trip through the textarea. */
+function applyConfigMode(mode) {
+	configState.mode = mode;
+	$("config-mode-form").classList.toggle("active", mode === "form");
+	$("config-mode-raw").classList.toggle("active", mode === "raw");
+	for (const id of ["config-form", "config-presets", "config-intro"]) {
+		$(id).classList.toggle("hidden", mode !== "form");
+	}
+	$("config-raw").classList.toggle("hidden", mode !== "raw");
+	if (mode === "form") renderConfigForm();
+}
+
+function setConfigMode(mode) {
+	if (mode === "raw") {
+		// Serialize the working document so form edits carry into the textarea.
+		$("config-editor").value = JSON.stringify(configState.doc, null, 2);
+		applyConfigMode("raw");
+		return;
+	}
+	try {
+		configState.doc = JSON.parse($("config-editor").value);
+	} catch (cause) {
+		toast(`JSON chưa hợp lệ, chưa chuyển về form được: ${cause.message}`, true);
+		return;
+	}
+	applyConfigMode("form");
+}
 
 async function loadConfig() {
 	const section = $("config-section").value;
 	try {
 		const { data } = await api(`/api/config?section=${encodeURIComponent(section)}`);
-		$("config-editor").value = JSON.stringify(data.data ?? {}, null, 2);
-		$("config-meta").textContent = `${data.path}${data.exists ? "" : " (chưa tồn tại)"}`;
+		configState.section = section;
+		configState.schema = data.schema ?? null;
+		configState.doc = data.exists ? clone(data.data) : clone(configState.schema?.seed ?? {});
+		$("config-meta").textContent = `${data.path}${data.exists ? "" : " (chưa tồn tại — lưu sẽ tạo mới)"}`;
+		$("config-editor").value = JSON.stringify(configState.doc, null, 2);
+		// A section without a schema keeps the old raw-JSON editor.
+		applyConfigMode(configState.schema ? "form" : "raw");
 	} catch (error) {
 		toastError(error);
 	}
@@ -782,9 +1099,21 @@ async function loadConfig() {
 
 $("config-load").addEventListener("click", loadConfig);
 $("config-section").addEventListener("change", loadConfig);
+$("config-mode-form").addEventListener("click", () => setConfigMode("form"));
+$("config-mode-raw").addEventListener("click", () => setConfigMode("raw"));
 $("config-save").addEventListener("click", async () => {
-	const section = $("config-section").value;
-	const text = $("config-editor").value;
+	const section = configState.section ?? $("config-section").value;
+	let text;
+	if (configState.mode === "raw") {
+		text = $("config-editor").value;
+	} else {
+		const problems = numberRangeProblems(configState.schema, configState.doc);
+		if (problems.length > 0) {
+			toast(problems.join(" · "), true);
+			return;
+		}
+		text = JSON.stringify(pruneEmpty(configState.doc) ?? {}, null, 2);
+	}
 	try {
 		JSON.parse(text); // fail here, before anything touches the file
 	} catch (cause) {
@@ -794,13 +1123,14 @@ $("config-save").addEventListener("click", async () => {
 	try {
 		await api(`/api/config?section=${encodeURIComponent(section)}`, { method: "POST", raw: text });
 		toast("Đã lưu. Bản cũ được sao lưu kèm thời gian.");
+		await loadConfig();
 	} catch (error) {
 		toastError(error);
 	}
 });
 
 loaders.config = async () => {
-	if (!$("config-editor").value) await loadConfig();
+	if (configState.section !== $("config-section").value) await loadConfig();
 };
 
 // --- chat ------------------------------------------------------------------
