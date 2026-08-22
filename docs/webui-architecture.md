@@ -91,6 +91,7 @@ paseo-team chat list|read <room>|post <room>   -> delegate paseo chat
 paseo-team graph [--all] [--max-inspect <n>] [--refresh]  -> { nodes, edges, permits, degraded[] }
 paseo-team watchdog [--stale-after <ms>]       -> delegate scripts/watchdog.mjs
 paseo-team web [--port <n>] [--open] [--no-token]         -> khoi dong webui/server.mjs
+paseo-team update [--check]                      -> so version package.json voi tag GitHub moi nhat (git ls-remote, khong dung npm view vi repo private)
 ```
 
 Nguyên tắc tái sử dụng — repo đã có sẵn, **không viết lại**:
