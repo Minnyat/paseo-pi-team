@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,7 @@ try {
 	{
 		const help = run(["--help"]);
 		assert.equal(help.status, 0);
-		for (const command of ["agents", "permits list", "graph", "web", "chat read"]) {
+			for (const command of ["agents", "permits list", "graph", "web", "chat read", "update", "uninstall"]) {
 			assert.ok(help.stdout.includes(command), `help documents '${command}'`);
 		}
 
@@ -219,6 +219,64 @@ try {
 		const badUpdateFlag = run(["update", "--yes"]);
 		assert.notEqual(badUpdateFlag.status, 0);
 		assert.match(badUpdateFlag.stderr, /unknown flag/);
+	}
+
+	// --- uninstall ------------------------------------------------------------
+	{
+		// seed the exact footprint install leaves behind, inside the sandbox
+		const agentRoot = join(sandbox, "pi", "agent");
+		const mk = (rel, content) => {
+			const p = join(agentRoot, rel);
+			mkdirSync(dirname(p), { recursive: true });
+			writeFileSync(p, content);
+		};
+		mk(join("extensions", "paseo-team-policy.ts"), "export {};");
+		for (const role of ["supervisor", "lead", "peer"]) {
+			mk(join("extensions", "prompts", `${role}.md`), "prompt");
+		}
+		for (const skill of ["paseo-team-lead", "paseo-ocr-reviewer", "agent-browser"]) {
+			mk(join("skills", skill, "SKILL.md"), "skill");
+		}
+		mk(join("extensions", "paseo-team-scripts", "preflight.mjs"), "// support");
+		const mcpPath = join(agentRoot, "mcp.json");
+		writeFileSync(
+			mcpPath,
+			JSON.stringify({ mcpServers: { "agent-browser": { command: "x" }, "other-tool": { command: "y" } } }),
+		);
+		const teamDir = join(sandbox, "team");
+		mkdirSync(teamDir, { recursive: true });
+		writeFileSync(join(teamDir, "permit-audit.jsonl"), "{}\n");
+
+		const out = run(["uninstall"]);
+		assert.equal(out.status, 0);
+		for (const t of out.json.targets) assert.equal(t.status, "removed", `${t.kind} must be removed`);
+		assert.equal(out.json.mcp.status, "removed");
+		const mcpAfter = JSON.parse(readFileSync(mcpPath, "utf8"));
+		assert.equal(mcpAfter.mcpServers["agent-browser"], undefined, "own MCP entry removed");
+		assert.ok(mcpAfter.mcpServers["other-tool"], "other tools' MCP entries must survive");
+		assert.ok(!existsSync(join(agentRoot, "extensions", "paseo-team-policy.ts")));
+		assert.ok(!existsSync(join(agentRoot, "skills", "paseo-team-lead")));
+		assert.ok(
+			existsSync(join(agentRoot, "extensions", "prompts")),
+			"the shared prompts dir itself must never be deleted",
+		);
+		assert.equal(out.json.teamData.status, "kept", "audit log survives without --purge");
+		assert.ok(existsSync(join(teamDir, "permit-audit.jsonl")));
+
+		// idempotent: a second run finds everything missing and still succeeds
+		const again = run(["uninstall"]);
+		assert.equal(again.status, 0);
+		assert.ok(again.json.targets.every((t) => t.status === "missing"));
+		assert.equal(again.json.mcp.status, "entry-missing");
+
+		// --purge deletes the team dir including the audit log
+		const purged = run(["uninstall", "--purge"]);
+		assert.equal(purged.status, 0);
+		assert.equal(purged.json.teamData.status, "removed");
+		assert.ok(!existsSync(teamDir));
+
+		const badUninstallFlag = run(["uninstall", "--force"]);
+		assert.notEqual(badUninstallFlag.status, 0);
 	}
 } finally {
 	rmSync(sandbox, { recursive: true, force: true });

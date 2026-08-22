@@ -33,6 +33,7 @@ import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, normalizePermits } from "./lib/graph.mjs";
 import * as su from "./lib/self-update.mjs";
+import * as un from "./lib/uninstall.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -422,6 +423,21 @@ async function cmdWatchdog(argv) {
 	json(await collectWatchdogSnapshot(staleAfter === undefined ? {} : { staleAfterMs: Number(staleAfter) }));
 }
 
+// --- uninstall --------------------------------------------------------------
+
+function cmdUninstall(argv) {
+	rejectUnknownFlags(argv, ["--purge"]);
+	const report = un.uninstall({ purge: flag(argv, "--purge") });
+	const mode = su.detectInstallMode();
+	json({
+		...report,
+		mode,
+		binary: mode === "global"
+			? "this CLI was installed globally by npm — run `npm rm -g paseo-pi-team` to remove the `pteam`/`paseo-team` binary itself"
+			: "this CLI runs from a git checkout — remove the checkout to delete the binary",
+	});
+}
+
 // --- update ----------------------------------------------------------------
 
 async function cmdUpdate(argv) {
@@ -493,6 +509,7 @@ usage:
   pteam skills write <name>                (markdown body on stdin)
   pteam env list
   pteam install [--attach-cdp-port <port>]
+  pteam uninstall [--purge]                (remove what install wrote; --purge also deletes ~/.paseo-pi-team)
   pteam update [--check]                    (compare with the latest GitHub release tag)
 
 live plane (talks to the Paseo daemon):
@@ -533,6 +550,7 @@ async function main() {
 		case "watchdog": return cmdWatchdog(argv);
 		case "web": return cmdWeb(argv);
 		case "update": return cmdUpdate(argv);
+		case "uninstall": return cmdUninstall(argv);
 		case "--version":
 		case "-v":
 			process.stdout.write(`pteam ${su.currentVersion()}\n`);

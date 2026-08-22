@@ -92,6 +92,7 @@ paseo-team graph [--all] [--max-inspect <n>] [--refresh]  -> { nodes, edges, per
 paseo-team watchdog [--stale-after <ms>]       -> delegate scripts/watchdog.mjs
 paseo-team web [--port <n>] [--open] [--no-token]         -> khoi dong webui/server.mjs
 paseo-team update [--check]                      -> so version package.json voi tag GitHub moi nhat (git ls-remote, khong dung npm view vi repo private)
+paseo-team uninstall [--purge]                   -> dao nguoc install: chi xoa dung cac item pack so huu (prompt/3 file, skill/3 thu muc, policy, team-scripts, entry MCP "agent-browser"); --purge moi xoa ~/.paseo-pi-team (kem audit log)
 ```
 
 Nguyên tắc tái sử dụng — repo đã có sẵn, **không viết lại**:
