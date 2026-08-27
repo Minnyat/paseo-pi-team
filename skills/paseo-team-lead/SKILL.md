@@ -238,6 +238,21 @@ Hard rules for a mixed fleet:
   than the brief assigned is an AUTHORITY_MISMATCH, not a detail.
 - Claude Peers cannot spawn Claude subagents (the `Task` tool is denied for
   every role). Fan-out is always yours, through Paseo.
+- **Crossing families requires an explicit `mode` in `create_agent`.** Permission
+  modes are provider-specific and are NOT inherited from the caller, so a pi
+  Lead creating a `claude-*` agent without one is rejected outright:
+
+  ```text
+  cannot inherit mode '<none>' from caller (provider 'pi-lead') for new agent
+  (provider 'claude-peer'). Pass an explicit mode.
+  ```
+
+  Use `mode: "default"` — every Peer tool call then raises a Paseo permission
+  you triage with `list_pending_permissions` / `respond_to_permission`, which is
+  the designed loop. `acceptEdits` is acceptable for a write Peer whose brief
+  already grants `EDIT_AUTHORITY` and whose round-trips you want to cut. NEVER
+  `bypassPermissions`: the role policy still applies, but the human loses the
+  permission gate entirely.
 
 Model classes (decided by task risk + disposition, not by role name):
 

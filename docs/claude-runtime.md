@@ -152,6 +152,23 @@ stays legible in `pteam graph` and the WebUI.
 Rule of thumb: mix Peers freely, keep ONE Lead per project on ONE family for
 the life of that project — the Lead is the deterministic part of the loop.
 
+### Crossing families needs an explicit mode
+
+Permission modes belong to the provider and are not inherited from the caller,
+so creating a Claude agent from a pi Lead (or the reverse) fails without one:
+
+```text
+cannot inherit mode '<none>' from caller (provider 'pi-lead') for new agent
+(provider 'claude-peer'). Pass an explicit mode. Available modes for
+'claude-peer': plan, default, acceptEdits, auto, bypassPermissions
+```
+
+`mode: "default"` is the right answer for a Peer: every tool call raises a Paseo
+permission the Lead triages, which is the loop the pack is built around. Use
+`acceptEdits` only for a write Peer whose brief already grants `EDIT_AUTHORITY`.
+Never `bypassPermissions` — the role policy still applies, but the human loses
+the permission gate.
+
 ## Verifying
 
 ```bash
