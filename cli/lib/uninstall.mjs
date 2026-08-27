@@ -16,6 +16,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import * as cw from "./config-walker.mjs";
+import * as claudeSetup from "../../scripts/claude-setup.mjs";
 
 /** The one mcp.json server entry browser-setup.mjs adds; nothing else is ours. */
 export const MCP_ENTRY = "agent-browser";
@@ -71,14 +72,56 @@ export function removeMcpEntry(mcpPath = cw.mcpConfigPath()) {
 	return { path: mcpPath, entry: MCP_ENTRY, status: "removed" };
 }
 
+/**
+ * Policy modules shared by the pi extension and the Claude hook. Installed
+ * next to the extension, removed with it — leaving them behind would keep a
+ * Claude hook working after the pack is gone.
+ */
+export const POLICY_MODULES = ["policy-core.mts", "claude-policy.mts"];
+
+/**
+ * Claude Code side: the tagged hook entries in ~/.claude/settings.json and the
+ * paseo-team MCP server in ~/.claude.json. Both files belong to the user and
+ * carry other tools' entries, so only this pack's tagged items are removed —
+ * the same named-items-only rule the mcp.json removal follows.
+ *
+ * A failure here degrades to a reported status instead of aborting: the pi
+ * side of the uninstall must still complete.
+ */
+export function removeClaudeIntegration() {
+	try {
+		const result = claudeSetup.uninstall();
+		return {
+			kind: "claude-integration",
+			settings: result.hooks,
+			mcp: result.mcp,
+			status: result.ok
+				? [result.hooks.status, result.mcp.status].includes("updated")
+					? "removed"
+					: "missing"
+				: "failed",
+		};
+	} catch (error) {
+		return {
+			kind: "claude-integration",
+			status: "failed",
+			error: String(error?.message ?? error),
+		};
+	}
+}
+
 export function uninstall({ purge = false } = {}) {
 	const targets = [
 		removePath("policy-extension", cw.policyExtensionPath()),
+		...POLICY_MODULES.map((name) =>
+			removePath(`policy-module-${name}`, join(cw.extensionsDir(), name)),
+		),
 		...cw.ROLE_PROMPTS.map((role) => removePath(`prompt-${role}`, cw.rolePromptPath(role))),
 		...cw.PACK_SKILLS.map((name) => removePath(`skill-${name}`, cw.skillDirPath(name))),
 		removePath("team-scripts", teamScriptsDir()),
 	];
 	const mcp = removeMcpEntry();
+	const claude = removeClaudeIntegration();
 
 	const teamDir = cw.teamConfigDir();
 	let teamData;
@@ -93,11 +136,12 @@ export function uninstall({ purge = false } = {}) {
 		};
 	}
 
-	const all = [...targets, mcp, teamData];
+	const all = [...targets, mcp, teamData, claude];
 	return {
 		purge,
 		targets,
 		mcp,
+		claude,
 		teamData,
 		summary: {
 			removed: all.filter((t) => t.status === "removed").length,

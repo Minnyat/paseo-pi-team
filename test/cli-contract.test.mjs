@@ -22,6 +22,10 @@ function run(args, extraEnv = {}) {
 			PI_HOME: join(sandbox, "pi"),
 			PST_TEAM_CONFIG_DIR: join(sandbox, "team"),
 			PASEO_CONFIG_JSON: join(sandbox, "paseo-config.json"),
+			// The Claude half of the pack lives in two more user-owned files;
+			// both are redirected so uninstall can never touch the real ones.
+			CLAUDE_CONFIG_DIR: join(sandbox, "claude"),
+			PASEO_TEAM_CLAUDE_USER_CONFIG: join(sandbox, "claude.json"),
 			...extraEnv,
 		},
 	});
@@ -272,6 +276,11 @@ try {
 			writeFileSync(p, content);
 		};
 		mk(join("extensions", "paseo-team-policy.ts"), "export {};");
+		// The shared policy modules install next to the extension and must go
+		// with it: left behind, they would keep a Claude hook working after the
+		// pack is uninstalled.
+		mk(join("extensions", "policy-core.mts"), "export {};");
+		mk(join("extensions", "claude-policy.mts"), "export {};");
 		for (const role of ["supervisor", "lead", "peer"]) {
 			mk(join("extensions", "prompts", `${role}.md`), "prompt");
 		}
@@ -292,6 +301,10 @@ try {
 		assert.equal(out.status, 0);
 		for (const t of out.json.targets) assert.equal(t.status, "removed", `${t.kind} must be removed`);
 		assert.equal(out.json.mcp.status, "removed");
+		// Nothing was installed for Claude in this sandbox, so the removal is a
+		// clean no-op — reported, never a crash, and never a write.
+		assert.equal(out.json.claude.status, "missing");
+		assert.ok(!existsSync(join(sandbox, "claude", "settings.json")));
 		const mcpAfter = JSON.parse(readFileSync(mcpPath, "utf8"));
 		assert.equal(mcpAfter.mcpServers["agent-browser"], undefined, "own MCP entry removed");
 		assert.ok(mcpAfter.mcpServers["other-tool"], "other tools' MCP entries must survive");

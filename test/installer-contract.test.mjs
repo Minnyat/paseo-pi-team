@@ -112,4 +112,80 @@ for (const [target, isMain] of symlinkCases) {
 const installedRemote = readFileSync(join(installed, "remote-paseo.mjs"), "utf8");
 assert.match(installedRemote, /from "\.\/model-routing\.mjs"/);
 assert.match(installedRemote, /from "\.\/reliability\.mjs"/);
+
+// --- Claude runtime: shipped files + installed-layout resolution ---------------
+//
+// The Claude hook resolves its policy modules RELATIVELY at runtime, and the
+// installed layout differs from the checkout by one directory level. The
+// import-scanning loop above cannot see a dynamic import, so the contract is
+// proven by running the hook in a replica of the installed tree.
+for (const installer of ["install.sh", "install.ps1"]) {
+  const text = readFileSync(join(root, "scripts", installer), "utf8");
+  for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "policy-core.mts", "claude-policy.mts"]) {
+    assert.ok(text.includes(file), `${installer} must ship ${file}`);
+  }
+}
+
+{
+  const extDir = mkdtempSync(join(tmpdir(), "paseo-installed-ext-"));
+  const scriptsDir = join(extDir, "paseo-team-scripts");
+  mkdirSync(scriptsDir, { recursive: true });
+  mkdirSync(join(extDir, "prompts"), { recursive: true });
+  for (const file of ["policy-core.mts", "claude-policy.mts"]) {
+    cpSync(join(root, "extensions", file), join(extDir, file));
+  }
+  for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "lib-common.mjs"]) {
+    cpSync(join(source, file), join(scriptsDir, file));
+  }
+  for (const role of ["supervisor", "lead", "peer"]) {
+    cpSync(join(root, "prompts", `${role}.md`), join(extDir, "prompts", `${role}.md`));
+  }
+  const hookPath = join(scriptsDir, "claude-hook.mjs");
+  const hookEnv = {
+    ...process.env,
+    PASEO_PI_ROLE: "peer",
+    PASEO_TEAM_HOME: join(unrelatedCwd, "claude-state"),
+  };
+  // No brief anywhere → read-only, so a write tool must be denied. This proves
+  // the hook found policy-core.mts through the installed layout: a resolution
+  // failure would surface as the fail-closed "hook failed" reason instead.
+  const denied = execFileSync(process.execPath, [hookPath, "pre-tool-use"], {
+    cwd: unrelatedCwd,
+    env: hookEnv,
+    encoding: "utf8",
+    input: JSON.stringify({
+      session_id: "installer-contract",
+      tool_name: "Write",
+      tool_input: { file_path: "x.txt" },
+    }),
+  });
+  const decision = JSON.parse(denied).hookSpecificOutput;
+  assert.equal(decision.permissionDecision, "deny");
+  assert.match(decision.permissionDecisionReason, /read-only/);
+  assert.doesNotMatch(decision.permissionDecisionReason, /hook failed/);
+
+  // The role prompt must resolve from the installed extensions dir too.
+  const injected = execFileSync(process.execPath, [hookPath, "session-start"], {
+    cwd: unrelatedCwd,
+    env: hookEnv,
+    encoding: "utf8",
+    input: JSON.stringify({ session_id: "installer-contract" }),
+  });
+  assert.match(JSON.parse(injected).hookSpecificOutput.additionalContext, /Paseo Team Role/);
+
+  // And the MCP server answers a handshake from the installed location.
+  const handshake = execFileSync(
+    process.execPath,
+    [join(scriptsDir, "claude-team-mcp.mjs")],
+    {
+      cwd: unrelatedCwd,
+      env: hookEnv,
+      encoding: "utf8",
+      input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`,
+    },
+  );
+  const tools = JSON.parse(handshake).result.tools.map((tool) => tool.name);
+  assert.deepEqual(tools.sort(), ["peer_ask_lead", "team_watchdog"]);
+}
+
 console.log("installer contract tests passed");

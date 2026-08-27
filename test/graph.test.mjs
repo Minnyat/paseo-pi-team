@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildGraph, collectGraph, inferRole, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
+import { buildGraph, collectGraph, inferFamily, inferRole, inferRoleProvider, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
 import * as cache from "../cli/lib/graph-cache.mjs";
 
 // --- role inference --------------------------------------------------------
@@ -12,6 +12,15 @@ assert.equal(inferRole("pi-supervisor/Minnyat/deepseek-v4-flash"), "supervisor")
 assert.equal(inferRole("pi-lead"), "lead");
 assert.equal(inferRole("PI-PEER/x"), "peer");
 assert.equal(inferRole("claude"), null, "an unknown provider is unknown, not bucketed into a role");
+// Mixed fleet: the same three roles also run on Claude providers, and the
+// family travels with the node so the graph can show which runtime executed it.
+assert.equal(inferRole("claude-peer"), "peer");
+assert.equal(inferRole("claude-supervisor/claude-opus-5"), "supervisor");
+assert.equal(inferFamily("claude-lead/claude-opus-5"), "claude");
+assert.equal(inferFamily("pi-lead/Minnyat/deepseek-v4-flash"), "pi");
+assert.equal(inferFamily("claude"), null);
+assert.deepEqual(inferRoleProvider("claude-peer/claude-fable-5"), { family: "claude", role: "peer" });
+assert.equal(inferRoleProvider("codex-peer"), null);
 assert.equal(inferRole(undefined), null);
 
 // --- PEER_MESSAGE_V1 parsing ----------------------------------------------

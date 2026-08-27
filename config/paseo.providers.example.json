@@ -28,6 +28,56 @@
         "env": {
           "PASEO_PI_ROLE": "peer"
         }
+      },
+      "claude-supervisor": {
+        "extends": "claude",
+        "label": "Claude Governance Supervisor",
+        "env": {
+          "PASEO_PI_ROLE": "supervisor"
+        },
+        "disallowedTools": [
+          "Write",
+          "Edit",
+          "MultiEdit",
+          "NotebookEdit",
+          "Bash",
+          "BashOutput",
+          "KillShell",
+          "Task",
+          "Agent",
+          "WebFetch",
+          "WebSearch"
+        ]
+      },
+      "claude-lead": {
+        "extends": "claude",
+        "label": "Claude Project Lead",
+        "env": {
+          "PASEO_PI_ROLE": "lead"
+        },
+        "disallowedTools": [
+          "Write",
+          "Edit",
+          "MultiEdit",
+          "NotebookEdit",
+          "Task",
+          "Agent",
+          "WebFetch",
+          "WebSearch"
+        ]
+      },
+      "claude-peer": {
+        "extends": "claude",
+        "label": "Claude Peer",
+        "env": {
+          "PASEO_PI_ROLE": "peer"
+        },
+        "disallowedTools": [
+          "Task",
+          "Agent",
+          "WebFetch",
+          "WebSearch"
+        ]
       }
     }
   }

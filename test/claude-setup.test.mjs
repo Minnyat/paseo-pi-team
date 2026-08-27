@@ -1,0 +1,224 @@
+// claude-setup.test.mjs — installing the Claude half of the pack.
+//
+// ~/.claude/settings.json and ~/.claude.json belong to the USER and already
+// carry other tools' entries (Paseo installs its own hooks in the same file).
+// The contract under test: merge, never replace; tag our own entries so an
+// upgrade updates instead of duplicating; remove only what we added; and never
+// rewrite a file we could not parse.
+
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	buildProviderSnippet,
+	claudeSettingsPath,
+	claudeUserConfigPath,
+	hookEntry,
+	install,
+	mergeHooks,
+	mergeMcpServer,
+	normalizePath,
+	removeHooks,
+	removeMcpServer,
+	uninstall,
+	verify,
+	HOOK_EVENTS,
+	PASEO_TEAM_HOOK_TAG,
+	TEAM_MCP_SERVER_NAME,
+} from "../scripts/claude-setup.mjs";
+
+const home = mkdtempSync(join(tmpdir(), "paseo-claude-setup-"));
+const claudeDir = join(home, ".claude");
+mkdirSync(claudeDir, { recursive: true });
+const userConfigPath = join(home, ".claude.json");
+const env = {
+	...process.env,
+	CLAUDE_CONFIG_DIR: claudeDir,
+	PASEO_TEAM_CLAUDE_USER_CONFIG: userConfigPath,
+};
+
+assert.equal(claudeSettingsPath(env), join(claudeDir, "settings.json"));
+assert.equal(claudeUserConfigPath(env), userConfigPath);
+// The user config is NOT under CLAUDE_CONFIG_DIR: without its own override a
+// test run would edit the developer's real MCP config.
+assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
+
+// --- pure merges --------------------------------------------------------------
+
+{
+	// A foreign hook (Paseo's own) must survive ours being added.
+	const foreign = {
+		matcher: "",
+		hooks: [{ type: "command", command: "paseo hooks claude UserPromptSubmit" }],
+	};
+	const settings = { model: "opus", hooks: { UserPromptSubmit: [foreign] } };
+	const merged = mergeHooks(settings, env);
+	assert.equal(merged.model, "opus");
+	assert.deepEqual(merged.hooks.UserPromptSubmit[0], foreign);
+	assert.equal(merged.hooks.UserPromptSubmit.length, 2);
+	for (const event of Object.keys(HOOK_EVENTS)) {
+		const ours = merged.hooks[event].filter((entry) => entry[PASEO_TEAM_HOOK_TAG]);
+		assert.equal(ours.length, 1, `${event}: exactly one tagged entry`);
+		assert.match(ours[0].hooks[0].command, /claude-hook\.mjs" [a-z-]+$/);
+	}
+	// Input is never mutated.
+	assert.equal(settings.hooks.UserPromptSubmit.length, 1);
+
+	// Re-merging replaces our entry instead of appending a second one.
+	const twice = mergeHooks(merged, env);
+	assert.equal(twice.hooks.PreToolUse.length, 1);
+	assert.equal(twice.hooks.UserPromptSubmit.length, 2);
+
+	// Removal takes ours out and leaves the foreign one.
+	const removed = removeHooks(twice);
+	assert.deepEqual(removed.hooks.UserPromptSubmit, [foreign]);
+	assert.equal(removed.hooks.PreToolUse, undefined, "empty event key is dropped");
+}
+
+{
+	// An untagged legacy entry pointing at our script is still ours.
+	const legacy = {
+		matcher: "*",
+		hooks: [{ type: "command", command: "node /old/path/claude-hook.mjs pre-tool-use" }],
+	};
+	const merged = mergeHooks({ hooks: { PreToolUse: [legacy] } }, env);
+	assert.equal(merged.hooks.PreToolUse.length, 1, "upgraded in place, not duplicated");
+	assert.equal(merged.hooks.PreToolUse[0][PASEO_TEAM_HOOK_TAG], true);
+}
+
+{
+	const config = { mcpServers: { other: { type: "stdio", command: "x" } } };
+	const merged = mergeMcpServer(config, env);
+	assert.deepEqual(merged.mcpServers.other, { type: "stdio", command: "x" });
+	assert.equal(merged.mcpServers[TEAM_MCP_SERVER_NAME].type, "stdio");
+	assert.match(merged.mcpServers[TEAM_MCP_SERVER_NAME].args[0], /claude-team-mcp\.mjs$/);
+	const removed = removeMcpServer(merged);
+	assert.deepEqual(Object.keys(removed.mcpServers), ["other"]);
+	// Removing when absent is a no-op, not an error.
+	assert.deepEqual(removeMcpServer({ mcpServers: {} }).mcpServers, {});
+	assert.deepEqual(removeMcpServer({}), {});
+}
+
+// Hook commands use forward slashes even on Windows: they may be handed to a
+// shell, where a backslash path would be read as escapes.
+{
+	const entry = hookEntry("PreToolUse", env);
+	assert.ok(!entry.hooks[0].command.includes("\\"), entry.hooks[0].command);
+	// Empty matcher = all tools, the same form Paseo's own hooks use in this
+	// file. A matcher that matches nothing would disable the policy silently.
+	assert.equal(entry.matcher, "");
+	assert.equal(hookEntry("SessionStart", env).matcher, "");
+	assert.ok(normalizePath("C:\\a\\b").endsWith("/a/b") || normalizePath("/a/b").endsWith("/a/b"));
+}
+
+// --- install / verify / uninstall on disk ------------------------------------
+
+{
+	writeFileSync(
+		join(claudeDir, "settings.json"),
+		JSON.stringify({ model: "opus[1m]", hooks: { Stop: [{ matcher: "", hooks: [] }] } }, null, 2),
+		"utf8",
+	);
+	writeFileSync(userConfigPath, JSON.stringify({ mcpServers: { other: {} } }, null, 2), "utf8");
+
+	const before = await verify(env);
+	assert.equal(before.ok, false);
+	assert.ok(before.missing.includes("hook:PreToolUse"));
+
+	const installed = await install(env);
+	assert.equal(installed.ok, true);
+	assert.equal(installed.hooks.status, "updated");
+	assert.equal(installed.mcp.status, "updated");
+
+	const after = await verify(env);
+	assert.equal(after.ok, true, JSON.stringify(after.missing));
+	assert.deepEqual(after.hooks, { SessionStart: true, UserPromptSubmit: true, PreToolUse: true });
+	assert.equal(after.mcpServer, true);
+
+	// Idempotent: a second install changes nothing on disk.
+	const again = await install(env);
+	assert.equal(again.hooks.status, "unchanged");
+	assert.equal(again.mcp.status, "unchanged");
+
+	// The user's own settings survived.
+	const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf8"));
+	assert.equal(settings.model, "opus[1m]");
+	assert.ok(settings.hooks.Stop);
+	// A backup was parked next to the file before the first write.
+	assert.ok(readdirSync(claudeDir).some((name) => name.includes("settings.json.bak-")));
+
+	const removedResult = await uninstall(env);
+	assert.equal(removedResult.ok, true);
+	const settingsAfter = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf8"));
+	assert.equal(settingsAfter.model, "opus[1m]");
+	assert.ok(settingsAfter.hooks.Stop, "foreign hooks survive uninstall");
+	assert.equal(settingsAfter.hooks.PreToolUse, undefined);
+	const configAfter = JSON.parse(readFileSync(userConfigPath, "utf8"));
+	assert.deepEqual(Object.keys(configAfter.mcpServers), ["other"]);
+	assert.equal((await verify(env)).ok, false);
+}
+
+// A present-but-corrupt file is reported, never rewritten.
+{
+	const corruptDir = mkdtempSync(join(tmpdir(), "paseo-claude-corrupt-"));
+	const corruptSettings = join(corruptDir, "settings.json");
+	writeFileSync(corruptSettings, "{ not json", "utf8");
+	const corruptEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: corruptDir,
+		PASEO_TEAM_CLAUDE_USER_CONFIG: join(corruptDir, ".claude.json"),
+	};
+	const result = await install(corruptEnv);
+	assert.equal(result.ok, false);
+	assert.equal(result.hooks.status, "failed");
+	assert.equal(readFileSync(corruptSettings, "utf8"), "{ not json", "bytes untouched");
+	// The other file is independent and still gets installed.
+	assert.equal(result.mcp.status, "created");
+	rmSync(corruptDir, { recursive: true, force: true });
+}
+
+// A missing settings file is created rather than treated as an error.
+{
+	const freshDir = join(home, "fresh");
+	const freshEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: freshDir,
+		PASEO_TEAM_CLAUDE_USER_CONFIG: join(freshDir, ".claude.json"),
+	};
+	const result = await install(freshEnv);
+	assert.equal(result.hooks.status, "created");
+	assert.ok(existsSync(join(freshDir, "settings.json")));
+}
+
+// --- provider snippet ---------------------------------------------------------
+
+{
+	const snippet = await buildProviderSnippet(env);
+	const providers = snippet.agents.providers;
+	assert.deepEqual(Object.keys(providers).sort(), [
+		"claude-lead",
+		"claude-peer",
+		"claude-supervisor",
+	]);
+	for (const [name, provider] of Object.entries(providers)) {
+		assert.equal(provider.extends, "claude");
+		assert.equal(provider.env.PASEO_PI_ROLE, name.replace("claude-", ""));
+		assert.ok(provider.disallowedTools.includes("Task"));
+	}
+	assert.ok(providers["claude-supervisor"].disallowedTools.includes("Bash"));
+	assert.ok(!providers["claude-peer"].disallowedTools.includes("Write"));
+
+	// The checked-in example config must match what the code generates, or an
+	// operator who copies it gets a policy the code does not enforce.
+	const example = JSON.parse(
+		readFileSync(new URL("../config/paseo.providers.example.json", import.meta.url), "utf8"),
+	);
+	for (const [name, provider] of Object.entries(providers)) {
+		assert.deepEqual(example.agents.providers[name], provider, `${name} drifted from the generator`);
+	}
+	assert.ok(example.agents.providers["pi-peer"], "pi providers stay in the example");
+}
+
+rmSync(home, { recursive: true, force: true });
+console.log("claude setup tests passed");

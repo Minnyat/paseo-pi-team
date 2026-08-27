@@ -29,17 +29,38 @@ export const ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 /** Default number of `paseo inspect` calls a single snapshot may spend. */
 export const DEFAULT_MAX_INSPECT = 6;
 
+/** Runtime families that carry the pack's roles: "pi-peer", "claude-peer", ... */
+export const RUNTIME_FAMILIES = Object.freeze(["pi", "claude"]);
+
 /**
  * "pi-supervisor/Minnyat/deepseek-v4-flash" (ls) and "pi-supervisor"
  * (inspect) must map to the same role, so only the first path segment counts.
+ * A mixed fleet runs the same roles on more than one runtime, so
+ * "claude-supervisor/claude-opus-5" is the same ROLE on a different family.
  * Anything unrecognized returns null — an unknown provider is displayed as
- * unknown, never bucketed into a role it might not have.
+ * unknown, never bucketed into a role it might not have. In particular a bare
+ * "claude" (a plain Claude Code agent, no role pack) stays unknown.
  */
 export function inferRole(provider) {
+	return inferRoleProvider(provider)?.role ?? null;
+}
+
+/** Role + family for a provider reference; null when it is not a role provider. */
+export function inferRoleProvider(provider) {
 	if (typeof provider !== "string") return null;
 	const head = provider.split("/")[0].trim().toLowerCase();
-	const bare = head.startsWith("pi-") ? head.slice(3) : head;
-	return ROLES.includes(bare) ? bare : null;
+	for (const family of RUNTIME_FAMILIES) {
+		const prefix = `${family}-`;
+		if (!head.startsWith(prefix)) continue;
+		const role = head.slice(prefix.length);
+		if (ROLES.includes(role)) return { family, role };
+	}
+	return null;
+}
+
+/** Runtime family of an agent's provider ("pi" | "claude"), or null. */
+export function inferFamily(provider) {
+	return inferRoleProvider(provider)?.family ?? null;
 }
 
 const PEER_MESSAGE_HEADER = "PEER_MESSAGE_V1";
@@ -169,6 +190,9 @@ export function buildGraph({ agents = [], parents = {}, permits = [], messages =
 			shortId: typeof agent.shortId === "string" ? agent.shortId : agent.id.slice(0, 7),
 			name: typeof agent.name === "string" ? agent.name : "",
 			role: inferRole(agent.provider),
+			// Which coding agent is executing this role. A mixed fleet is normal:
+			// the same role can run on pi and on Claude at the same time.
+			family: inferFamily(agent.provider),
 			provider: typeof agent.provider === "string" ? agent.provider : null,
 			thinking: typeof agent.thinking === "string" ? agent.thinking : null,
 			status: typeof agent.status === "string" ? agent.status : "unknown",

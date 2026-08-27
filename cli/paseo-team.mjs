@@ -9,7 +9,8 @@
  * The preview CLI contract:
  *
  *   paseo-team status                  -> machine-readable snapshot of paths + presence
- *   paseo-team preflight    [--strict|--json|--skip-models|--host-id <id>|--cluster <p>|--routes <p>]
+ *   paseo-team preflight    [--strict|--json|--skip-models|--runtime pi|claude|both|--host-id <id>|--cluster <p>|--routes <p>]
+ *   paseo-team claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
  *   paseo-team config read  <section>  -> full JSON of that section (stdout)
  *   paseo-team config write <section>  -> full JSON of that section from stdin, atomic+backup
  *   paseo-team prompts read <role>     -> markdown body (JSON-wrapped)
@@ -237,6 +238,29 @@ function cmdInstall(argv) {
 		const res = spawnSync("bash", [join(ROOT, "scripts", "install.sh"), ...argv], { stdio: "inherit" });
 		process.exit(res.status ?? 0);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// claude-setup — the Claude Code half of the role pack
+//
+// Pi gets its policy from an extension; Claude gets it from user-level hooks
+// plus an MCP server. This subcommand is the single place that installs,
+// verifies or removes that half, and prints the matching provider block.
+// ---------------------------------------------------------------------------
+
+function cmdClaudeSetup(argv) {
+	const known = ["--install", "--verify", "--uninstall", "--print-providers"];
+	const mode = argv.find((arg) => known.includes(arg)) ?? "--verify";
+	const rest = argv.filter((arg) => arg !== mode);
+	const res = spawnSync(
+		process.execPath,
+		[join(ROOT, "scripts", "claude-setup.mjs"), mode, ...rest],
+		{ encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+	);
+	if (res.error) fail(`claude-setup failed to start: ${res.error.message}`);
+	if (res.stderr) process.stderr.write(res.stderr);
+	if (res.stdout) process.stdout.write(res.stdout);
+	process.exit(res.status ?? 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -512,7 +536,8 @@ function help() {
 
 usage:
   pteam status
-  pteam preflight [--strict] [--json] [--skip-models] [--host-id <id>] [--cluster <path>] [--routes <path>]
+  pteam preflight [--strict] [--json] [--skip-models] [--runtime pi|claude|both] [--host-id <id>] [--cluster <path>] [--routes <path>]
+  pteam claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
   pteam config read  <section>
   pteam config write <section>             (JSON body on stdin)
   pteam prompts read <role>                (supervisor|lead|peer)
@@ -555,6 +580,7 @@ async function main() {
 		case "skills": return dispatchSkills(argv);
 		case "env": return dispatchEnv(argv[0]);
 		case "install": return cmdInstall(argv);
+		case "claude-setup": return cmdClaudeSetup(argv);
 		case "agents": return cmdAgents(argv);
 		case "agent": return dispatchAgent(argv);
 		case "permits": return dispatchPermits(argv);

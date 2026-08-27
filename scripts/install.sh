@@ -2,9 +2,15 @@
 # install.sh — install the paseo-pi-team role pack into the current user's pi config.
 #
 # Copies:
-#   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/
+#   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/   (pi adapter)
+#   extensions/policy-core.mts      -> ~/.pi/agent/extensions/   (shared rules)
+#   extensions/claude-policy.mts    -> ~/.pi/agent/extensions/   (claude dialect)
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
+#
+# When the claude CLI is present it also merges the Claude Code side (hooks in
+# ~/.claude/settings.json + the paseo-team MCP server in ~/.claude.json) so the
+# same three roles run on both runtimes.
 #
 # Does NOT touch ~/.paseo/config.json — merge config/paseo.providers.example.json by hand.
 
@@ -52,6 +58,18 @@ TEAM_SUPPORT_FILES=(
   remote-paseo.mjs
   model-routing.mjs
   team-scripts-path.mjs
+  # Claude Code side: the policy hook and the team-tools MCP server. Both are
+  # spawned by Claude with an absolute path, so they must live in the durable
+  # support dir, not in a checkout that may be moved.
+  claude-hook.mjs
+  claude-team-mcp.mjs
+)
+
+# Policy modules shared by BOTH runtime adapters. .mts on purpose: pi discovers
+# extensions/*.ts, and these have no default export.
+POLICY_MODULES=(
+  policy-core.mts
+  claude-policy.mts
 )
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
@@ -60,6 +78,9 @@ mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
 mkdir -p "$HOME/.paseo-pi-team"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
+for policy_module in "${POLICY_MODULES[@]}"; do
+  cp -f "$ROLE_PACK_ROOT/extensions/$policy_module" "$EXT_DIR/$policy_module"
+done
 cp -f "$ROLE_PACK_ROOT"/prompts/*.md "$PROMPT_DIR/"
 rm -rf "$SKILL_DIR"
 cp -R "$ROLE_PACK_ROOT/skills/paseo-team-lead" "$SKILL_DIR"
@@ -90,6 +111,24 @@ if ! node "$ROLE_PACK_ROOT/scripts/browser-setup.mjs" "${BROWSER_SETUP_ARGS[@]}"
   exit 1
 fi
 
+# Claude Code side. Skipped (not failed) when claude is not installed: a
+# pi-only host is a supported configuration.
+CLAUDE_SETUP_STATUS="skipped (claude CLI not found)"
+if command -v claude >/dev/null 2>&1; then
+  # Point the hook/MCP registrations at the INSTALLED copies, so moving or
+  # deleting this checkout cannot break a configured Claude agent.
+  if env \
+    PASEO_TEAM_HOOK_SCRIPT="$TEAM_SCRIPTS_DIR/claude-hook.mjs" \
+    PASEO_TEAM_MCP_SCRIPT="$TEAM_SCRIPTS_DIR/claude-team-mcp.mjs" \
+    PASEO_TEAM_POLICY_DIR="$EXT_DIR" \
+    node "$ROLE_PACK_ROOT/scripts/claude-setup.mjs" --install; then
+    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server)"
+  else
+    echo "[paseo-team] claude setup failed" >&2
+    exit 1
+  fi
+fi
+
 echo ""
 echo "[paseo-team] Installed:"
 echo "  extension -> $EXT_DIR/paseo-team-policy.ts"
@@ -97,6 +136,8 @@ echo "  prompts   -> $PROMPT_DIR"
 echo "  lead skill -> $SKILL_DIR"
 echo "  OCR skill  -> $OCR_SKILL_DIR"
 echo "  support   -> $TEAM_SCRIPTS_DIR"
+echo "  policy    -> $EXT_DIR/policy-core.mts + claude-policy.mts (shared by both runtimes)"
+echo "  claude    -> $CLAUDE_SETUP_STATUS"
 export PASEO_TEAM_SCRIPTS_DIR="$TEAM_SCRIPTS_DIR"
 echo "  support env -> PASEO_TEAM_SCRIPTS_DIR=$TEAM_SCRIPTS_DIR (current process)"
 echo "  support default -> \${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}/extensions/paseo-team-scripts"
@@ -108,7 +149,9 @@ echo "  2. Verify OCR if needed: command -v ocr; ocr version"
 echo "  3. Install the MCP adapter (PINNED version — Paseo tools depend on it):"
 echo "     pi install npm:pi-mcp-adapter@2.19.0"
 echo "  4. Merge config/paseo.providers.example.json into ~/.paseo/config.json"
-echo "     (agents.providers.pi-* + daemon.mcp.injectIntoAgents: true)."
+echo "     (agents.providers.pi-* + claude-* + daemon.mcp.injectIntoAgents: true)."
+echo "     Regenerate the claude-* block any time with:"
+echo "       node \"$ROLE_PACK_ROOT/scripts/claude-setup.mjs\" --print-providers"
 echo "  5. Copy config/model-routing.example.json to ~/.paseo-pi-team/model-routing.local.json"
 echo "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
 echo "     Cross-host controller: also copy config/cluster-routing.example.json to"

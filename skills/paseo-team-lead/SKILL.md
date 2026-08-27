@@ -211,6 +211,34 @@ model or host without recording a routing decision, launch first and "hope",
 trust a model name written in a prompt instead of runtime config, or call MCP
 for a remote host.
 
+### Runtime family (mixed fleet)
+
+Every role runs on two runtimes. The Paseo role provider names the family:
+`pi-<role>` or `claude-<role>`. Both carry the SAME role contract — the same
+prompt, the same V3 brief, the same authority gates — so the choice is a
+capacity/capability decision, never a policy one:
+
+| Pick | When |
+|---|---|
+| `pi-*` | the host's routing file points the class at a pi model; work that needs a pi-only model id (`<pi-provider>/<model-id>`) |
+| `claude-*` | Claude-only capabilities are needed (`ultracode` thinking, Claude model ids); or the pi provider is unavailable/disabled on that host |
+
+Hard rules for a mixed fleet:
+
+- The model reference SHAPE differs per family and is validated:
+  `pi-peer` → `<pi-provider>/<model-id>`; `claude-peer` → a bare id such as
+  `claude-opus-5`. A pi-shaped model on a Claude route is a config error, not
+  something to normalise.
+- Thinking vocabularies differ: `minimal` exists only on pi, `ultracode` only
+  on Claude. Take the value from the route, never from habit.
+- Keep ONE Lead per project, on ONE family, for the life of that project.
+  Peers may be mixed freely; the Lead is the deterministic part.
+- `ASSIGNED_PASEO_PROVIDER` in the brief records the family you actually used,
+  and `OBSERVED_PROVIDER` must match it. A Peer that reports a different family
+  than the brief assigned is an AUTHORITY_MISMATCH, not a detail.
+- Claude Peers cannot spawn Claude subagents (the `Task` tool is denied for
+  every role). Fan-out is always yours, through Paseo.
+
 Model classes (decided by task risk + disposition, not by role name):
 
 | MODEL_CLASS | Use for |
@@ -344,9 +372,9 @@ DISPOSITION: <see list below>
 MODE: write | read-only
 
 ASSIGNED_HOST_ID: <host-id>              # from cluster-routing.local.json
-ASSIGNED_PASEO_PROVIDER: <pi-supervisor|pi-lead|pi-peer>
-ASSIGNED_MODEL: <pi-provider>/<model-id>   # exact, from list_models
-ASSIGNED_THINKING: <off|minimal|low|medium|high|xhigh|max>
+ASSIGNED_PASEO_PROVIDER: <pi-supervisor|pi-lead|pi-peer|claude-supervisor|claude-lead|claude-peer>
+ASSIGNED_MODEL: <pi-provider>/<model-id> | <claude-model-id>   # exact, from list_models
+ASSIGNED_THINKING: <off|minimal|low|medium|high|xhigh|max>     # claude: off|low|medium|high|xhigh|max|ultracode
 WORKSPACE_REF: <worktree-or-workspace>
 AGENT_REF:
 
