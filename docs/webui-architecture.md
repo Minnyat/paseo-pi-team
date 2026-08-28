@@ -266,12 +266,18 @@ chiếu với `roleProfiles` mà `paseo-team status` đã trả về.
 - **PR-3 — Permissions inbox** — *xong*: màn hình duyệt quyền, hàng không phân
   loại được thì hiện nhưng không cho một-chạm, audit tại
   `~/.paseo-pi-team/permit-audit.jsonl`.
-- **PR-4 — Cạnh message** — *chưa*: `graph --with-logs` parse `PEER_MESSAGE_V1`
-  từ timeline của Lead; drawer timeline per-agent. Đây là phần phụ thuộc
-  `paseo logs`, tức là phần dễ degrade nhất (§2).
+- **PR-4 — Cạnh message** — *xong* (qua chat room, không qua `paseo logs`):
+  `pteam graph --with-chat <room>` đọc `paseo chat read --json`, nơi `author`
+  là **agent id thật**, nên cạnh là `confidence: "confirmed"` chứ không phải
+  suy đoán. Hoá ra không cần `graph --with-logs` — phụ thuộc `paseo logs`
+  (thứ dễ timeout nhất, §2) đã tránh được hoàn toàn. Envelope là
+  `TEAM_MESSAGE_V1` (`scripts/team-chat.mjs`), recipient lấy từ `@mention`
+  trong thân tin nhắn — chính token Paseo dùng để giao. Drawer timeline
+  per-agent vẫn chưa làm.
 - **PR-5 — Multi-host** — *chưa*: host selector qua `remote-paseo.mjs`, endpoint
   bí mật không rời server.
 
-Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge permit là dữ liệu
-thật; cạnh **message** chưa có (legend vẫn ghi rõ "suy đoán" để không ai đọc
+Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge permit + cạnh
+**message** (từ chat room) đều là dữ liệu thật; cạnh message suy-đoán-từ-log
+vẫn chưa có (legend vẫn ghi rõ "suy đoán" để không ai đọc
 nhầm một đồ thị thiếu cạnh thành một đội không nói chuyện với nhau).

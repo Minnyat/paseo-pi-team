@@ -39,6 +39,21 @@ export function paseoConfigPath() {
 	return process.env.PASEO_CONFIG_JSON || join(homedir(), ".paseo", "config.json");
 }
 
+/**
+ * Paseo's own home. `PASEO_HOME` is Paseo's documented override, so honor the
+ * same variable rather than inventing a pack-specific one — a machine that
+ * moved its daemon home must not end up with the CLI reading a different tree
+ * than the daemon writes.
+ */
+export function paseoHome() {
+	return process.env.PASEO_HOME || join(homedir(), ".paseo");
+}
+
+/** Per-agent state files: `$PASEO_HOME/agents/<cwd-slug>/<agent-id>.json`. */
+export function paseoAgentsDir() {
+	return join(paseoHome(), "agents");
+}
+
 export function mcpConfigPath() {
 	return join(agentDir(), "mcp.json");
 }

@@ -34,6 +34,7 @@ import { schemaForSection } from "./lib/config-schema.mjs";
 import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, normalizePermits } from "./lib/graph.mjs";
+import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 
@@ -217,6 +218,9 @@ const DOC_ENV = [
 	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated extra tools per profile" },
 	{ key: "PASEO_TEAM_PROMPTS_DIR", scope: "host", where: "machine env", purpose: "override prompts directory" },
 	{ key: "PASEO_TEAM_SCRIPTS_DIR", scope: "host", where: "machine env", purpose: "override support-scripts directory" },
+	{ key: "PASEO_TEAM_DOMAIN", scope: "per-agent", where: "paseo run --env / provider env", purpose: "jurisdiction of this seat; also set it as the team.domain label so `ls --label` and team_chat 'domain:<name>' broadcasts can find it" },
+	{ key: "PASEO_TEAM_ROOMS", scope: "per-agent", where: "paseo run --env / provider env", purpose: "comma-separated chat-room allowlist for team_chat; unset = any room (chat rooms have no ACL of their own)" },
+	{ key: "PASEO_HOME", scope: "host", where: "machine env", purpose: "Paseo's own home; the CLI reads agent state from $PASEO_HOME/agents (defaults to ~/.paseo)" },
 ];
 
 function cmdEnvList() {
@@ -336,13 +340,33 @@ async function live(args, label) {
 }
 
 async function cmdAgents(argv) {
-	rejectUnknownFlags(argv, ["--all"]);
+	rejectUnknownFlags(argv, ["--all", "--domain"]);
+	const domainFilter = flagValue(argv, "--domain");
 	const listed = await live(flag(argv, "--all") ? ["ls", "-g", "-a"] : ["ls", "-g"], "agents");
 	const rows = Array.isArray(listed) ? listed : [];
+	// `paseo ls` carries neither labels nor the parent link; Paseo's own state
+	// files carry both, and reading them costs no daemon round trip.
+	const ids = rows.map((agent) => agent?.id).filter(isAgentId);
+	const { states, degraded } = readAgentStates(ids);
+	const agents = rows.map((agent) => {
+		const state = states[agent?.id] ?? null;
+		return {
+			...agent,
+			role: inferRole(agent?.provider),
+			domain: state?.domain ?? null,
+			parentId: state?.parentAgentId ?? null,
+			resolvedModel: state?.model ?? null,
+			modelDrift: state?.modelDrift ?? false,
+			sessionId: state?.sessionId ?? null,
+		};
+	});
+	const filtered = domainFilter === undefined ? agents : agents.filter((a) => a.domain === domainFilter);
 	json({
 		ok: true,
-		count: rows.length,
-		agents: rows.map((agent) => ({ ...agent, role: inferRole(agent?.provider) })),
+		count: filtered.length,
+		domain: domainFilter ?? null,
+		agents: filtered,
+		degraded: degraded.filter((fault) => fault.reason !== "AGENT_STATE_MISSING"),
 	});
 }
 
@@ -444,16 +468,21 @@ async function cmdChatPost(room) {
 // --- graph -----------------------------------------------------------------
 
 async function cmdGraph(argv) {
-	rejectUnknownFlags(argv, ["--all", "--max-inspect", "--refresh"]);
+	rejectUnknownFlags(argv, ["--all", "--max-inspect", "--refresh", "--with-chat"]);
 	if (flag(argv, "--refresh")) graphCache.clearParentCache();
 	const maxInspect = flagValue(argv, "--max-inspect");
 	if (maxInspect !== undefined && !/^\d{1,3}$/.test(maxInspect)) {
 		fail("--max-inspect must be a number (max 3 digits)");
 	}
+	// Opt-in: each room costs one round trip, and only the coordination view
+	// needs them. Rooms are validated here so a typo never reaches argv.
+	const withChat = flagValue(argv, "--with-chat");
+	const chatRooms = withChat === undefined ? [] : withChat.split(",").map((room) => safeRoom(room.trim()));
 	json(
 		await collectGraph({
 			all: flag(argv, "--all"),
 			maxInspect: maxInspect === undefined ? undefined : Number(maxInspect),
+			chatRooms,
 		}),
 	);
 }
@@ -574,7 +603,7 @@ live plane (talks to the Paseo daemon):
   pteam chat list
   pteam chat read <room> [--limit <n>]
   pteam chat post <room>                   (message on stdin)
-  pteam graph [--all] [--max-inspect <n>] [--refresh]
+  pteam graph [--all] [--max-inspect <n>] [--refresh] [--with-chat <room[,room]>]
   pteam watchdog [--stale-after <ms>]
   pteam web [--port <n>] [--open] [--no-token]
 

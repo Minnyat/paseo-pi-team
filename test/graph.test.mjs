@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildGraph, collectGraph, inferFamily, inferRole, inferRoleProvider, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
+import { buildGraph, chatEdges, collectGraph, inferFamily, inferRole, inferRoleProvider, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
 import * as cache from "../cli/lib/graph-cache.mjs";
 
 // --- role inference --------------------------------------------------------
@@ -254,6 +254,199 @@ function fakeRunner(overrides = {}) {
 	assert.equal(result.ok, true);
 	assert.equal(result.counts.agents, 4);
 	assert.ok(result.degraded.some((fault) => fault.reason === "CLI_ERROR"));
+}
+
+// --- agent state: domain, model, and free spawn edges ----------------------
+// Paseo's own per-agent state files carry the parent link and the resolved
+// model, so the graph can stop paying ~3s per `paseo inspect` for a tree it
+// can read off disk. See cli/lib/agent-state.mjs.
+{
+	const graph = buildGraph({
+		agents: AGENTS,
+		// No inspect-derived parents at all: everything comes from state.
+		parents: {},
+		states: {
+			sup: { agentId: "sup", domain: "security", parentAgentId: null, model: "o/m", modelDrift: false, sessionId: "s-sup" },
+			lead: { agentId: "lead", domain: "payments", parentAgentId: "sup", model: "o/m", modelDrift: false, sessionId: "s-lead" },
+			peer: { agentId: "peer", domain: "payments", parentAgentId: "lead", model: "o/other", modelDrift: true, sessionId: "s-peer" },
+		},
+		now: 0,
+	});
+	const by = Object.fromEntries(graph.nodes.map((n) => [n.id, n]));
+	assert.equal(by.lead.parentId, "sup", "the spawn edge comes from the state file");
+	assert.equal(by.lead.parentSource, "state");
+	assert.equal(by.lead.domain, "payments");
+	assert.equal(by.peer.modelDrift, true, "a config/runtime model disagreement stays visible");
+	assert.equal(by.peer.sessionId, "s-peer", "the pi session id rides along for fork/handoff");
+	assert.equal(by.lost.parentId, null, "an agent with no state and no inspect has an unknown parent");
+	assert.equal(by.lost.parentKnown, false);
+	assert.equal(by.lost.domain, null);
+	assert.equal(graph.edges.filter((e) => e.type === "spawn").length, 2);
+
+	// A11 — two seats in different domains must not collapse into one bucket.
+	assert.equal(graph.counts.byDomain.payments, 2);
+	assert.equal(graph.counts.byDomain.security, 1);
+	assert.equal(graph.counts.byDomain.unknown, 1, "an agent with no domain is counted as unknown, never silently dropped");
+}
+
+{
+	// `paseo inspect` stays authoritative where we paid for it: a state file
+	// that disagrees must not silently override a fresh inspect.
+	const graph = buildGraph({
+		agents: AGENTS,
+		parents: { peer: "lead" },
+		states: { peer: { agentId: "peer", parentAgentId: "sup", domain: "x" } },
+		now: 0,
+	});
+	const peer = graph.nodes.find((n) => n.id === "peer");
+	assert.equal(peer.parentId, "lead");
+	assert.equal(peer.parentSource, "inspect");
+	assert.equal(peer.domain, "x", "non-parent fields still come from state");
+}
+
+{
+	// collectGraph must spend inspect calls ONLY on agents that have no state
+	// file — that is the whole cost saving.
+	const seen = [];
+	const result = await collectGraph({
+		runPaseoJson: async (args) => {
+			seen.push(args.join(" "));
+			if (args[0] === "ls") return AGENTS;
+			if (args[0] === "permit") return [];
+			return { Id: args[1], ParentAgentId: null };
+		},
+		readStates: () => ({
+			states: {
+				sup: { agentId: "sup", parentAgentId: null, domain: "security" },
+				lead: { agentId: "lead", parentAgentId: "sup", domain: "security" },
+				peer: { agentId: "peer", parentAgentId: "lead", domain: "security" },
+			},
+			degraded: [],
+		}),
+		cache: { version: cache.CACHE_VERSION, parents: {} },
+		persistCache: false,
+		maxInspect: 10,
+		now: 0,
+	});
+	assert.equal(result.ok, true);
+	const inspects = seen.filter((c) => c.startsWith("inspect"));
+	assert.equal(inspects.length, 1, "only the one agent without a state file costs an inspect");
+	assert.ok(inspects[0].includes("lost"));
+	assert.equal(result.edges.filter((e) => e.type === "spawn").length, 2);
+}
+
+{
+	// A degraded state read is reported, and the graph still renders.
+	const result = await collectGraph({
+		runPaseoJson: async (args) => (args[0] === "ls" ? AGENTS : args[0] === "permit" ? [] : { Id: args[1], ParentAgentId: null }),
+		readStates: () => ({ states: {}, degraded: [{ reason: "AGENT_STATE_ROOT_UNREADABLE", detail: "no such dir" }] }),
+		cache: { version: cache.CACHE_VERSION, parents: {} },
+		persistCache: false,
+		maxInspect: 0,
+		now: 0,
+	});
+	assert.equal(result.ok, true);
+	assert.equal(result.counts.agents, 4);
+	assert.ok(result.degraded.some((f) => f.reason === "AGENT_STATE_ROOT_UNREADABLE"));
+}
+
+// --- chat rooms as confirmed message edges --------------------------------
+// `paseo chat read --json` reports the real author agent id, so unlike the
+// log-scraped Lead→Peer guesses these edges are facts, not suspicions.
+{
+	const LEAD_A = "aaaaaaaa-1111-4111-8111-111111111111";
+	const LEAD_B = "bbbbbbbb-2222-4222-8222-222222222222";
+	const roster = [
+		{ id: LEAD_A, shortId: "aaaaaaa" },
+		{ id: LEAD_B, shortId: "bbbbbbb" },
+	];
+	const envelope = (from, corr) =>
+		[
+			"@bbbbbbb",
+			"TEAM_MESSAGE_V1",
+			"KIND: dependency",
+			`CORRELATION_ID: ${corr}`,
+			"TOPIC: T-7",
+			`FROM_AGENT_ID: ${from}`,
+			"FROM_ROLE: lead",
+			"FROM_DOMAIN: payments",
+			"HOP: 0",
+			"TTL: 8",
+			"",
+			"who owns the migration?",
+		].join("\n");
+
+	// B17 — a real author id yields a confirmed edge.
+	{
+		const edges = chatEdges([{ id: "m1", author: LEAD_A, createdAt: "t0", body: envelope(LEAD_A, "c1") }], roster, "coord");
+		assert.equal(edges.length, 1);
+		assert.equal(edges[0].type, "message");
+		assert.equal(edges[0].from, LEAD_A);
+		assert.equal(edges[0].to, LEAD_B, "the mention resolves from short id to the full agent id");
+		assert.equal(edges[0].confidence, "confirmed");
+		assert.equal(edges[0].kind, "dependency");
+		assert.equal(edges[0].taskId, "T-7");
+		assert.equal(edges[0].room, "coord");
+		assert.equal(edges[0].origin, "agent");
+	}
+
+	// B18 — a human posting in the room is not an agent edge.
+	{
+		const edges = chatEdges([{ id: "m2", author: "manual", createdAt: "t1", body: envelope(LEAD_A, "c2") }], roster, "coord");
+		assert.equal(edges[0].origin, "human", "author 'manual' is a person at a terminal, not an agent");
+		assert.equal(edges[0].from, "human");
+	}
+
+	// B19 — the same correlation id seen twice draws once.
+	{
+		const messages = [
+			{ id: "m3", author: LEAD_A, createdAt: "t2", body: envelope(LEAD_A, "c3") },
+			{ id: "m4", author: LEAD_A, createdAt: "t3", body: envelope(LEAD_A, "c3") },
+		];
+		const graph = buildGraph({
+			agents: [
+				{ id: LEAD_A, shortId: "aaaaaaa", provider: "pi-lead/o/m", status: "idle" },
+				{ id: LEAD_B, shortId: "bbbbbbb", provider: "pi-lead/o/m", status: "idle" },
+			],
+			messages: chatEdges(messages, roster, "coord"),
+			now: 0,
+		});
+		assert.equal(graph.edges.filter((e) => e.type === "message").length, 1, "dedup is by correlation id");
+	}
+
+	// A message with no envelope is room chatter, not a protocol edge.
+	assert.deepEqual(chatEdges([{ id: "m5", author: LEAD_A, body: "just talking" }], roster, "coord"), []);
+
+	// B21 — a mention nobody in the listing answers to is kept and flagged,
+	// never silently dropped.
+	{
+		const edges = chatEdges([{ id: "m6", author: LEAD_A, body: envelope(LEAD_A, "c6").replace("@bbbbbbb", "@zzzzzzz") }], roster, "coord");
+		assert.equal(edges.length, 1);
+		assert.equal(edges[0].to, "zzzzzzz");
+		assert.equal(edges[0].unresolvedRecipient, true);
+	}
+}
+
+{
+	// B20 — a room that cannot be read degrades that room only.
+	const result = await collectGraph({
+		runPaseoJson: async (args) => {
+			if (args[0] === "ls") return AGENTS;
+			if (args[0] === "permit") return [];
+			if (args[0] === "chat" && args[2] === "broken") throw Object.assign(new Error("no such room"), { code: "CLI_ERROR" });
+			if (args[0] === "chat") return [];
+			return { Id: args[1], ParentAgentId: null };
+		},
+		readStates: () => ({ states: {}, degraded: [] }),
+		chatRooms: ["coord", "broken"],
+		cache: { version: cache.CACHE_VERSION, parents: {} },
+		persistCache: false,
+		maxInspect: 0,
+		now: 0,
+	});
+	assert.equal(result.ok, true);
+	assert.equal(result.counts.agents, 4, "the graph still renders");
+	assert.ok(result.degraded.some((f) => f.reason === "CHAT_READ_FAILED" && f.detail.includes("broken")));
 }
 
 console.log("graph tests passed");

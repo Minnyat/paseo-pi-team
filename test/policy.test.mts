@@ -8,6 +8,8 @@ import {
 	browserMcpAllowed,
 	callsAgentBrowserCli,
 	callsPaseoCli,
+	coordinationCliBlockReason,
+	teamChatToolBlockReason,
 	classifyMcpInput,
 	denyReason,
 	gitAuthorityBlockReason,
@@ -1430,6 +1432,38 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		[],
 		`${file}: brief must be clean, got: ${brief.malformed.join("; ")}`,
 	);
+}
+
+// --- team_chat: the coordination channel is typed, not a raw CLI ----------
+// Chat is absent from Paseo's MCP catalog (60 tools, measured), so Lead and
+// Supervisor could only reach it through bash — a surface the policy cannot
+// inspect: no room gate, no envelope, no audit. The typed tool replaces it,
+// and the raw CLI is closed for every role.
+{
+	// B10 — a Peer never had chat and still does not: no MCP, and the Paseo
+	// CLI (which includes `chat`) is already blocked from bash.
+	assert.equal(callsPaseoCli("paseo chat post coord hello"), true);
+	assert.equal(callsPaseoCli("paseo chat read coord"), true);
+	assert.equal(teamChatToolBlockReason("peer"), "team_chat is restricted to Lead and Supervisor agents.");
+	assert.equal(teamChatToolBlockReason("lead"), null);
+	assert.equal(teamChatToolBlockReason("supervisor"), null);
+
+	// B11/B12 — Lead and Supervisor must go through team_chat too, so the
+	// envelope, the size ceiling and the room allowlist cannot be bypassed by
+	// typing the command by hand.
+	for (const role of ["lead", "supervisor"] as const) {
+		const reason = coordinationCliBlockReason(role, "paseo chat post coord hello");
+		assert.match(String(reason), /team_chat/, `${role} is redirected to the typed tool`);
+	}
+	// Everything else a Lead does with the Paseo CLI is untouched: this is a
+	// chat-only redirect, not a new CLI ban.
+	assert.equal(coordinationCliBlockReason("lead", "paseo ls -g"), null);
+	assert.equal(coordinationCliBlockReason("lead", "paseo inspect abc"), null);
+	assert.equal(coordinationCliBlockReason("supervisor", "paseo status"), null);
+	assert.equal(coordinationCliBlockReason("peer", "paseo chat ls"), null, "the peer path stays where it is");
+	// Wrappers and alternate spellings must not reopen it.
+	assert.match(String(coordinationCliBlockReason("lead", "paseo.cmd chat ls")), /team_chat/);
+	assert.match(String(coordinationCliBlockReason("lead", "echo hi && paseo chat post r x")), /team_chat/);
 }
 
 console.log("[paseo-team] policy tests passed");
