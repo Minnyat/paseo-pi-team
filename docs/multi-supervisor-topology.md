@@ -329,7 +329,10 @@ cạnh confirmed; bash `paseo chat` bị chặn cho mọi role.
 | Node mang `domain`/`model`/`modelDrift`/`sessionId`, `counts.byDomain`, `parentSource` | `cli/lib/graph.mjs` |
 | Cây spawn dựng từ đĩa; `inspect` chỉ tốn cho agent KHÔNG có state file | `cli/lib/graph.mjs` |
 | Envelope `TEAM_MESSAGE_V1` + expand `domain:<x>` + cap 8 KB + hop/TTL + room allowlist | `scripts/team-chat.mjs` |
-| Tool `team_chat` (lead + supervisor), chặn `paseo chat` qua bash cho MỌI role | `extensions/paseo-team-policy.ts` |
+| **Luật** `team_chat`: allowlist, role gate, chặn `paseo chat` qua bash | `extensions/paseo-team-core/policy-core.ts` (**trung lập runtime**) |
+| Bind luật vào Pi (đăng ký tool + hook bash) | `extensions/paseo-team-policy.ts` |
+| Bind luật vào Claude Code (hook bash) | `extensions/paseo-team-core/claude-policy.ts` |
+| Tool `team_chat` cho Claude qua MCP | `scripts/claude-team-mcp.mjs` |
 | `pteam agents [--domain <d>]`, `pteam graph --with-chat <room[,room]>` | `cli/paseo-team.mjs` |
 | Env `PASEO_TEAM_DOMAIN`, `PASEO_TEAM_ROOMS`, `PASEO_HOME` | `pteam env list` |
 | Ship `team-chat.mjs` | `scripts/install.{sh,ps1}` + `installer-contract.test.mjs` |
@@ -346,8 +349,19 @@ Test: `test/agent-state.test.mjs` (mới), `test/team-chat.test.mjs` (mới),
 - `pteam graph --with-chat exp-room-1` → 1 cạnh `message`
   `confidence: "confirmed"`, `origin: agent`, đúng from/to/kind/topic/room,
   `inspectSpent: 0`, `degraded: 0`.
-- Lead thật chạy `paseo chat ls` qua bash → bị chặn, trả đúng thông báo
+- Lead thật (Pi) chạy `paseo chat ls` qua bash → bị chặn, trả đúng thông báo
   chuyển hướng sang `team_chat`.
+- Adapter Claude chặn y hệt cho `lead`/`supervisor`, vẫn cho qua
+  `paseo ls -g` / `remote-paseo.mjs` / `git status` (guard hẹp đúng chủ ý), và
+  Peer vẫn bị chặn bởi luật Paseo-CLI sẵn có.
+
+**Đặt luật ở đâu — điều kiện đúng/sai, không phải dọn dẹp.** `policy-core.ts`
+ghi rõ: *"a rule that lives in only one adapter is a rule the other runtime
+silently lacks"*. Bản nháp đầu của PR này đặt guard chat trong adapter Pi, nên
+một `claude-lead` sẽ đi vòng qua nó chỉ bằng cách chọn provider khác. Luật đã
+được chuyển vào core; test parity (`claude-policy.test.mjs`,
+`claude-team-mcp.test.mjs`, `installer-contract.test.mjs`) giữ cho hai runtime
+không lệch nhau nữa.
 
 **Lệch so với plan, có chủ đích:** PR-A không dựng registry riêng như dự kiến —
 state file của Paseo (§1.4) đã có đủ, nên module chỉ đọc. Phần thưởng ngoài dự

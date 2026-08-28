@@ -32,9 +32,11 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 	assert.equal(await handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" }), null);
 
 	const listed = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+	// Parity with the Pi extension's registerTeamTools: a tool that exists on one
+	// runtime and not the other is a capability the other runtime silently lacks.
 	assert.deepEqual(
 		listed.result.tools.map((tool) => tool.name).sort(),
-		["peer_ask_lead", "team_watchdog"],
+		["peer_ask_lead", "team_chat", "team_watchdog"],
 	);
 	for (const tool of listed.result.tools) {
 		assert.equal(tool.inputSchema.type, "object");
@@ -76,6 +78,7 @@ assert.deepEqual(
 	TEAM_TOOLS.map((tool) => [tool.name, tool.roles]).sort(),
 	[
 		["peer_ask_lead", ["peer"]],
+		["team_chat", ["lead", "supervisor"]],
 		["team_watchdog", ["lead", "supervisor"]],
 	],
 );
@@ -98,7 +101,7 @@ assert.deepEqual(
 	const messages = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
 	assert.deepEqual(messages.map((message) => message.id), [1, 2, null, 3]);
 	assert.equal(messages[2].error.code, -32700, "a malformed line is answered, not fatal");
-	assert.equal(messages[3].result.tools.length, 2);
+	assert.equal(messages[3].result.tools.length, TEAM_TOOLS.length);
 }
 
 console.log("claude team mcp tests passed");

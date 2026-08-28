@@ -317,4 +317,37 @@ assert.match(described, /edit=true/);
 assert.match(describeClaudePolicy("peer", null), /brief=none/);
 assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 
+// --- chat CLI guard: runtime parity ------------------------------------------
+// The coordination channel is a typed tool on BOTH runtimes. If the redirect
+// lived only in the Pi adapter, picking a `claude-lead` provider would be a
+// one-line bypass of the envelope, the room allowlist and the size ceiling —
+// which is exactly the failure mode policy-core exists to prevent.
+{
+	const bash = (role, command) =>
+		claudeToolBlockReason({ role, toolName: "Bash", toolInput: { command }, brief: null });
+
+	assert.match(String(bash("lead", "paseo chat ls")), /team_chat/);
+	assert.match(String(bash("lead", "paseo chat post coord hi")), /team_chat/);
+	assert.match(String(bash("lead", "paseo.cmd chat read coord")), /team_chat/);
+	assert.match(String(bash("lead", "echo hi && paseo chat post r x")), /team_chat/);
+
+	// Narrow on purpose: this is a chat redirect, not a new CLI ban.
+	assert.equal(bash("lead", "paseo ls -g"), null);
+	assert.equal(bash("lead", "node scripts/remote-paseo.mjs health --host-id mac"), null);
+	assert.equal(bash("lead", "git status"), null);
+
+	// A Peer never had chat and still does not — via the blanket Paseo CLI block.
+	assert.match(String(bash("peer", "paseo chat ls")), /Paseo CLI from bash/);
+
+	// And the tool itself is Lead/Supervisor only on this runtime too.
+	assert.equal(
+		claudeToolBlockReason({ role: "peer", toolName: "mcp__paseo-team__team_chat", toolInput: {}, brief: null }),
+		"team_chat is restricted to Lead and Supervisor agents.",
+	);
+	assert.equal(
+		claudeToolBlockReason({ role: "lead", toolName: "mcp__paseo-team__team_chat", toolInput: {}, brief: null }),
+		null,
+	);
+}
+
 console.log("claude policy tests passed");

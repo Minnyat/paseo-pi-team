@@ -67,6 +67,11 @@ import {
 	teamToolBlockReason,
 	PEER_COMMUNICATION_TOOL,
 	TEAM_WATCHDOG_TOOL,
+	TEAM_CHAT_TOOL,
+	TEAM_CHAT_MAX_BODY_BYTES,
+	TEAM_MESSAGE_KIND_NAMES,
+	coordinationCliBlockReason,
+	teamChatToolBlockReason,
 	type ParsedTaskBrief,
 	type PeerMode,
 	type Policy,
@@ -137,6 +142,40 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 		async execute(_id, params, signal, _onUpdate, _ctx) {
 			if (r !== "lead" && r !== "supervisor") return { content: [{ type: "text", text: "team_watchdog is available only to Lead or Supervisor agents." }], details: undefined, isError: true };
 			const result = await runSupportScript("watchdog.mjs", [JSON.stringify(params ?? {})], signal, 130_000);
+			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
+		},
+	});
+	pi.registerTool({
+		name: TEAM_CHAT_TOOL,
+		label: "team_chat",
+		description:
+			"Coordinate with other Leads and Supervisors through a Paseo chat room. `post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; `read` returns the room with envelopes parsed; `rooms` lists rooms. Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. This is the only sanctioned chat path — the Paseo chat CLI is blocked.",
+		parameters: {
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["post", "read", "rooms"] },
+				room: { type: "string", maxLength: 128 },
+				kind: { type: "string", enum: [...TEAM_MESSAGE_KIND_NAMES] },
+				topic: { type: "string", maxLength: 128 },
+				message: { type: "string", minLength: 1, maxLength: TEAM_CHAT_MAX_BODY_BYTES },
+				to: { type: "array", items: { type: "string", maxLength: 136 }, minItems: 1, maxItems: 64 },
+				correlationId: { type: "string", maxLength: 128 },
+				replyTo: { type: "string", maxLength: 128 },
+				hop: { type: "integer", minimum: 0, maximum: 7 },
+				ttl: { type: "integer", minimum: 1, maximum: 8 },
+				since: { type: "string", maxLength: 64 },
+				limit: { type: "integer", minimum: 1, maximum: 500 },
+			},
+			required: ["action"],
+			additionalProperties: false,
+		} as any,
+		async execute(_id, params, signal, _onUpdate, _ctx) {
+			const blocked = teamChatToolBlockReason(r, TEAM_CHAT_TOOL);
+			if (blocked) return { content: [{ type: "text", text: blocked }], details: undefined, isError: true };
+			const { action, ...rest } = (params ?? {}) as Record<string, unknown>;
+			const command = action === "post" ? "post" : action === "read" ? "read" : "rooms";
+			const args = command === "rooms" ? [command] : [command, JSON.stringify(rest)];
+			const result = await runSupportScript("team-chat.mjs", args, signal);
 			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
 		},
 	});
@@ -325,6 +364,12 @@ export default function (pi: ExtensionAPI) {
 			const blockReason = mcpScriptBlockReason(r, code);
 			if (blockReason) {
 				return { block: true, reason: blockReason };
+			}
+		}
+		if ((r === "lead" || r === "supervisor") && isToolCallEventType("bash", event)) {
+			const chatReason = coordinationCliBlockReason(r, event.input.command ?? "");
+			if (chatReason) {
+				return { block: true, reason: chatReason };
 			}
 		}
 		if (r === "peer" && isToolCallEventType("bash", event)) {

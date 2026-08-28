@@ -92,6 +92,19 @@ export const LEAD_ALLOWED_MCP_TARGETS: string[] = [
 export const MCP_TOOLS = ["mcp", "mcp_script"];
 export const PEER_COMMUNICATION_TOOL = "peer_ask_lead";
 export const TEAM_WATCHDOG_TOOL = "team_watchdog";
+export const TEAM_CHAT_TOOL = "team_chat";
+/** Payload ceiling, kept in sync with scripts/team-chat.mjs MAX_BODY_BYTES. */
+export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
+/** Mirror of TEAM_MESSAGE_KINDS in scripts/team-chat.mjs (shapes tool schemas). */
+export const TEAM_MESSAGE_KIND_NAMES = [
+	"handoff",
+	"dependency",
+	"claim",
+	"release",
+	"question",
+	"decision",
+	"progress",
+] as const;
 export const PI_READ_ONLY = ["read", "bash", PEER_COMMUNICATION_TOOL];
 export const PI_WRITE = ["read", "write", "edit", "bash", PEER_COMMUNICATION_TOOL];
 
@@ -189,6 +202,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 						(tool) => tool !== PEER_COMMUNICATION_TOOL,
 					),
 					TEAM_WATCHDOG_TOOL,
+					TEAM_CHAT_TOOL,
 					...LEAD_ALLOWED_MCP_TARGETS,
 					...MCP_TOOLS,
 				],
@@ -196,7 +210,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 			};
 		case "supervisor":
 			return {
-				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
+				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
 				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
@@ -280,6 +294,41 @@ const PASEO_CLI_RE =
 
 export function callsPaseoCli(command: string): boolean {
 	return PASEO_CLI_RE.test(command);
+}
+
+/**
+ * `paseo chat ...` in a bash command, in any spelling the shims use.
+ *
+ * Chat is the coordination bus between Leads and Supervisors, and it is the one
+ * Paseo surface with no MCP tool behind it (60 tools, none of them chat --
+ * measured 2026-08-27). Left on bash it is a channel no policy can inspect: no
+ * room allowlist, no TEAM_MESSAGE_V1 envelope, no size ceiling, no audit.
+ */
+const PASEO_CHAT_CLI_RE =
+	/\b(paseo|paseo-pi|pio)(?:\.(?:cmd|exe|ps1|sh))?\s+chat\b/i;
+
+export function callsPaseoChatCli(command: string): boolean {
+	return PASEO_CHAT_CLI_RE.test(command);
+}
+
+/**
+ * Lead/Supervisor bash guard: redirect the chat CLI to the typed tool.
+ *
+ * Deliberately narrow -- a chat-only redirect, not a new CLI ban. Every other
+ * Paseo command a Lead runs from bash (remote-paseo.mjs, `ls`, status checks)
+ * is untouched. Peers are already covered by the blanket callsPaseoCli() block
+ * and are not this function's business.
+ *
+ * This lives in the CORE, not in an adapter: a Lead running on Claude must hit
+ * the same wall as a Lead running on Pi, or the guard is decoration.
+ */
+export function coordinationCliBlockReason(
+	role: TeamRole,
+	command: string,
+): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (!callsPaseoChatCli(command)) return null;
+	return `Use the team_chat tool instead of the Paseo chat CLI. The typed tool enforces the TEAM_MESSAGE_V1 envelope, the room allowlist, the ${TEAM_CHAT_MAX_BODY_BYTES}-byte payload ceiling and hop/TTL loop protection - none of which exist when the command is typed by hand.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,6 +1216,27 @@ export function teamToolBlockReason(
 	}
 	if (toolName === TEAM_WATCHDOG_TOOL && role !== "lead" && role !== "supervisor") {
 		return "team_watchdog is restricted to Lead and Supervisor agents.";
+	}
+	const chatReason = teamChatToolBlockReason(role, toolName);
+	if (chatReason) return chatReason;
+	return null;
+}
+
+/**
+ * Who may hold the coordination channel. A Peer coordinates with exactly one
+ * agent -- its parent Lead -- and has peer_ask_lead for that; a room would hand
+ * it a broadcast surface the parent cannot see.
+ *
+ * Called with a role alone it answers "may this role hold team_chat at all",
+ * which is what the runtime adapters ask before exposing the tool.
+ */
+export function teamChatToolBlockReason(
+	role: TeamRole,
+	toolName: string = TEAM_CHAT_TOOL,
+): string | null {
+	if (toolName !== TEAM_CHAT_TOOL) return null;
+	if (role !== "lead" && role !== "supervisor") {
+		return "team_chat is restricted to Lead and Supervisor agents.";
 	}
 	return null;
 }

@@ -1,11 +1,11 @@
-// claude-team-mcp.mjs — stdio MCP server exposing the pack's two team tools
+// claude-team-mcp.mjs — stdio MCP server exposing the pack's team tools
 // to Claude Code, which has no extension API to register tools directly.
 //
-// Pi gets `peer_ask_lead` and `team_watchdog` from the policy extension
-// (registerTeamTools). Claude gets the SAME two tools from this server, with
+// Pi gets `peer_ask_lead`, `team_watchdog` and `team_chat` from the policy
+// extension (registerTeamTools). Claude gets the SAME tools from this server, with
 // the same role gate and the same underlying support scripts, so a Peer talks
 // to its Lead identically on both runtimes. Claude sees them as
-// `mcp__paseo-team__peer_ask_lead` / `mcp__paseo-team__team_watchdog`.
+// `mcp__paseo-team__peer_ask_lead` / `__team_watchdog` / `__team_chat`.
 //
 // Zero dependencies on purpose (the pack ships no runtime deps): this speaks
 // the MCP stdio framing — one JSON-RPC message per line — directly.
@@ -67,6 +67,43 @@ export const TEAM_TOOLS = [
 				globalDeadlineMs: { type: "integer", minimum: 1000, maximum: 120000 },
 				commandTimeoutMs: { type: "integer", minimum: 250, maximum: 30000 },
 			},
+			additionalProperties: false,
+		},
+	},
+	{
+		name: "team_chat",
+		description:
+			"Coordinate with other Leads and Supervisors through a Paseo chat room. `post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; `read` returns the room with envelopes parsed; `rooms` lists rooms. Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. This is the only sanctioned chat path — the Paseo chat CLI is blocked on both runtimes.",
+		roles: ["lead", "supervisor"],
+		script: "team-chat.mjs",
+		timeoutMs: 30_000,
+		// `rooms` takes no payload; post/read carry theirs as one JSON argument,
+		// matching how the Pi extension invokes the same script.
+		buildArgs: (params) => {
+			const { action, ...rest } = params ?? {};
+			const command = action === "post" ? "post" : action === "read" ? "read" : "rooms";
+			return command === "rooms" ? [command] : [command, JSON.stringify(rest)];
+		},
+		inputSchema: {
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["post", "read", "rooms"] },
+				room: { type: "string", maxLength: 128 },
+				kind: {
+					type: "string",
+					enum: ["handoff", "dependency", "claim", "release", "question", "decision", "progress"],
+				},
+				topic: { type: "string", maxLength: 128 },
+				message: { type: "string", minLength: 1, maxLength: 8192 },
+				to: { type: "array", items: { type: "string", maxLength: 136 }, minItems: 1, maxItems: 64 },
+				correlationId: { type: "string", maxLength: 128 },
+				replyTo: { type: "string", maxLength: 128 },
+				hop: { type: "integer", minimum: 0, maximum: 7 },
+				ttl: { type: "integer", minimum: 1, maximum: 8 },
+				since: { type: "string", maxLength: 64 },
+				limit: { type: "integer", minimum: 1, maximum: 500 },
+			},
+			required: ["action"],
 			additionalProperties: false,
 		},
 	},

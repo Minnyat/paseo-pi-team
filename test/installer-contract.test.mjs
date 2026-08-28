@@ -188,7 +188,7 @@ for (const installer of ["install.sh", "install.ps1"]) {
     },
   );
   const tools = JSON.parse(handshake).result.tools.map((tool) => tool.name);
-  assert.deepEqual(tools.sort(), ["peer_ask_lead", "team_watchdog"]);
+  assert.deepEqual(tools.sort(), ["peer_ask_lead", "team_chat", "team_watchdog"]);
 }
 
 console.log("installer contract tests passed");

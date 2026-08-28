@@ -28,6 +28,7 @@ import {
 	ALL_PASEO_TOOLS,
 	callsAgentBrowserCli,
 	callsPaseoCli,
+	coordinationCliBlockReason,
 	extraTools,
 	gitAuthorityBlockReason,
 	isAgentBrowserMcpTarget,
@@ -270,6 +271,12 @@ export function claudeToolBlockReason(
 	}
 
 	if (classified.kind === "write" || classified.kind === "edit") return null;
+
+	if (classified.kind === "bash" && (role === "lead" || role === "supervisor")) {
+		// Same wall as the Pi adapter: a Lead on Claude must not be able to reach
+		// the chat CLI either, or the typed channel is decoration on one runtime.
+		return coordinationCliBlockReason(role, bashCommand(input.toolInput));
+	}
 
 	if (classified.kind === "bash" && role === "peer") {
 		const command = bashCommand(input.toolInput);
