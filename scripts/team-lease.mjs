@@ -24,14 +24,19 @@
  * by its own policy rather than trusted to be polite.
  */
 
-import {
+import { importPolicyCore, isEntrypoint } from "./lib-common.mjs";
+
+// Resolved at runtime, not by a static specifier: the installed layout puts the
+// core one directory level away from where a checkout puts it, and a static
+// import that is wrong there fails at IMPORT time — which the caller then
+// misreports as an unreadable lease ledger. See policyCorePath in lib-common.
+const {
 	LEASE_ACTIONS,
 	LEASE_MAX_TTL_MS,
 	leaseHolderFor,
 	normalizeScope,
 	resolveLeases,
-} from "../extensions/paseo-team-core/policy-core.ts";
-import { isEntrypoint } from "./lib-common.mjs";
+} = await importPolicyCore();
 import { postTeamMessage, readRoom, runPaseo } from "./team-chat.mjs";
 
 /** The room that holds the ledger. One room, so the total order is global. */

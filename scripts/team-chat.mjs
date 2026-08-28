@@ -294,19 +294,83 @@ export function parseTeamMessage(text) {
  * the message `{`. Prefer the structured message when the output is JSON, and
  * otherwise fall back to the first line that carries actual words.
  */
+/**
+ * The first complete JSON object in a blob of CLI output, or null.
+ *
+ * Slicing from the first `{` to the END of the text was wrong in the one case
+ * that always happens: runPaseo concatenates stderr, stdout AND the spawn
+ * error message, so the JSON is followed by `Command failed: paseo ...`, the
+ * parse throws, and the caller falls back to the first line with letters in it
+ * — reporting the failure as `"error": {`. That is the same unreadable answer
+ * the line-scan fallback was written to prevent, one line lower down.
+ *
+ * Depth counting, string-aware, so a brace inside a message value cannot end
+ * the object early.
+ */
+function firstJsonObject(raw) {
+	const start = raw.indexOf("{");
+	if (start < 0) return null;
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let i = start; i < raw.length; i += 1) {
+		const char = raw[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') inString = true;
+		else if (char === "{") depth += 1;
+		else if (char === "}") {
+			depth -= 1;
+			if (depth === 0) {
+				try {
+					return JSON.parse(raw.slice(start, i + 1));
+				} catch {
+					return null;
+				}
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Turn a parsed Paseo error object into one line a Lead can act on.
+ *
+ * Measured against the real daemon: a failing `chat read` answers
+ *   { error: { name, requestId, requestType, code } }
+ * with **no `message` field at all**. Reading only `message` therefore found
+ * nothing, fell through to the line scan, and reported the failure as
+ * `"error": {` — while the one word that mattered, `chat_room_not_found`, was
+ * sitting in `code`. So `code` is a first-class source here, not a fallback.
+ */
+function describeCliError(json) {
+	const error = json?.error;
+	const pick = (value) =>
+		typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+
+	const message = pick(error?.message) ?? pick(json?.message);
+	if (message) return message;
+	if (typeof error === "string") return error.trim() || null;
+
+	const code = pick(error?.code) ?? pick(json?.code);
+	if (code) {
+		const where = pick(error?.requestType);
+		return where ? `${code} (${where})` : code;
+	}
+	return pick(error?.name) ?? null;
+}
+
 export function cliErrorMessage(text) {
 	const raw = String(text ?? "").trim();
 	if (raw === "") return "paseo chat failed";
-	const start = raw.indexOf("{");
-	if (start >= 0) {
-		try {
-			const parsed = JSON.parse(raw.slice(start));
-			const message =
-				parsed?.error?.message ?? parsed?.message ?? parsed?.error ?? null;
-			if (typeof message === "string" && message.trim() !== "") return message.trim();
-		} catch {
-			// Not JSON after all — fall through to the line scan.
-		}
+	const json = firstJsonObject(raw);
+	if (json) {
+		const described = describeCliError(json);
+		if (described) return described;
 	}
 	const informative = raw
 		.split("\n")

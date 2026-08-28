@@ -12,7 +12,7 @@
 
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
  * True when `moduleUrl` is the process entrypoint.
@@ -210,4 +210,47 @@ export function compareOcrVersions(a, b) {
 		if (delta !== 0) return delta < 0 ? -1 : 1;
 	}
 	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Locating the shared policy core from a support script.
+//
+// The two layouts differ by one directory level, and the difference is not
+// cosmetic — a static `../extensions/paseo-team-core/...` import resolves
+// correctly in a checkout and resolves to nothing in an installed tree:
+//
+//   checkout   scripts/team-lease.mjs            -> ../extensions/paseo-team-core/
+//   installed  <ext>/paseo-team-scripts/team-...  -> <ext>/paseo-team-core/
+//
+// A script that gets this wrong does not fail visibly: it throws at IMPORT
+// time, the extension's guard sees a failed support script, and the guard's
+// own fail-closed branch reports something else entirely (a Lead that cannot
+// staff any writer, blamed on an unreadable lease ledger). So the resolution
+// lives here, next to every consumer, and installer-contract.test.mjs runs the
+// installed copies to prove it.
+// ---------------------------------------------------------------------------
+
+const POLICY_CORE_DIR = "paseo-team-core";
+
+/** Absolute path to a policy-core module, in either layout. */
+export function policyCorePath(name, env = process.env, here = dirname(fileURLToPath(import.meta.url))) {
+	const configured = env.PASEO_TEAM_POLICY_DIR?.trim();
+	const candidates = configured
+		? [join(configured, name)]
+		: [
+				join(here, "..", POLICY_CORE_DIR, name),
+				join(here, "..", "extensions", POLICY_CORE_DIR, name),
+			];
+	const found = candidates.find((candidate) => existsSync(candidate));
+	if (!found) {
+		throw new Error(
+			`Paseo team policy module is missing: ${name} (looked in ${candidates.join(", ")})`,
+		);
+	}
+	return found;
+}
+
+/** Import a policy-core module by name, from whichever layout is installed. */
+export function importPolicyCore(name = "policy-core.ts", env = process.env) {
+	return import(pathToFileURL(policyCorePath(name, env)).href);
 }

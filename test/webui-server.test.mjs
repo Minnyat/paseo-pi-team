@@ -30,6 +30,12 @@ import {
 	const graph = await handleApi({ method: "GET", pathname: "/api/graph", query: { all: "1", maxInspect: "8" }, exec: echo });
 	assert.deepEqual(graph.args, ["graph", "--all", "--max-inspect", "8"]);
 
+	// The coordination view: chat rooms are opt-in and reach argv only after a
+	// pattern check, so a WebUI field can never grow into a command-line
+	// injection point.
+	const withChat = await handleApi({ method: "GET", pathname: "/api/graph", query: { withChat: "leases,coord" }, exec: echo });
+	assert.deepEqual(withChat.args, ["graph", "--with-chat", "leases,coord"]);
+
 	const agents = await handleApi({ method: "GET", pathname: "/api/agents", query: {}, exec: echo });
 	assert.deepEqual(agents.args, ["agents"], "a missing flag is absent, never the string 'undefined'");
 }
@@ -50,6 +56,8 @@ import {
 	await rejects("/api/skill", { name: "../secret" });
 	await rejects("/api/chat/read", { room: "a room with spaces" });
 	await rejects("/api/graph", { maxInspect: "99999" });
+	await rejects("/api/graph", { withChat: "leases; rm -rf /" });
+	await rejects("/api/graph", { withChat: "a,b,c,d,e,f,g,h,i" });
 	await rejects("/api/permits/decide", {}, "POST", JSON.stringify({ action: "approve-all", agentId: "aaaaaaaa", requestId: "r" }));
 	await rejects("/api/permits/decide", {}, "POST", JSON.stringify({ action: "allow", agentId: "; rm -rf /", requestId: "r" }));
 

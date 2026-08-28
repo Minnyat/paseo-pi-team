@@ -280,6 +280,43 @@ await assert.rejects(
 	assert.match(cliErrorMessage('{"message":"boom"}'), /boom/);
 	assert.match(cliErrorMessage("plain failure text"), /plain failure text/);
 	assert.match(cliErrorMessage("\n\n  spaced failure  \n"), /spaced failure/);
+	// The shape the REAL daemon answers with, captured 2026-08-28 from
+	// `paseo chat read leases --json` against a machine with no leases room:
+	// runPaseo concatenates stderr + stdout + the spawn error, so the JSON is
+	// followed by `Command failed: ...` AND repeated. Two separate bugs met here:
+	//   - slicing from the first `{` to the END of the text made JSON.parse throw
+	//     on that trailing line;
+	//   - the error object has NO `message` field at all — the one word that
+	//     mattered, `chat_room_not_found`, was sitting in `code`.
+	// Both fell through to the line scan, which reported the failure as
+	// `"error": {`: the same unreadable answer the fallback exists to prevent.
+	const realFailure = [
+		"{",
+		'  "error": {',
+		'    "name": "DaemonRpcError",',
+		'    "requestId": "641720a1-8f89-4261-b84c-7911d9cdb7b7",',
+		'    "requestType": "chat/read",',
+		'    "code": "chat_room_not_found"',
+		"  }",
+		"}",
+		"",
+		"",
+		"Command failed: node index.js chat read leases --json",
+		"{",
+		'  "error": { "code": "chat_room_not_found" }',
+		"}",
+	].join("\n");
+	assert.equal(cliErrorMessage(realFailure), "chat_room_not_found (chat/read)");
+
+	// A `message` still wins when the daemon sends one.
+	assert.match(
+		cliErrorMessage('{"error":{"code":"x","message":"room is full"}}\nCommand failed: ...'),
+		/room is full/,
+	);
+	// Nothing but a name is still better than a brace.
+	assert.equal(cliErrorMessage('{"error":{"name":"DaemonRpcError"}}'), "DaemonRpcError");
+	// A brace inside a string value must not end the object early.
+	assert.equal(cliErrorMessage('{"error":{"message":"bad } brace"}}\ntrailing'), "bad } brace");
 	// Unparseable JSON still beats a lone brace: return something a human can act on.
 	assert.ok(cliErrorMessage("{\n  not json at all").length > 1);
 	assert.ok(cliErrorMessage("").length > 0, "even an empty failure gets a name");

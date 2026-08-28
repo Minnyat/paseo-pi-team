@@ -490,4 +490,98 @@ function fakeRunner(overrides = {}) {
 	);
 }
 
+// --- PR-D: jurisdiction is visible on the board ----------------------------
+// The policy already refuses on an overlap; an operator who cannot SEE the
+// overlap has no way to find out why every Lead underneath went quiet.
+{
+	const seats = [
+		{ id: "sup-a", shortId: "sup-a", name: "sup A", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+		{ id: "sup-b", shortId: "sup-b", name: "sup B", provider: "claude-supervisor/m", status: "idle", cwd: "/w" },
+		{ id: "sup-c", shortId: "sup-c", name: "sup C", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+		{ id: "lead-1", shortId: "lead-1", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		{ id: "peer-1", shortId: "peer-1", name: "peer", provider: "pi-peer/o/m", status: "running", cwd: "/w" },
+	];
+	const graph = buildGraph({
+		agents: seats,
+		states: {
+			"sup-a": { agentId: "sup-a", domain: "backend" },
+			"sup-b": { agentId: "sup-b", domain: "backend.auth" },
+			"sup-c": { agentId: "sup-c", domain: "frontend" },
+			"lead-1": { agentId: "lead-1", domain: "backend.auth" },
+			"peer-1": { agentId: "peer-1", domain: null },
+		},
+		now: 0,
+	});
+	const { conflicts, unlabeled, supervisors } = graph.jurisdiction;
+	assert.equal(supervisors.length, 3);
+	assert.equal(conflicts.length, 1, "backend contains backend.auth, so A and B collide");
+	assert.deepEqual(conflicts[0].agents.sort(), ["sup-a", "sup-b"]);
+	assert.match(conflicts[0].detail, /overlapping jurisdiction/i);
+	assert.equal(
+		unlabeled.length,
+		0,
+		"an unlabelled PEER is not a governance gap — only Leads and Supervisors are",
+	);
+	assert.equal(graph.counts.byDomain["backend.auth"], 2);
+
+	// Spelling must not decide who collides: `Backend/Auth` is the same seat.
+	const spelled = buildGraph({
+		agents: seats.slice(0, 2),
+		states: {
+			"sup-a": { agentId: "sup-a", domain: "Backend" },
+			"sup-b": { agentId: "sup-b", domain: "backend/auth" },
+		},
+		now: 0,
+	});
+	assert.equal(spelled.jurisdiction.conflicts.length, 1);
+
+	// Disjoint domains are the normal, healthy case.
+	const clean = buildGraph({
+		agents: seats.slice(0, 3).filter((seat) => seat.id !== "sup-b"),
+		states: {
+			"sup-a": { agentId: "sup-a", domain: "backend" },
+			"sup-c": { agentId: "sup-c", domain: "frontend" },
+		},
+		now: 0,
+	});
+	assert.equal(clean.jurisdiction.conflicts.length, 0);
+
+	// A Lead with no domain cannot be governed under multi; say so.
+	const unlabelled = buildGraph({
+		agents: [seats[3]],
+		states: {},
+		now: 0,
+	});
+	assert.equal(unlabelled.jurisdiction.unlabeled.length, 1);
+	assert.equal(unlabelled.jurisdiction.unlabeled[0].role, "lead");
+}
+
+// --- PR-E: a fork is lineage the board must show ---------------------------
+// An imported fork is a ROOT agent (paseo import leaves ParentAgentId null), so
+// without an explicit edge two Leads holding the very same transcript render as
+// strangers — which is precisely the state an operator must not misread.
+{
+	const graph = buildGraph({
+		agents: [
+			{ id: "lead-a", shortId: "lead-a", name: "A", provider: "pi-lead/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead-b", shortId: "lead-b", name: "B", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+			{ id: "lead-c", shortId: "lead-c", name: "C", provider: "pi-lead/o/m", status: "idle", cwd: "/w" },
+		],
+		states: {
+			"lead-b": { agentId: "lead-b", forkOf: "lead-a" },
+			// Forked from an agent this listing does not cover (archived, other
+			// host): no edge to draw, and no crash either.
+			"lead-c": { agentId: "lead-c", forkOf: "gone" },
+		},
+		now: 0,
+	});
+	const forks = graph.edges.filter((edge) => edge.type === "fork");
+	assert.equal(forks.length, 1);
+	assert.deepEqual(
+		{ from: forks[0].from, to: forks[0].to, confidence: forks[0].confidence },
+		{ from: "lead-a", to: "lead-b", confidence: "confirmed" },
+	);
+	assert.equal(graph.nodes.find((node) => node.id === "lead-c").forkOf, "gone");
+}
+
 console.log("graph tests passed");

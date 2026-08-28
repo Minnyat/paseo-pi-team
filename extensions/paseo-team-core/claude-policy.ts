@@ -30,8 +30,12 @@ import {
 	callsPaseoCli,
 	coordinationCliBlockReason,
 	leaseBlockReason,
+	sendAgentPromptBlockReason,
+	sendAgentPromptTargetId,
 	teamLeaseToolBlockReason,
+	type AgentOwnership,
 	type LeaseHolder,
+	type TeamTopology,
 	supportScriptBlockReason,
 	writerScopeFromCreateAgent,
 	extraTools,
@@ -193,6 +197,13 @@ export interface ClaudeToolDecisionInput {
 	leases?: Map<string, LeaseHolder> | null;
 	/** This agent's own Paseo id, to match against the lease holder. */
 	selfAgentId?: string | null;
+	/** PR-D governance. Defaults keep the single-supervisor behaviour exactly. */
+	topology?: TeamTopology;
+	/** This seat's own `team.domain`, for the lead-recovery jurisdiction gate. */
+	selfDomain?: string | null;
+	/** Ownership of a send_agent_prompt target, resolved by the hook. Undefined
+	 *  means "not needed"; null means "could not be resolved" (fail-closed). */
+	promptTarget?: AgentOwnership | null;
 }
 
 function bashCommand(toolInput: unknown): string {
@@ -261,10 +272,25 @@ export function claudeToolBlockReason(
 				: `"${target}" is not in the ${role} MCP allowlist (discovery, workspace, monitoring, orchestration, permissions).`;
 		}
 		if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
-			return supervisorCreateAgentArgsBlockReason(input.toolInput);
+			return supervisorCreateAgentArgsBlockReason(input.toolInput, {
+				topology: input.topology ?? "single",
+				selfDomain: input.selfDomain ?? null,
+			});
 		}
 		if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 			return leadCreateWorkspaceArgsBlockReason(input.toolInput);
+		}
+		// Same ownership wall the Pi adapter puts in front of send_agent_prompt:
+		// a Lead that can prompt another Lead's Peer bypasses that Lead's brief,
+		// its authority accounting and its scope lease.
+		if (matchesPaseoToolName(target, ["send_agent_prompt"])) {
+			return sendAgentPromptBlockReason({
+				role,
+				selfAgentId: input.selfAgentId ?? null,
+				targetId: sendAgentPromptTargetId(input.toolInput),
+				target: input.promptTarget ?? null,
+				topology: input.topology ?? "single",
+			});
 		}
 		return null;
 	}

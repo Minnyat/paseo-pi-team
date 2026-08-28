@@ -276,6 +276,10 @@ chiếu với `roleProfiles` mà `paseo-team status` đã trả về.
   per-agent vẫn chưa làm.
 - **PR-5 — Multi-host** — *chưa*: host selector qua `remote-paseo.mjs`, endpoint
   bí mật không rời server.
+- **Governance (PR-D) + bàn giao (PR-E)** — *xong* trong tab Team graph: lọc
+  theo `team.domain`, băng cảnh báo chồng lấn jurisdiction, ô "Phòng chat" đẩy
+  `--with-chat`, cạnh `fork` cho phiên bàn giao. Chi tiết:
+  `docs/multi-supervisor-topology.md` §4.
 
 Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge permit + cạnh
 **message** (từ chat room) đều là dữ liệu thật; cạnh message suy-đoán-từ-log

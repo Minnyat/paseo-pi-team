@@ -20,6 +20,12 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import {
+	isAgentId,
+	paseoAgentsRoot,
+	readAgentStates,
+	readAllAgentStates,
+} from "./agent-directory.ts";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,6 +77,16 @@ export const PASEO_TOOLS = {
 	 * NOT get these (permission answers are an authority act, not monitoring).
 	 */
 	permissions: ["list_pending_permissions", "respond_to_permission"],
+	/**
+	 * A heartbeat sends a prompt back into THIS conversation on a cron cadence.
+	 * It is the native answer to "check on things periodically", and it is what
+	 * the Supervisor's observation loop must use: Paseo's own guidance is
+	 * "Don't poll list_agents or get_agent_status to 'check on' a running
+	 * agent", and a polling loop burns the Supervisor's context on rounds that
+	 * observe nothing. `create_schedule` is deliberately NOT here — it starts a
+	 * fresh AGENT on a cron, which is orchestration, not observation.
+	 */
+	heartbeat: ["create_heartbeat", "delete_heartbeat"],
 } as const;
 
 export const ALL_PASEO_TOOLS: string[] = [
@@ -78,6 +94,7 @@ export const ALL_PASEO_TOOLS: string[] = [
 	...PASEO_TOOLS.workspace,
 	...PASEO_TOOLS.monitoring,
 	...PASEO_TOOLS.orchestration,
+	...PASEO_TOOLS.heartbeat,
 ];
 
 export const LEAD_ALLOWED_MCP_TARGETS: string[] = [
@@ -86,6 +103,7 @@ export const LEAD_ALLOWED_MCP_TARGETS: string[] = [
 	...PASEO_TOOLS.monitoring,
 	...PASEO_TOOLS.orchestration,
 	...PASEO_TOOLS.permissions,
+	...PASEO_TOOLS.heartbeat,
 ];
 
 /** pi-mcp-adapter proxy tools — Paseo tools are reached through the `mcp` tool. */
@@ -94,6 +112,7 @@ export const PEER_COMMUNICATION_TOOL = "peer_ask_lead";
 export const TEAM_WATCHDOG_TOOL = "team_watchdog";
 export const TEAM_CHAT_TOOL = "team_chat";
 export const TEAM_LEASE_TOOL = "team_lease";
+export const TEAM_FORK_TOOL = "team_fork";
 /** Payload ceiling, kept in sync with scripts/team-chat.mjs MAX_BODY_BYTES. */
 export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
 /** Mirror of TEAM_MESSAGE_KINDS in scripts/team-chat.mjs (shapes tool schemas). */
@@ -159,6 +178,10 @@ export const SUPERVISOR_MONITORING_TARGETS: string[] = [
 export const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
 	...SUPERVISOR_MONITORING_TARGETS,
 	"create_agent",
+	// The observation loop runs on a heartbeat rather than on a poll: it costs
+	// one tool call to arm and then wakes the Supervisor on a cadence, instead
+	// of spending the Supervisor's context on rounds that observe nothing.
+	...PASEO_TOOLS.heartbeat,
 ];
 
 /**
@@ -167,7 +190,10 @@ export const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
  * only runs on direct `mcp` proxy calls). Supervisor mcp_script is already
  * hard-denied at the policy level — this is defense in depth only.
  */
-const SUPERVISOR_MCP_SCRIPT_TARGETS: string[] = SUPERVISOR_MONITORING_TARGETS;
+const SUPERVISOR_MCP_SCRIPT_TARGETS: string[] = [
+	...SUPERVISOR_MONITORING_TARGETS,
+	...PASEO_TOOLS.heartbeat,
+];
 
 /**
  * The Lead's mcp_script surface, for the same reason the Supervisor has one:
@@ -216,6 +242,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 					TEAM_WATCHDOG_TOOL,
 					TEAM_CHAT_TOOL,
 					TEAM_LEASE_TOOL,
+					TEAM_FORK_TOOL,
 					...LEAD_ALLOWED_MCP_TARGETS,
 					...MCP_TOOLS,
 				],
@@ -223,7 +250,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 			};
 		case "supervisor":
 			return {
-				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, TEAM_LEASE_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
+				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, TEAM_LEASE_TOOL, TEAM_FORK_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
 				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
@@ -790,6 +817,612 @@ function extractMcpArgs(input: unknown): unknown {
 const SUPERVISOR_RECOVERY_PURPOSES = new Set(["recovery", "bootstrap"]);
 
 // ---------------------------------------------------------------------------
+// PR-D — governance across MORE THAN ONE supervisor.
+//
+// With one Supervisor and one Lead, "who governs this Lead" needed no answer.
+// With several, three separate questions appear and each of them is answered
+// here so both runtimes answer it the same way:
+//
+//   1. may this Supervisor decide FOR this Lead?          (jurisdiction)
+//   2. may this Supervisor recover THAT Lead?             (recovery_for)
+//   3. may this agent prompt THAT agent?                  (ownership)
+//
+// All three are gated on PASEO_TEAM_TOPOLOGY. The single-supervisor pack is
+// running in production today and none of these rules can be satisfied by a
+// deployment that never labelled anything, so `multi` is opt-in — see
+// docs/multi-supervisor-topology.md §4.
+// ---------------------------------------------------------------------------
+
+export type TeamTopology = "single" | "multi";
+
+/**
+ * Which topology's rules apply.
+ *
+ * Unset and `single` mean the pre-PR-D behaviour. Anything ELSE — including a
+ * typo — resolves to `multi`, because every rule `multi` adds only ever DENIES:
+ * mis-reading "mult" as multi costs a Lead one blocked call with an explicit
+ * reason, while mis-reading it as single silently turns governance off on a
+ * cluster whose operator believed it was on.
+ */
+export function teamTopology(
+	env: Record<string, string | undefined> = process.env,
+): TeamTopology {
+	const raw = env.PASEO_TEAM_TOPOLOGY?.trim().toLowerCase();
+	if (!raw || raw === "single") return "single";
+	return "multi";
+}
+
+/** Label carrying a seat's jurisdiction; mirrors agent-directory.ts. */
+export const TEAM_DOMAIN_LABEL = "team.domain";
+
+const DOMAIN_SEGMENT = /^[a-z0-9][a-z0-9_-]*$/;
+const DOMAIN_MAX_LENGTH = 128;
+const DOMAIN_MAX_SEGMENTS = 8;
+/** The root jurisdiction: one supervisor over everything. */
+export const DOMAIN_ROOT = "*";
+
+/**
+ * Canonical spelling of a domain, so who governs never depends on how it was
+ * typed. Hierarchical like a scope — `backend` contains `backend.auth` — and
+ * accepting `/` as a separator because half the humans writing these labels
+ * think in paths.
+ */
+export function normalizeDomain(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (trimmed === "") return null;
+	if (trimmed.length > DOMAIN_MAX_LENGTH) return null;
+	if (trimmed === DOMAIN_ROOT) return DOMAIN_ROOT;
+	const segments = trimmed
+		.toLowerCase()
+		.replace(/[/\\]/g, ".")
+		.split(".")
+		.filter((segment) => segment !== "");
+	if (segments.length === 0 || segments.length > DOMAIN_MAX_SEGMENTS) {
+		return null;
+	}
+	if (!segments.every((segment) => DOMAIN_SEGMENT.test(segment))) return null;
+	return segments.join(".");
+}
+
+/**
+ * Whether `outer` governs `inner`. Segment-wise, so `backend` does not swallow
+ * `backendops`, and `*` covers everything.
+ */
+export function domainCovers(outer: unknown, inner: unknown): boolean {
+	const a = normalizeDomain(outer);
+	const b = normalizeDomain(inner);
+	if (!a || !b) return false;
+	if (a === DOMAIN_ROOT) return true;
+	if (b === DOMAIN_ROOT) return false;
+	if (a === b) return true;
+	return b.startsWith(`${a}.`);
+}
+
+/** Whether two jurisdictions can collide — either one governs the other. */
+export function domainConflicts(a: unknown, b: unknown): boolean {
+	return domainCovers(a, b) || domainCovers(b, a);
+}
+
+// ---------------------------------------------------------------------------
+// The supervisor's own output contract, parsed
+// ---------------------------------------------------------------------------
+
+export const SUPERVISOR_OBSERVATION_HEADER = "SUPERVISOR_OBSERVATION";
+export const SUPERVISOR_DECISION_HEADER = "SUPERVISOR_DECISION";
+
+export interface SupervisorBlock {
+	/** `decision` only when a SUPERVISOR_DECISION sub-block is actually filled. */
+	kind: "observation" | "decision";
+	/** Normalized DOMAIN, or null when absent/unparseable. */
+	domain: string | null;
+	rawDomain: string | null;
+	/** Uppercase FIELD → first occurrence value, top level and sub-block alike. */
+	fields: Map<string, string>;
+	malformed: string[];
+}
+
+const SUPERVISOR_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
+
+/**
+ * Parse a SUPERVISOR_OBSERVATION message.
+ *
+ * The header must be a line of its OWN — the words appear in prose all over
+ * this repo's prompts, and a mention of the contract is not an instance of it.
+ * Fail-closed in the same shape as the V3 brief parser: a duplicate or
+ * unparseable field becomes an entry in `malformed` rather than a quiet
+ * best-effort value, because the receiving Lead is about to act on it.
+ */
+export function parseSupervisorBlock(prompt: unknown): SupervisorBlock | null {
+	if (typeof prompt !== "string" || prompt.trim() === "") return null;
+	const lines = prompt.split(/\r?\n/);
+	const start = lines.findIndex(
+		(line) => line.trim() === SUPERVISOR_OBSERVATION_HEADER,
+	);
+	if (start < 0) return null;
+
+	const fields = new Map<string, string>();
+	const malformed: string[] = [];
+	let rawDomain: string | null = null;
+	let sawDecisionHeading = false;
+	let decisionValue = "";
+
+	for (const line of lines.slice(start + 1)) {
+		const trimmed = line.trim();
+		if (trimmed === "") continue;
+		if (trimmed === SUPERVISOR_OBSERVATION_HEADER) break;
+		const match = SUPERVISOR_FIELD_RE.exec(trimmed);
+		if (!match) continue;
+		const key = match[1] as string;
+		const value = (match[2] ?? "").trim();
+		if (key === SUPERVISOR_DECISION_HEADER) {
+			sawDecisionHeading = true;
+			continue;
+		}
+		if (fields.has(key)) {
+			malformed.push(`duplicate field ${key}`);
+			continue;
+		}
+		fields.set(key, value);
+		if (key === "DECISION") decisionValue = value;
+		if (key === "DOMAIN") rawDomain = value;
+	}
+
+	const domain = rawDomain === null ? null : normalizeDomain(rawDomain);
+	if (rawDomain === "") {
+		malformed.push("DOMAIN is present but empty");
+	} else if (rawDomain !== null && domain === null) {
+		malformed.push(
+			`DOMAIN is not a valid jurisdiction: ${JSON.stringify(rawDomain)}`,
+		);
+	}
+
+	const kind: SupervisorBlock["kind"] =
+		sawDecisionHeading && decisionValue !== "" ? "decision" : "observation";
+	// The supervisor prompt forbids self-deciding anything irreversible. A block
+	// that says so about itself is not a borderline call, it is the contract
+	// being violated in writing.
+	if (
+		kind === "decision" &&
+		(fields.get("REVERSIBILITY") ?? "").toLowerCase() === "irreversible"
+	) {
+		malformed.push(
+			"SUPERVISOR_DECISION is marked REVERSIBILITY: irreversible — an irreversible matter is the Human's, never a delegated decision",
+		);
+	}
+	return { kind, domain, rawDomain, fields, malformed };
+}
+
+export interface SupervisorSeat {
+	agentId: string;
+	domain: string | null;
+}
+
+export interface JurisdictionVerdict {
+	ok: boolean;
+	/** `refuse` for a decision, `warn` for a bare observation. */
+	severity: "accept" | "warn" | "refuse";
+	code: string;
+	reason: string;
+}
+
+/**
+ * May this supervisor message govern this Lead?
+ *
+ * Returns null when there is nothing to judge (single topology, or a prompt
+ * that is not a supervisor block at all). Otherwise it always returns a verdict
+ * — including the accepting one — so an adapter can put the answer in front of
+ * the Lead either way.
+ *
+ * A DECISION is refused; a bare OBSERVATION is only flagged. That asymmetry is
+ * the point: an observation from the wrong supervisor is noise the Lead should
+ * discount, while a decision from the wrong supervisor is an authority the Lead
+ * would otherwise act on.
+ */
+export function supervisorJurisdictionVerdict({
+	block,
+	leadDomain,
+	supervisors,
+	fromAgentId,
+	topology,
+}: {
+	block: SupervisorBlock | null;
+	leadDomain: string | null | undefined;
+	supervisors: SupervisorSeat[];
+	fromAgentId: string | null | undefined;
+	topology: TeamTopology;
+}): JurisdictionVerdict | null {
+	if (topology !== "multi") return null;
+	if (!block) return null;
+	const severity: JurisdictionVerdict["severity"] =
+		block.kind === "decision" ? "refuse" : "warn";
+	const verdict = (code: string, reason: string): JurisdictionVerdict => ({
+		ok: false,
+		severity,
+		code,
+		reason,
+	});
+
+	if (block.malformed.length > 0) {
+		return verdict(
+			"SUPERVISOR_BLOCK_MALFORMED",
+			`The supervisor block is malformed and cannot carry authority: ${block.malformed.join("; ")}. Ask the Supervisor to resend it; do not act on it.`,
+		);
+	}
+	if (!block.domain) {
+		return verdict(
+			"JURISDICTION_UNDECLARED",
+			"The supervisor block declares no DOMAIN, so which seat it speaks for cannot be established. Under PASEO_TEAM_TOPOLOGY=multi every observation and decision must name its jurisdiction.",
+		);
+	}
+	const own = normalizeDomain(leadDomain);
+	if (!own) {
+		return verdict(
+			"JURISDICTION_UNVERIFIABLE",
+			`This Lead carries no ${TEAM_DOMAIN_LABEL} of its own, so a claim of jurisdiction over it cannot be checked. Ask the Human to label this seat before acting on supervisor decisions.`,
+		);
+	}
+	if (!domainCovers(block.domain, own)) {
+		return verdict(
+			"JURISDICTION_MISMATCH",
+			`The supervisor speaks for "${block.domain}", which does not cover this Lead's domain "${own}". Refuse the decision and refer the Supervisor to the Lead that owns "${block.domain}".`,
+		);
+	}
+	const covering = (supervisors ?? []).filter(
+		(seat) =>
+			seat &&
+			normalizeDomain(seat.domain) !== null &&
+			domainConflicts(seat.domain, own),
+	);
+	// An unattributed message (no FROM_AGENT_ID) is not automatically an overlap:
+	// with exactly ONE Supervisor covering this Lead there is nobody it could be
+	// contending with, whoever wrote it. Treating "I do not know who sent this"
+	// as a conflict would refuse every decision on a perfectly ordinary
+	// single-Supervisor domain — a false alarm that teaches the Lead to ignore
+	// the real one.
+	const contenders = fromAgentId
+		? covering.filter((seat) => seat.agentId !== fromAgentId)
+		: covering;
+	if (contenders.length > (fromAgentId ? 0 : 1)) {
+		return verdict(
+			"JURISDICTION_OVERLAP",
+			`More than one Supervisor claims jurisdiction over "${own}": ${[...(fromAgentId ? [fromAgentId] : []), ...contenders.map((seat) => seat.agentId)].join(", ")}. Overlapping jurisdiction is fail-closed — escalate to the Human to settle which seat governs this Lead before acting on this message.`,
+		);
+	}
+	return {
+		ok: true,
+		severity: "accept",
+		code: "JURISDICTION_OK",
+		reason: `Supervisor jurisdiction "${block.domain}" covers this Lead's domain "${own}".`,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Ownership — who may prompt whom
+// ---------------------------------------------------------------------------
+
+export interface AgentOwnership {
+	agentId: string;
+	parentAgentId: string | null;
+	provider: string | null;
+	role: TeamRole | null;
+	domain: string | null;
+}
+
+/**
+ * The agentId a `send_agent_prompt` call is aimed at, whichever runtime shape
+ * it arrives in (Claude passes the args as the tool input, Pi wraps them in
+ * `{ tool, args }` and may deliver `args` as a JSON string).
+ */
+export function sendAgentPromptTargetId(input: unknown): string | null {
+	const direct =
+		input && typeof input === "object"
+			? (input as Record<string, unknown>).agentId
+			: undefined;
+	if (typeof direct === "string" && direct.trim() !== "") return direct.trim();
+	const args = extractMcpArgs(input);
+	if (!args || typeof args !== "object") return null;
+	const value = (args as Record<string, unknown>).agentId;
+	return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/**
+ * Whether this agent may prompt that agent.
+ *
+ * Measured constraint (§1.11): `send_agent_prompt` has no argument guard, so
+ * with several Leads any Lead could drive another Lead's Peer — bypassing that
+ * Lead's brief, its authority accounting and its scope lease entirely. Two
+ * targets stay legitimate: an agent this seat owns, and another COORDINATOR
+ * (Lead or Supervisor), because coordinator-to-coordinator traffic is the whole
+ * point of a multi-supervisor topology.
+ *
+ * Fail-closed on an unresolvable target. Parentage is a declared label, not an
+ * authenticated fact (§1.10), so this guards against mistakes and drift — not
+ * against an agent that sets out to forge one.
+ */
+export function sendAgentPromptBlockReason({
+	role,
+	selfAgentId,
+	targetId,
+	target,
+	topology,
+}: {
+	role: TeamRole;
+	selfAgentId: string | null | undefined;
+	targetId: string | null | undefined;
+	target: AgentOwnership | null;
+	topology: TeamTopology;
+}): string | null {
+	if (topology !== "multi") return null;
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (!targetId) {
+		return "BLOCKED: PROMPT_TARGET_MISSING — send_agent_prompt was called without an agentId, so the target cannot be checked against this seat's ownership.";
+	}
+	if (selfAgentId && targetId === selfAgentId) return null;
+	if (!target) {
+		return `BLOCKED: PROMPT_TARGET_UNKNOWN — Paseo has no readable state for agent ${targetId}, so it cannot be shown to belong to this seat. Confirm the id with list_agents, or reach its owner through team_chat.`;
+	}
+	if (selfAgentId && target.parentAgentId === selfAgentId) return null;
+	if (target.role === "lead" || target.role === "supervisor") return null;
+	const owner = target.parentAgentId ?? "an unknown parent";
+	return `BLOCKED: PROMPT_TARGET_NOT_OWNED — agent ${targetId} is not this seat's subagent (its parent is ${owner}) and is not a Lead or Supervisor. Prompting another Lead's Peer bypasses that Lead's brief, authority and scope lease. Coordinate with ${owner} through team_chat instead.`;
+}
+
+/**
+ * Ownership facts for one agent, read from Paseo's own state files.
+ *
+ * Kept next to the pure guard rather than inside it so the decision stays
+ * testable without a filesystem, while both runtime adapters still resolve the
+ * target the same way — a difference here would be an authority asymmetry
+ * between a Lead on Pi and a Lead on Claude.
+ */
+export function agentOwnership(
+	agentId: unknown,
+	env: Record<string, string | undefined> = process.env,
+): AgentOwnership | null {
+	if (!isAgentId(agentId)) return null;
+	const { states } = readAgentStates([agentId], { root: paseoAgentsRoot(env) });
+	const state = states[agentId as string];
+	if (!state) return null;
+	return {
+		agentId: state.agentId,
+		parentAgentId: state.parentAgentId,
+		provider: state.provider,
+		role: parseRoleProvider(state.provider ?? "")?.role ?? null,
+		domain: normalizeDomain(state.domain),
+	};
+}
+
+/** Every seat Paseo knows about that runs the supervisor role. */
+export function supervisorSeats(
+	env: Record<string, string | undefined> = process.env,
+): SupervisorSeat[] {
+	const { states } = readAllAgentStates(env);
+	return Object.values(states)
+		.filter(
+			(state) => parseRoleProvider(state.provider ?? "")?.role === "supervisor",
+		)
+		.map((state) => ({
+			agentId: state.agentId,
+			domain: normalizeDomain(state.domain),
+		}));
+}
+
+
+// ---------------------------------------------------------------------------
+// PR-E — fork / handoff.
+//
+// There are TWO ways to hand work to another agent and they are not
+// interchangeable (docs/multi-supervisor-topology.md §1.14):
+//
+//   Briefing handoff (Paseo's own)  — receiver starts at zero context and is
+//                                     briefed. Lossy, unbiased, documented.
+//   Session fork (§1.1-1.3)         — receiver inherits the transcript verbatim.
+//                                     Faithful, BIASED, undocumented surface.
+//
+// A fork is a file copy: ~0 LLM turns, near-instant even for a large session.
+// That cheapness is exactly why the rules below exist — the two cases where a
+// fork is the WRONG tool are both cases where it is also the tempting one:
+//
+//   - a role that must be INDEPENDENT (reviewer, challenger, supervisor).
+//     A fork inherits the framing it is supposed to question; the measured
+//     behaviour is that a forked agent keeps identifying as its source.
+//   - a Lead running out of context. Auto-compaction fires on the FORK too
+//     (§1.12), so the copy is a compacted agent, not a faithful one — which is
+//     what `/compact` already does, in place, without a second seat.
+// ---------------------------------------------------------------------------
+
+/** Why this fork exists. Anything outside the set is refused, not guessed. */
+export const FORK_REASONS = [
+	"split-load",
+	"change-host",
+	"change-model",
+	"takeover",
+] as const;
+export type ForkReason = (typeof FORK_REASONS)[number];
+
+/** Reasons that put a SECOND writer on the tree and therefore need a scope. */
+const FORK_WRITER_REASONS = new Set<string>(["split-load", "takeover"]);
+
+/**
+ * Dispositions whose whole value is not sharing the source's reasoning. Naming
+ * them here rather than trusting the Lead to remember: the anti-pattern is
+ * cheap to commit and invisible afterwards — a forked reviewer reads exactly
+ * like an independent one.
+ */
+export const FORK_INDEPENDENT_DISPOSITIONS = [
+	"reviewer",
+	"challenger",
+	"critic",
+	"auditor",
+	"supervisor",
+];
+
+/** Words a Lead reaches for when it is really asking for /compact. */
+const FORK_CONTEXT_EXCUSES =
+	/(context[\s_-]*(full|limit|overflow|window|exhaust)|out[\s_-]*of[\s_-]*context|compact(ion)?|token[\s_-]*limit)/i;
+
+export const FORK_SEED_HEADER = "FORK_SEED_V1";
+
+export interface ForkRequest {
+	reason?: unknown;
+	disposition?: unknown;
+	/** Repo-relative scope the fork will write on; required for writer forks. */
+	scope?: unknown;
+	/** Free text the Lead wrote about why. Scanned for the /compact excuse. */
+	rationale?: unknown;
+}
+
+/**
+ * Whether this fork may happen at all. Pure, so both runtimes and the support
+ * script reach the same verdict from the same request.
+ */
+export function forkRequestBlockReason(request: ForkRequest): string | null {
+	const reason =
+		typeof request?.reason === "string" ? request.reason.trim().toLowerCase() : "";
+	const disposition =
+		typeof request?.disposition === "string"
+			? request.disposition.trim().toLowerCase()
+			: "";
+	const rationale =
+		typeof request?.rationale === "string" ? request.rationale : "";
+
+	if (!FORK_REASONS.includes(reason as ForkReason)) {
+		return `BLOCKED: FORK_REASON_INVALID — a fork must declare why it exists, one of: ${FORK_REASONS.join(", ")} (got "${reason || "<missing>"}"). Handing work over with a self-contained briefing is the documented default; a fork is for the cases where the reasoning history itself has to travel.`;
+	}
+	if (FORK_CONTEXT_EXCUSES.test(reason) || FORK_CONTEXT_EXCUSES.test(rationale)) {
+		return "BLOCKED: FORK_FOR_CONTEXT — a fork does not recover context. Auto-compaction fires on the copy exactly as it would here, so the fork is a compacted agent, not a faithful one. Run /compact in place instead.";
+	}
+	if (!disposition) {
+		return "BLOCKED: FORK_DISPOSITION_MISSING — say what the fork is for; the rule that forbids forking an independent role cannot be applied to an unnamed one.";
+	}
+	if (FORK_INDEPENDENT_DISPOSITIONS.some((role) => disposition.includes(role))) {
+		return `BLOCKED: FORK_ROLE_MUST_BE_INDEPENDENT — "${disposition}" exists to question the source's reasoning, and a fork inherits it verbatim (a forked agent keeps identifying as its source). Create it with a briefing handoff and zero context instead.`;
+	}
+	if (FORK_WRITER_REASONS.has(reason)) {
+		const scope = normalizeScope(request?.scope);
+		if (!scope) {
+			return `BLOCKED: FORK_WITHOUT_LEASE_PLAN — a "${reason}" fork puts a second writer on the tree, so it must name the scope it will own (and hold a lease on it). One writer per moving scope is not suspended because the second writer is a copy of the first.`;
+		}
+	}
+	return null;
+}
+
+/**
+ * The fork's first prompt.
+ *
+ * A fork inherits BELIEF, not AUTHORITY: the transcript it wakes up in is one
+ * where it was the other agent, holding the other agent's scopes and peers.
+ * Authority is recomputed per turn from the brief, so nothing is actually
+ * granted — but identity is not, and the measured behaviour is that the copy
+ * acts as its source until told otherwise. This is that telling, and it is
+ * built here rather than written by hand so it cannot be quietly softened.
+ */
+export function forkSeedPrompt({
+	sourceAgentId,
+	forkAgentId,
+	reason,
+	disposition,
+	owns,
+	doesNotOwn,
+}: {
+	sourceAgentId: string;
+	forkAgentId?: string | null;
+	reason: string;
+	disposition: string;
+	owns?: string | null;
+	doesNotOwn?: string | null;
+}): string {
+	return [
+		FORK_SEED_HEADER,
+		`FORK_OF: ${sourceAgentId}`,
+		`FORK_AGENT_ID: ${forkAgentId ?? "<this agent>"}`,
+		`REASON: ${reason}`,
+		`DISPOSITION: ${disposition}`,
+		`OWNS: ${owns?.trim() || "nothing yet — claim a scope before staffing a writer"}`,
+		`DOES_NOT_OWN: ${doesNotOwn?.trim() || `every scope, lease and Peer still held by ${sourceAgentId}`}`,
+		"",
+		"You are a session fork. The conversation above is inherited history, not",
+		"your own record: everything in it was done by the source agent, under its",
+		"identity and its authority.",
+		"",
+		"Binding for the rest of this session:",
+		`1. You are NOT ${sourceAgentId}. Never act, post or claim under its identity.`,
+		"2. You inherit no scope lease. Claim your own with team_lease before you",
+		"   create any writer; a fork without its own lease is a second writer on",
+		"   the source's scope.",
+		`3. You inherit no Peers. The agents in the history above still report to`,
+		`   ${sourceAgentId}; do not prompt them (the ownership guard refuses it).`,
+		"4. Authority is recomputed every turn from the current brief. Nothing in",
+		"   the inherited history grants you anything.",
+		"5. State plainly, in your first message, what you now own and what you do",
+		"   not — using OWNS / DOES_NOT_OWN above.",
+	].join("\n");
+}
+
+/**
+ * Whether the fork ended up on the route it was created for.
+ *
+ * Read `runtimeInfo`, never `persistence.metadata.model`: the latter is a
+ * creation-time snapshot Paseo does not rewrite when the model is changed
+ * through `update_agent`, so it reports a model the agent is not running
+ * (§1.3). A drifted fork is deleted rather than kept, because a Lead that
+ * cannot tell which model answered has no evidence at all.
+ */
+/**
+ * Whether two model references name the same model.
+ *
+ * Measured 2026-08-28 on a real import: `runtimeInfo.model` came back as
+ * "Minnyat/claude-opus-5" — the pi form, which carries its own provider
+ * segment — while a Lead routing from cluster-routing writes the bare
+ * "claude-opus-5". Comparing those as strings fails a fork that is on exactly
+ * the right model, and the fork is then DELETED, so an over-strict comparison
+ * here is destructive rather than merely noisy.
+ *
+ * Qualifiers still have to agree when both sides carry one: "A/x" and "B/x" are
+ * the same model id served by two different providers, which is precisely the
+ * distinction a cross-provider route exists to make.
+ */
+export function modelReferencesMatch(
+	expected: string,
+	actual: string,
+): boolean {
+	const a = expected.trim().toLowerCase();
+	const b = actual.trim().toLowerCase();
+	if (a === b) return true;
+	const [aTail, bTail] = [a.split("/").pop() ?? a, b.split("/").pop() ?? b];
+	if (aTail !== bTail) return false;
+	// One side unqualified: the tail is all the caller gave, so it is all we can
+	// hold them to. Both qualified and different: a real disagreement.
+	return !a.includes("/") || !b.includes("/");
+}
+
+export function forkModelBlockReason({
+	expectedModel,
+	actualModel,
+	expectedThinking,
+	actualThinking,
+}: {
+	expectedModel?: string | null;
+	actualModel?: string | null;
+	expectedThinking?: string | null;
+	actualThinking?: string | null;
+}): string | null {
+	if (expectedModel) {
+		if (!actualModel) {
+			return `BLOCKED: FORK_MODEL_UNROUTABLE — the imported agent reports no runtimeInfo.model yet, so it cannot be shown to run "${expectedModel}". Retry the check once the agent has started; do not use it meanwhile.`;
+		}
+		if (!modelReferencesMatch(expectedModel, actualModel)) {
+			return `BLOCKED: FORK_MODEL_UNROUTABLE — the fork runs "${actualModel}", not the requested "${expectedModel}". update_agent did not take; delete the fork rather than keep an agent whose route nobody chose.`;
+		}
+	}
+	if (expectedThinking && actualThinking !== expectedThinking) {
+		return `BLOCKED: FORK_MODEL_UNROUTABLE — the fork's thinking level is "${actualThinking ?? "<unset>"}", not the requested "${expectedThinking}".`;
+	}
+	return null;
+}
+
+// ---------------------------------------------------------------------------
 // Runtime families — the pack runs the SAME three roles on more than one
 // coding agent. A Paseo role provider is always "<family>-<role>"; what
 // differs per family is only how many segments a model reference carries.
@@ -849,8 +1482,20 @@ export function isLeadRecoveryProvider(provider: string): boolean {
  */
 export function supervisorCreateAgentBlockReason(
 	input: unknown,
+	context: SupervisorRecoveryContext = {},
 ): string | null {
-	return supervisorCreateAgentArgsBlockReason(extractMcpArgs(input));
+	return supervisorCreateAgentArgsBlockReason(extractMcpArgs(input), context);
+}
+
+/**
+ * What the recovery gate needs to know about the supervisor doing the
+ * recovering. Empty by default so the single-supervisor behaviour — the one
+ * running in production — is exactly what it was before PR-D.
+ */
+export interface SupervisorRecoveryContext {
+	topology?: TeamTopology;
+	/** This supervisor's own `team.domain`, normalized or raw. */
+	selfDomain?: string | null;
 }
 
 /**
@@ -863,6 +1508,7 @@ export function supervisorCreateAgentBlockReason(
  */
 export function supervisorCreateAgentArgsBlockReason(
 	args: unknown,
+	context: SupervisorRecoveryContext = {},
 ): string | null {
 	if (typeof args !== "object" || args === null) {
 		return "Supervisor create_agent requires an args object (provider, labels, settings). Refusing fail-closed.";
@@ -887,6 +1533,19 @@ export function supervisorCreateAgentArgsBlockReason(
 	const recoveryFor = labelMap.recovery_for;
 	if (typeof recoveryFor !== "string" || recoveryFor.trim().length === 0) {
 		return "Supervisor create_agent labels.recovery_for (project id) is required.";
+	}
+	// With several Supervisors, "which project id" stops being decoration: it is
+	// the only thing separating a legitimate successor Lead from one Supervisor
+	// reaching into another's territory. Under multi topology the project id
+	// must therefore be a domain this Supervisor actually governs.
+	if ((context.topology ?? "single") === "multi") {
+		const selfDomain = normalizeDomain(context.selfDomain);
+		if (!selfDomain) {
+			return `BLOCKED: JURISDICTION_UNDECLARED — this Supervisor carries no ${TEAM_DOMAIN_LABEL} label, so the scope of its recovery authority is unknown. Under PASEO_TEAM_TOPOLOGY=multi a Supervisor must be labelled with the domain it governs before it may create a successor Lead.`;
+		}
+		if (!domainCovers(selfDomain, recoveryFor)) {
+			return `BLOCKED: RECOVERY_OUT_OF_JURISDICTION — labels.recovery_for "${recoveryFor}" is not inside this Supervisor's domain "${selfDomain}". Recovering a Lead outside your jurisdiction is the other Supervisor's act; escalate to the Human instead.`;
+		}
 	}
 	const thinking =
 		typeof rec.settings === "object" && rec.settings !== null
@@ -991,7 +1650,23 @@ export function peerMcpBlockReason(
 		: `"${target}" is not an agent-browser MCP target; Paseo and unrelated MCP servers remain forbidden for Peers.`;
 }
 
-export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
+/**
+ * Governance facts a call may be judged against. Optional everywhere so the
+ * single-supervisor pack behaves exactly as it did before PR-D, and so a
+ * caller that has not resolved them yet cannot accidentally look like a caller
+ * that resolved them to "nothing".
+ */
+export interface GovernanceContext extends SupervisorRecoveryContext {
+	selfAgentId?: string | null;
+	/** Resolved ownership of a send_agent_prompt target; see agentOwnership. */
+	promptTarget?: AgentOwnership | null;
+}
+
+export function mcpBlockReason(
+	role: TeamRole,
+	input: unknown,
+	context: GovernanceContext = {},
+): string | null {
 	const classification = classifyMcpInput(input);
 	if (classification.kind === "meta") return null;
 	if (classification.kind === "unknown") {
@@ -1009,12 +1684,22 @@ export function mcpBlockReason(role: TeamRole, input: unknown): string | null {
 		return `"${target}" is not in the ${role} MCP allowlist (discovery, workspace, monitoring, orchestration, permissions).`;
 	}
 	if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
-		const argBlock = supervisorCreateAgentBlockReason(input);
+		const argBlock = supervisorCreateAgentBlockReason(input, context);
 		if (argBlock) return argBlock;
 	}
 	if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 		const argBlock = leadCreateWorkspaceBlockReason(input);
 		if (argBlock) return argBlock;
+	}
+	if (matchesPaseoToolName(target, ["send_agent_prompt"])) {
+		const ownershipBlock = sendAgentPromptBlockReason({
+			role,
+			selfAgentId: context.selfAgentId ?? null,
+			targetId: sendAgentPromptTargetId(input),
+			target: context.promptTarget ?? null,
+			topology: context.topology ?? "single",
+		});
+		if (ownershipBlock) return ownershipBlock;
 	}
 	return null;
 }
@@ -1594,7 +2279,41 @@ export function teamToolBlockReason(
 	if (toolName === TEAM_LEASE_TOOL && role !== "lead" && role !== "supervisor") {
 		return "team_lease is restricted to Lead agents (Supervisor may read status).";
 	}
+	const forkReason = teamForkToolBlockReason(role, toolName);
+	if (forkReason) return forkReason;
 	return null;
+}
+
+/**
+ * Who may fork a session.
+ *
+ * A Peer has nothing to fork: it does not own agents, and a Peer that could
+ * copy a Lead's transcript would inherit the whole coordination history it is
+ * deliberately kept out of. Supervisor keeps it for the one case it already
+ * owns — a successor Lead in recovery, where the point of the fork is that the
+ * successor must not start from zero.
+ */
+export function teamForkToolBlockReason(
+	role: TeamRole,
+	toolName: string = TEAM_FORK_TOOL,
+): string | null {
+	if (toolName !== TEAM_FORK_TOOL) return null;
+	if (role !== "lead" && role !== "supervisor") {
+		return "team_fork is restricted to Lead and Supervisor agents — a Peer owns no session to hand over, and inheriting a Lead's transcript would hand it the coordination history the role is kept out of.";
+	}
+	return null;
+}
+
+export function teamForkToolDescription(): string {
+	return (
+		"Hand a session over WITHOUT retelling it: copy an agent's transcript into a new session file and import it as a new agent. " +
+		"`fork` validates, copies and imports, then returns the update_agent call that routes the model (the CLI cannot set it) plus a seed prompt that revokes the inherited identity; " +
+		"`verify` confirms the fork runs the requested model and DELETES it if not; `seed` returns the seed prompt alone. " +
+		"Choose a fork only when the reasoning history itself must travel (split-load, change-host, change-model, takeover). " +
+		"A role that must be independent (reviewer, challenger, supervisor) is refused — a fork inherits the framing it exists to question. " +
+		"Running out of context is NOT a fork reason: auto-compaction fires on the copy too, so use /compact instead. " +
+		"A fork inherits no lease and no Peers; claim your own scope before staffing a writer."
+	);
 }
 
 /**

@@ -135,11 +135,26 @@ for (const installer of ["install.sh", "install.ps1"]) {
   const scriptsDir = join(extDir, "paseo-team-scripts");
   mkdirSync(scriptsDir, { recursive: true });
   mkdirSync(join(extDir, "prompts"), { recursive: true });
-  mkdirSync(join(extDir, "paseo-team-core"), { recursive: true });
-  for (const file of ["policy-core.ts", "claude-policy.ts"]) {
-    cpSync(join(root, "extensions", "paseo-team-core", file), join(extDir, "paseo-team-core", file));
-  }
-  for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "lib-common.mjs"]) {
+  // The WHOLE core directory, exactly as `cp -R` / `Copy-Item -Recurse` ships
+  // it. Naming individual files here would let a new core module pass CI while
+  // being absent from every installed tree — which is precisely the failure the
+  // module split was supposed to make impossible.
+  cpSync(join(root, "extensions", "paseo-team-core"), join(extDir, "paseo-team-core"), {
+    recursive: true,
+  });
+  for (const file of [
+    "claude-hook.mjs",
+    "claude-team-mcp.mjs",
+    "lib-common.mjs",
+    // Every support script that reaches into the policy core. The two layouts
+    // differ by one directory level, so a static "../extensions/..." specifier
+    // is right in a checkout and wrong here — and it fails at IMPORT time,
+    // where the caller reports it as something else entirely (a Lead unable to
+    // staff any writer, blamed on an unreadable lease ledger).
+    "team-chat.mjs",
+    "team-lease.mjs",
+    "team-fork.mjs",
+  ]) {
     cpSync(join(source, file), join(scriptsDir, file));
   }
   for (const role of ["supervisor", "lead", "peer"]) {
@@ -190,7 +205,26 @@ for (const installer of ["install.sh", "install.ps1"]) {
     },
   );
   const tools = JSON.parse(handshake).result.tools.map((tool) => tool.name);
-  assert.deepEqual(tools.sort(), ["peer_ask_lead", "team_chat", "team_lease", "team_watchdog"]);
+  assert.deepEqual(tools.sort(), ["peer_ask_lead", "team_chat", "team_fork", "team_lease", "team_watchdog"]);
+
+  // Each core-dependent script must at least LOAD from the installed layout.
+  // Running with no arguments is enough: the usage error proves the module
+  // graph resolved, and an unresolved import cannot produce it.
+  for (const script of ["team-lease.mjs", "team-fork.mjs"]) {
+    let stdout = "";
+    try {
+      stdout = execFileSync(process.execPath, [join(scriptsDir, script)], {
+        cwd: unrelatedCwd,
+        env: hookEnv,
+        encoding: "utf8",
+      });
+    } catch (error) {
+      // These scripts report their usage error on stderr and exit non-zero.
+      stdout = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    }
+    assert.match(stdout, /"code":"USAGE"/, `${script} must load from the installed layout`);
+    assert.doesNotMatch(stdout, /ERR_MODULE_NOT_FOUND/, `${script} could not resolve the policy core`);
+  }
 }
 
 console.log("installer contract tests passed");

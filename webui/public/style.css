@@ -254,6 +254,9 @@ table.list .row-error td { background: color-mix(in srgb, var(--danger) 8%, tran
 .node-sub { font: 11px system-ui, sans-serif; fill: var(--muted); pointer-events: none; }
 .edge { fill: none; stroke: #46534f; stroke-width: 1.6; }
 .edge.message { stroke: var(--warn); stroke-dasharray: 5 4; }
+/* Session lineage: an imported fork is a ROOT agent, so without this edge two
+   Leads holding the same history look unrelated. */
+.edge.fork { stroke: var(--lead); stroke-dasharray: 2 3; }
 .badge-permit { fill: var(--warn); }
 .badge-text { font: 11px var(--mono); font-weight: 700; fill: #171a19; }
 
@@ -274,6 +277,12 @@ table.list .row-error td { background: color-mix(in srgb, var(--danger) 8%, tran
 .swatch.role-peer { background: var(--peer); }
 .swatch.role-unknown { background: var(--unknown); }
 .line { display: inline-block; width: 24px; height: 0; border-top: 2px solid #46534f; margin-right: 7px; vertical-align: middle; }
+/* Matches .edge.message in the diagram: a chat-room message, not a spawn. */
+.line.dashed { border-top-style: dashed; border-top-color: var(--warn); }
+.line.forked { border-top-style: dashed; border-top-color: var(--lead); }
+/* A jurisdiction conflict stops governance for every Lead underneath it, so it
+   reads as a problem rather than as one more informational notice. */
+.notice.alert { border-color: var(--warn); }
 
 /* --- notices, permits, empty states ------------------------------------- */
 
