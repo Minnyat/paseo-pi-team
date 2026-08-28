@@ -94,9 +94,23 @@ writeFileSync(join(agentsRoot, "C-Users-x-other", "notes.txt"), "ignore me", "ut
 
 // A6 — the root is an argument, so a throwaway PASEO_HOME works in tests and
 // a non-default PASEO_HOME works in production.
+//
+// A machine where Paseo has never written agent state has no root at all. That
+// is an ABSENT enrichment, not a fault: reporting it would put a line in
+// degraded[] on every snapshot taken on a fresh host and teach the operator to
+// ignore the list. Only a root that exists and resists reading is a fault.
 {
 	const { index, degraded } = buildStateIndex(join(root, "does-not-exist"));
 	assert.deepEqual(index, {}, "a missing agents root is empty, not a throw");
+	assert.deepEqual(degraded, [], "and absent is not degraded");
+}
+{
+	// A file where the directory should be: the data is unreachable for a reason
+	// the operator can act on, so say so.
+	const notADir = join(root, "agents-is-a-file");
+	writeFileSync(notADir, "not a directory", "utf8");
+	const { index, degraded } = buildStateIndex(notADir);
+	assert.deepEqual(index, {});
 	assert.equal(degraded.length, 1);
 	assert.equal(degraded[0].reason, "AGENT_STATE_ROOT_UNREADABLE");
 }

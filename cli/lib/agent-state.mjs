@@ -58,6 +58,12 @@ export function buildStateIndex(root = paseoAgentsDir()) {
 	try {
 		slugs = readdirSync(root, { withFileTypes: true });
 	} catch (error) {
+		// A missing root is the normal state of a machine Paseo has not written
+		// agent state on — a fresh host, a sandbox, another PASEO_HOME. The
+		// enrichment is simply unavailable; the graph still renders from `ls`.
+		// Anything else (permissions, a file where the directory should be) IS a
+		// fault, because it means the data exists and we could not read it.
+		if (error?.code === "ENOENT") return { index, degraded: [] };
 		return {
 			index,
 			degraded: [{ reason: "AGENT_STATE_ROOT_UNREADABLE", detail: `${root}: ${String(error?.message ?? error)}` }],
