@@ -585,6 +585,25 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
 5. **Remote hosts** go through `remote-paseo.mjs`, never through MCP — see
    below.
 
+**Which file is the source of truth.** Paseo ships its own
+`~/.paseo/orchestration-preferences.json`, which picks a provider per task kind
+(`impl`/`ui`/`research`/`planning`/`audit`). The pack does **not** read it and
+never writes it. The split is by who creates the agent:
+
+| Agent created by | Routed from |
+|---|---|
+| this pack (the Lead's routing cycle) | `cluster-routing.local.json` — the only source |
+| Paseo's own orchestration skills (`paseo-committee`, `paseo-advisor`, `paseo-loop`, …) | `orchestration-preferences.json` — Paseo's business, left alone |
+
+The two vocabularies are not a subset of each other: the pack routes by
+MODEL_CLASS (task risk × disposition) **per host**, with a runtime family and a
+verified thinking option, while Paseo's file has no host, no thinking level, no
+capability filter and no family. Mapping between them would be lossy in both
+directions, and reading both would give two ways to be wrong about which model
+an agent is on — silently, which is the exact failure the routing cycle exists
+to prevent. `pteam preflight` warns when `orchestration-preferences.json`
+exists, so nobody edits the file the pack ignores.
+
 ### Reaching a remote host
 
 The MCP injected into an agent always points at the LOCAL daemon: `--host` is a

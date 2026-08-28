@@ -12,6 +12,7 @@
 
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, sep } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
@@ -229,6 +230,34 @@ export function compareOcrVersions(a, b) {
 // lives here, next to every consumer, and installer-contract.test.mjs runs the
 // installed copies to prove it.
 // ---------------------------------------------------------------------------
+
+/**
+ * Paseo's own per-task-kind routing file. The pack never reads it — see the
+ * decision in docs/multi-supervisor-topology.md §4.4 — but its presence is
+ * worth surfacing, because the two files look interchangeable and are not:
+ * editing the wrong one produces no error, just an agent quietly running on a
+ * model nobody chose.
+ */
+export const PASEO_ORCHESTRATION_PREFS = "orchestration-preferences.json";
+
+/** `$PASEO_HOME`, else the documented default. */
+export function paseoHomeDir(env = process.env) {
+	return env.PASEO_HOME?.trim() || join(homedir(), ".paseo");
+}
+
+/**
+ * Warn only when Paseo's routing file actually exists: absent is the common
+ * case and says nothing, so reporting it would be noise. Returns null when
+ * there is nothing to say.
+ */
+export function orchestrationPreferencesNotice(env = process.env, exists = existsSync) {
+	const path = join(paseoHomeDir(env), PASEO_ORCHESTRATION_PREFS);
+	if (!exists(path)) return null;
+	return {
+		path,
+		message: `${path} exists but the pack does NOT read it — pack agents route only from cluster-routing.local.json (docs/multi-supervisor-topology.md §4.4). Edit the cluster file, not this one.`,
+	};
+}
 
 const POLICY_CORE_DIR = "paseo-team-core";
 

@@ -606,11 +606,48 @@ toàn bộ theo quyết định của user. Hai điều giữ lại cho lần sa
    khối cuối tự tạo agent thật nên là opt-in (`PASEO_CONTRACT_FORK=1`) và tự
    dọn. Chính khối này đã bắt ba khác biệt của `import` mà mọi unit test đều
    mock đúng theo giả định sai (§PR-E).
-4. **Chốt nguồn sự thật routing**: `~/.paseo/orchestration-preferences.json`
-   (chính thức) vs `cluster-routing.local.json` (của pack) — §1.14.
-   **Chưa chốt**, và không PR nào ở trên phụ thuộc vào nó: pack chỉ đọc file của
-   chính nó, còn file của Paseo là mặc định cho agent tạo ngoài pack. Cần một
-   quyết định trước khi có người sửa nhầm file.
+4. **Chốt nguồn sự thật routing — ✅ ĐÃ CHỐT (2026-08-28).**
+   `cluster-routing.local.json` là nguồn sự thật **duy nhất** cho mọi agent do
+   pack tạo ra. `~/.paseo/orchestration-preferences.json` là chuyện của Paseo:
+   pack **không đọc, không ghi, không đồng bộ** — nó là mặc định cho agent sinh
+   ra ngoài pack (`paseo-committee`, `paseo-advisor`, `paseo-loop`, …).
+
+   Phân chia theo **ai tạo agent**, không phải theo file nào "chính thức hơn":
+
+   | Agent được tạo bởi | Đọc route từ |
+   |---|---|
+   | pack (routing cycle của Lead) | `cluster-routing.local.json` |
+   | skill orchestration của Paseo | `orchestration-preferences.json` |
+
+   Ba lý do, theo thứ tự sức nặng:
+
+   - **Hai từ vựng không phải tập con của nhau.** Pack định tuyến theo
+     MODEL_CLASS (rủi ro × disposition) **theo từng host**, kèm họ runtime
+     (`pi-*`/`claude-*`) và một thinking option đã được verify trên đúng daemon
+     đó. File của Paseo chọn provider theo loại việc
+     (`impl`/`ui`/`research`/`planning`/`audit`), **không có** host, không có
+     thinking, không có capability filter, không có họ runtime. Ánh xạ hai chiều
+     đều mất mát — và chiều mất mát nguy hiểm là chiều bỏ mất host: một cụm
+     nhiều daemon sẽ im lặng co về một daemon.
+   - **Đọc hai file là hai cách để sai, và sai im lặng.** Invariant 3 tồn tại
+     đúng để chặn việc agent chạy trên model không ai chọn. Thêm một nguồn thứ
+     hai là mở lại chính cái cửa đó, ngay tại chỗ đã rào kỹ nhất.
+   - **Không tranh chỗ với Paseo.** Paseo có quyền định tuyến agent của chính
+     nó. Pack chỉ tuyên bố phạm vi của mình, không ghi đè file của người khác —
+     cùng nguyên tắc với `mcp.json` (chỉ đụng entry của mình) và với uninstall
+     (không bao giờ TẠO file khi gỡ).
+
+   **Phần thực thi** (chốt bằng prose thôi thì sẽ trôi): `pteam preflight` có
+   check `routing-source-of-truth` — `pass` khi file của Paseo không tồn tại,
+   `warn` khi nó tồn tại, kèm câu nói thẳng rằng pack không đọc nó và phải sửa
+   file cluster. Logic nằm ở `orchestrationPreferencesNotice()`
+   (`scripts/lib-common.mjs`), có test trong `test/lib-common.test.mjs` —
+   kể cả trường hợp file hỏng: câu hỏi duy nhất là TỒN TẠI hay không, nên file
+   không parse được vẫn ra notice sạch chứ không throw.
+
+   **Điều này KHÔNG chốt**: nếu sau này upstream trả lời câu hỏi §6 và
+   `orchestration-preferences.json` có thêm chiều host + thinking, quyết định
+   này phải mở lại — lúc đó lý do "không phải tập con" biến mất.
 
 ---
 

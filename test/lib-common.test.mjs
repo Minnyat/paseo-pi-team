@@ -9,10 +9,13 @@ import { pathToFileURL } from "node:url";
 
 import {
   PASEO_CONVENTIONAL_ENTRIES,
+  PASEO_ORCHESTRATION_PREFS,
   compareOcrVersions,
   findOnPath,
   isEntrypoint,
+  orchestrationPreferencesNotice,
   parseOcrVersion,
+  paseoHomeDir,
   resolveCmdEntry,
   resolvePaseoExec,
   searchPathDirs,
@@ -218,5 +221,45 @@ assert.equal(compareOcrVersions("1.8.10", "1.8.10"), 0);
 assert.equal(compareOcrVersions("1.8.9", "1.8.10"), -1, "numeric compare, not lexicographic");
 assert.equal(compareOcrVersions("1.10.0", "1.9.9"), 1);
 assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0");
+
+// --- routing source of truth (docs/multi-supervisor-topology.md §4.4) --------
+// The pack routes ONLY from cluster-routing.local.json. Paseo's own
+// orchestration-preferences.json is never read and never written; the notice
+// exists so an operator who edits that file learns the pack ignored it,
+// instead of wondering why the model never changed.
+
+{
+  const home = tmp("prefs-");
+  const prefsPath = join(home, PASEO_ORCHESTRATION_PREFS);
+
+  assert.equal(paseoHomeDir({ PASEO_HOME: home }), home, "PASEO_HOME wins");
+  assert.equal(paseoHomeDir({ PASEO_HOME: "   " }).endsWith(".paseo"), true, "blank falls back");
+  assert.equal(paseoHomeDir({}).endsWith(".paseo"), true, "documented default");
+
+  assert.equal(
+    orchestrationPreferencesNotice({ PASEO_HOME: home }),
+    null,
+    "absent is the common case and says nothing — reporting it would be noise",
+  );
+
+  writeFileSync(prefsPath, JSON.stringify({ impl: "some-provider" }));
+  const notice = orchestrationPreferencesNotice({ PASEO_HOME: home });
+  assert.ok(notice, "an existing preferences file must be surfaced");
+  assert.equal(notice.path, prefsPath);
+  assert.match(
+    notice.message,
+    /cluster-routing\.local\.json/,
+    "the notice must name the file the pack DOES read, not just the one it ignores",
+  );
+  assert.match(notice.message, /does NOT read it/, "the decision has to be stated, not implied");
+
+  // The helper must not read or parse Paseo's file — existence is the whole
+  // question, so a corrupt or unreadable one still produces a clean notice.
+  writeFileSync(prefsPath, "{ not json");
+  assert.ok(
+    orchestrationPreferencesNotice({ PASEO_HOME: home }),
+    "a corrupt preferences file is still just a notice, never a throw",
+  );
+}
 
 console.log("lib-common tests passed");

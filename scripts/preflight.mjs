@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { verify as verifyClaudeSetup } from "./claude-setup.mjs";
+import { orchestrationPreferencesNotice } from "./lib-common.mjs";
 import {
 	describeCdpTarget,
 	inspectAgentBrowser,
@@ -835,6 +836,19 @@ if (existsSync(clusterPath)) {
 		"cluster-config",
 		`${clusterPath} missing (copy config/cluster-routing.example.json; required for cross-host routing)`,
 	);
+}
+
+// Two files describe routing and only one of them is ours (§4.4). Paseo's is
+// left strictly alone; the check exists so an operator who edits it notices
+// that the pack did not read a single line of it.
+{
+	const notice = orchestrationPreferencesNotice();
+	if (notice) warn("routing-source-of-truth", notice.message);
+	else
+		pass(
+			"routing-source-of-truth",
+			"cluster-routing.local.json is the only routing source the pack reads",
+		);
 }
 
 if (cluster) {
