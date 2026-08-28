@@ -389,4 +389,106 @@ rmSync(home, { recursive: true, force: true });
 	);
 }
 
+// --- PR-D governance: the hook has to RESOLVE ownership, not just forward it -
+// claude-policy.test.mjs pins the decision when the ownership is handed in.
+// Nothing there would notice a hook that never looks the target up — the guard
+// would simply deny every prompt, or (worse, if the field were optional in the
+// wrong direction) allow every one. Only a test of the HOOK sees the leg.
+{
+	const LEAD_A = "aaaaaaaa-3333-4333-8333-333333333333";
+	const LEAD_B = "bbbbbbbb-4444-4444-8444-444444444444";
+	const PEER_OF_B = "cccccccc-5555-4555-8555-555555555555";
+	const SUP_A = "dddddddd-6666-4666-8666-666666666666";
+
+	const govHome = mkdtempSync(join(tmpdir(), "paseo-claude-gov-"));
+	const paseoHome = mkdtempSync(join(tmpdir(), "paseo-claude-gov-home-"));
+	const agentsDir = join(paseoHome, "agents", "D--repo");
+	mkdirSync(agentsDir, { recursive: true });
+	const writeState = (id, provider, labels) =>
+		writeFileSync(join(agentsDir, `${id}.json`), JSON.stringify({ id, provider, labels }), "utf8");
+	writeState(PEER_OF_B, "claude-peer/claude-opus-5", { "paseo.parent-agent-id": LEAD_B });
+	writeState(LEAD_B, "claude-lead/claude-opus-5", { "team.domain": "frontend" });
+	writeState(SUP_A, "claude-supervisor/claude-opus-5", { "team.domain": "backend" });
+
+	const leadEnv = {
+		PASEO_TEAM_HOME: govHome,
+		PASEO_PI_ROLE: "lead",
+		PASEO_AGENT_ID: LEAD_A,
+		PASEO_HOME: paseoHome,
+		PASEO_TEAM_TOPOLOGY: "multi",
+		PASEO_TEAM_DOMAIN: "backend.auth",
+	};
+	const prompt = (agentId, env = leadEnv) =>
+		handleEvent(
+			"pre-tool-use",
+			{
+				session_id: "gov-1",
+				tool_name: "mcp__paseo__send_agent_prompt",
+				tool_input: { agentId, prompt: "status?" },
+			},
+			env,
+		);
+
+	try {
+		const foreign = await prompt(PEER_OF_B);
+		assert.match(
+			String(foreign?.hookSpecificOutput?.permissionDecisionReason),
+			/PROMPT_TARGET_NOT_OWNED/,
+			"the hook resolves the target off Paseo's own state files",
+		);
+		assert.equal(await prompt(LEAD_B), null, "another Lead stays reachable");
+		assert.equal(await prompt(SUP_A), null, "a Supervisor stays reachable");
+		assert.match(
+			String((await prompt("eeeeeeee-7777-4777-8777-777777777777"))?.hookSpecificOutput?.permissionDecisionReason),
+			/PROMPT_TARGET_UNKNOWN/,
+		);
+		assert.equal(
+			await prompt(PEER_OF_B, { ...leadEnv, PASEO_TEAM_TOPOLOGY: "single" }),
+			null,
+			"single topology leaves the previous behaviour untouched",
+		);
+
+		// The jurisdiction verdict has to reach the Lead's turn, the same way the
+		// Pi extension puts it in the system prompt.
+		const decision = [
+			"SUPERVISOR_OBSERVATION",
+			"",
+			"PROJECT_ID: shop",
+			"DOMAIN: frontend",
+			`FROM_AGENT_ID: ${SUP_A}`,
+			"SUPERVISOR_DECISION:",
+			"  DECISION: retry the failed step",
+			"  REVERSIBILITY: reversible",
+		].join("\n");
+		const submitted = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-2", prompt: decision },
+			leadEnv,
+		);
+		assert.match(
+			String(submitted?.hookSpecificOutput?.additionalContext),
+			/JURISDICTION_MISMATCH/,
+			"an out-of-jurisdiction decision is flagged to the Lead",
+		);
+		const inJurisdiction = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-3", prompt: decision.replace("DOMAIN: frontend", "DOMAIN: backend") },
+			leadEnv,
+		);
+		assert.match(String(inJurisdiction?.hookSpecificOutput?.additionalContext), /JURISDICTION_OK/);
+		const plain = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-4", prompt: "please review PR 12" },
+			{ ...leadEnv, PASEO_TEAM_TOPOLOGY: "multi" },
+		);
+		assert.ok(
+			!String(plain?.hookSpecificOutput?.additionalContext ?? "").includes("Jurisdiction"),
+			"an ordinary prompt gains no jurisdiction notice",
+		);
+	} finally {
+		rmSync(govHome, { recursive: true, force: true });
+		rmSync(paseoHome, { recursive: true, force: true });
+	}
+}
+
 console.log("claude hook tests passed");

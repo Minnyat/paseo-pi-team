@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const required = process.env.PASEO_CONTRACT_AGENT_ID;
@@ -98,6 +98,115 @@ assert.ok(detail.ParentAgentId === null || typeof detail.ParentAgentId === "stri
       } catch (error) {
         console.error(`[warn] could not delete contract room ${room}: ${String(error?.message ?? error)}`);
       }
+    }
+  }
+}
+
+// --- agent state file contract ----------------------------------------------
+// `$PASEO_HOME/agents/<cwd-slug>/<agent-id>.json` is the source the graph, the
+// ownership guard and the fork all read. It is not documented anywhere, so the
+// only thing standing between this pack and a silent upstream reshape is this
+// block. Read-only: it asserts a shape, it never writes one.
+{
+  const { readAgentStates, paseoAgentsRoot } = await import(
+    "../extensions/paseo-team-core/agent-directory.ts"
+  );
+  const root = paseoAgentsRoot(process.env);
+  const { states, degraded } = readAgentStates([required], { root });
+  const state = states[required];
+  assert.ok(
+    state,
+    `no state file for ${required} under ${root} (${degraded.map((d) => d.reason).join(", ")}) — the layout may have changed`,
+  );
+  assert.equal(state.agentId, required);
+  assert.equal(typeof state.provider, "string", "provider decides the role, so it must be present");
+  assert.ok(state.labels && typeof state.labels === "object", "labels carry parent + domain");
+  // Not asserted as PRESENT — a brand new agent has no runtimeInfo yet — but
+  // asserted as the right TYPE when they are there, because every consumer
+  // branches on null vs string.
+  for (const field of ["model", "thinking", "sessionId", "sessionFile", "domain", "parentAgentId", "forkOf"]) {
+    assert.ok(
+      state[field] === null || typeof state[field] === "string",
+      `${field} must be a string or null (got ${typeof state[field]})`,
+    );
+  }
+  assert.ok(
+    ["runtime", "config", null].includes(state.modelSource),
+    "the model must come from runtimeInfo or config — never from persistence.metadata (stale)",
+  );
+  if (state.sessionFile) {
+    assert.ok(
+      existsSync(state.sessionFile),
+      "persistence.nativeHandle must point at a real transcript — team-fork.mjs copies it",
+    );
+  }
+}
+
+// --- `paseo import` contract (opt-in: it creates a real agent) --------------
+// Set PASEO_CONTRACT_FORK=1 to run. It forks the contract agent's own session
+// by file copy, imports it, asserts the shape team-fork.mjs depends on, and
+// deletes the imported agent again. Off by default because it mutates the
+// daemon, and `paseo import` is undocumented — this is the only place its
+// behaviour is checked against the real CLI.
+if (process.env.PASEO_CONTRACT_FORK === "1") {
+  const { readAgentStates, paseoAgentsRoot } = await import(
+    "../extensions/paseo-team-core/agent-directory.ts"
+  );
+  const { materializeFork } = await import("../scripts/team-fork.mjs");
+  const { states } = readAgentStates([required], { root: paseoAgentsRoot(process.env) });
+  const source = states[required];
+  assert.ok(source?.sessionFile, "the contract agent must have a transcript to fork");
+  const provider = process.env.PASEO_CONTRACT_FORK_PROVIDER;
+  // A BARE role provider id ("pi-lead"). `paseo import` rejects the
+  // `<provider>/<model>` form create_agent takes — measured 2026-08-28.
+  assert.ok(provider, "set PASEO_CONTRACT_FORK_PROVIDER to a bare role provider id");
+
+  const fork = materializeFork(source.sessionFile);
+  let importedId = null;
+  try {
+    const imported = paseoJson([
+      "import",
+      fork.sessionId,
+      "--provider",
+      // A BARE provider id. `paseo import` rejects `<provider>/<model>`.
+      provider,
+      // NOT optional in practice: without --cwd the CLI notices the session
+      // belongs to another project and PROMPTS ("Fork this session into current
+      // directory? [y/N]"), which under --json aborts with a confusing
+      // "Pi RPC process exited with code 0".
+      ...(source.cwd ? ["--cwd", source.cwd] : []),
+      "--label",
+      `team.fork-of=${required}`,
+    ]);
+    // `agentId`, not `id` — the import response does not use the same field
+    // name as `paseo ls`. Reading the wrong one reports a failure while leaving
+    // a real agent behind.
+    importedId = imported.agentId ?? imported.id ?? imported.Id ?? null;
+    assert.ok(importedId, `paseo import must return the new agent id (got ${JSON.stringify(imported)})`);
+    assert.equal(imported.provider, provider);
+
+    const detail = paseoJson(["inspect", importedId]);
+    // §1.1: an imported agent is already a root — no detach step is needed, and
+    // a change here would silently break the fork's place in the team graph.
+    assert.equal(detail.ParentAgentId ?? null, null, "an imported agent must be a root");
+
+    const after = readAgentStates([importedId], { root: paseoAgentsRoot(process.env) });
+    const forkState = after.states[importedId];
+    assert.ok(forkState, "the imported agent must get a state file of its own");
+    assert.equal(forkState.forkOf, required, "the --label round-trips into labels");
+    assert.equal(forkState.sessionId, fork.sessionId, "the imported session id is the FORK's, not the source's");
+  } finally {
+    if (importedId) {
+      try {
+        paseoJson(["delete", importedId]);
+      } catch (error) {
+        console.error(`[warn] could not delete imported fork ${importedId}: ${String(error?.message ?? error)}`);
+      }
+    }
+    try {
+      rmSync(fork.file, { force: true });
+    } catch {
+      console.error(`[warn] left a fork transcript behind: ${fork.file}`);
     }
   }
 }

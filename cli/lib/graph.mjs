@@ -25,6 +25,10 @@ import { TEAM_MESSAGE_HEADER, parseTeamMessage } from "../../scripts/team-chat.m
 import { runPaseoJson, mapWithConcurrency, PaseoError } from "./paseo-bridge.mjs";
 import * as cache from "./graph-cache.mjs";
 import { readAgentStates, isAgentId } from "./agent-state.mjs";
+import {
+	domainConflicts,
+	normalizeDomain,
+} from "../../extensions/paseo-team-core/policy-core.ts";
 
 export const ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 
@@ -220,6 +224,57 @@ export function normalizePermits(list) {
  * @param {Array}  [input.degraded]  collection faults to surface verbatim
  * @param {number} input.now
  */
+/**
+ * Who governs what, and where that answer is broken.
+ *
+ * Two things an operator has to be able to SEE the moment a second Supervisor
+ * exists, because the policy will already be acting on them:
+ *
+ *   - `conflicts` — two Supervisors whose domains overlap. A Lead under both
+ *     refuses BOTH and escalates (JURISDICTION_OVERLAP), so an overlap is not a
+ *     cosmetic labelling issue; it stops governance for everyone underneath it.
+ *   - `unlabeled` — a Lead or Supervisor with no `team.domain`. Under
+ *     PASEO_TEAM_TOPOLOGY=multi such a seat can neither be governed nor govern
+ *     (JURISDICTION_UNVERIFIABLE / JURISDICTION_UNDECLARED).
+ *
+ * Reported for every topology: the graph does not read the agents' own env, so
+ * it cannot know which of them run under `multi`, and showing the conflict on a
+ * single-Supervisor board costs nothing while hiding it costs an outage.
+ */
+export function describeJurisdiction(nodes = []) {
+	const seats = nodes
+		.filter((node) => node.role === "supervisor" || node.role === "lead")
+		.map((node) => ({
+			id: node.id,
+			shortId: node.shortId,
+			role: node.role,
+			domain: normalizeDomain(node.domain),
+			rawDomain: node.domain ?? null,
+		}));
+	const supervisors = seats.filter((seat) => seat.role === "supervisor");
+	const conflicts = [];
+	for (let i = 0; i < supervisors.length; i += 1) {
+		for (let j = i + 1; j < supervisors.length; j += 1) {
+			const a = supervisors[i];
+			const b = supervisors[j];
+			if (!a.domain || !b.domain) continue;
+			if (!domainConflicts(a.domain, b.domain)) continue;
+			conflicts.push({
+				agents: [a.id, b.id],
+				domains: [a.domain, b.domain],
+				detail: `Supervisors ${a.shortId} (${a.domain}) and ${b.shortId} (${b.domain}) claim overlapping jurisdiction; a Lead under both refuses both and escalates to the Human.`,
+			});
+		}
+	}
+	return {
+		supervisors: supervisors.map(({ id, shortId, domain }) => ({ id, shortId, domain })),
+		unlabeled: seats
+			.filter((seat) => !seat.domain)
+			.map(({ id, shortId, role, rawDomain }) => ({ id, shortId, role, rawDomain })),
+		conflicts,
+	};
+}
+
 export function buildGraph({ agents = [], parents = {}, states = {}, permits = [], messages = [], degraded = [], now = 0 } = {}) {
 	const rows = Array.isArray(agents) ? agents.filter((a) => a && typeof a.id === "string") : [];
 	const known = new Set(rows.map((a) => a.id));
@@ -288,6 +343,10 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// From Paseo's own agent state file. A node without one still renders;
 			// these are simply null, and the read fault is in degraded[].
 			domain: state?.domain ?? null,
+			// A session fork keeps the source's whole transcript, so "who did this
+			// reasoning first" is a real question about the board and not a
+			// bookkeeping detail. The label is written by team-fork.mjs.
+			forkOf: state?.forkOf ?? null,
 			model: state?.model ?? null,
 			modelDrift: state?.modelDrift ?? false,
 			sessionId: state?.sessionId ?? null,
@@ -298,6 +357,12 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 	for (const node of nodes) {
 		if (node.parentId && known.has(node.parentId)) {
 			edges.push({ type: "spawn", from: node.parentId, to: node.id, confidence: "confirmed" });
+		}
+		// Lineage, not parentage: a fork is a root agent (import leaves
+		// ParentAgentId null), so without this edge the board shows two unrelated
+		// Leads holding the same history.
+		if (node.forkOf && known.has(node.forkOf)) {
+			edges.push({ type: "fork", from: node.forkOf, to: node.id, confidence: "confirmed" });
 		}
 	}
 	// The same block can be seen twice (a sender log and a recipient prompt, or
@@ -354,6 +419,7 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			byStatus,
 			byDomain,
 		},
+		jurisdiction: describeJurisdiction(nodes),
 		nodes,
 		edges,
 		permits: normalizedPermits.map(({ ok, raw, ...rest }) => ({ ...rest, raw })),

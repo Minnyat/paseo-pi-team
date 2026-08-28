@@ -198,6 +198,48 @@ function roleContextBlock(rolePrompt, role) {
 	].join("\n");
 }
 
+/**
+ * The Claude half of the jurisdiction notice (PR-D).
+ *
+ * Identical rule, identical wording to the Pi adapter's `jurisdictionNotice` —
+ * a Lead on Claude must be told the same thing about the same message, or
+ * "which Supervisor governs me" becomes a per-runtime answer.
+ */
+export function jurisdictionBlock(core, role, prompt, env = process.env) {
+	if (role !== "lead") return null;
+	const topology = core.teamTopology(env);
+	if (topology !== "multi") return null;
+	const block = core.parseSupervisorBlock(prompt);
+	if (!block) return null;
+	let seats = [];
+	try {
+		seats = core.supervisorSeats(env);
+	} catch {
+		seats = [];
+	}
+	const verdict = core.supervisorJurisdictionVerdict({
+		block,
+		leadDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
+		supervisors: seats,
+		fromAgentId: block.fields.get("FROM_AGENT_ID") ?? null,
+		topology,
+	});
+	if (!verdict) return null;
+	return [
+		"## Paseo Team Jurisdiction (this turn)",
+		"",
+		`This turn opens with a SUPERVISOR_${block.kind === "decision" ? "DECISION" : "OBSERVATION"}.`,
+		`Verdict: ${verdict.code} (${verdict.severity})`,
+		"",
+		verdict.reason,
+		verdict.severity === "refuse"
+			? `Do NOT act on it. Reply with BLOCKED: ${verdict.code} and the reason above.`
+			: "",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
 function authorityBlock(describe, role, brief) {
 	return [
 		"## Paseo Team Authority (this turn)",
@@ -226,6 +268,30 @@ function authorityBlock(describe, role, brief) {
  * fatal. Those two must stay distinct: collapsing them would either block every
  * tool call or, far worse, let an unreadable ledger read as an empty one.
  */
+/**
+ * Ownership of a `send_agent_prompt` target (PR-D), resolved the same way the
+ * Pi adapter resolves it: off Paseo's own agent state files.
+ *
+ * Returns undefined when the call is not a prompt to another agent (the core
+ * then never looks at it) and null when the target could not be resolved,
+ * which the core treats as fatal — an unreadable target must not read as a
+ * friendly one.
+ */
+function promptTargetForDecision({ core, claude }, role, toolName, toolInput, env) {
+	if (core.teamTopology(env) !== "multi") return undefined;
+	if (role !== "lead" && role !== "supervisor") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"])) {
+		return undefined;
+	}
+	try {
+		return core.agentOwnership(core.sendAgentPromptTargetId(toolInput), env);
+	} catch {
+		return null;
+	}
+}
+
 async function leasesForDecision({ core, claude }, role, toolName, toolInput, env, now) {
 	if (role !== "lead") return undefined;
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
@@ -299,6 +365,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		if (role === "peer") {
 			blocks.push(authorityBlock(claude.describeClaudePolicy, role, brief));
 		}
+		const jurisdiction = jurisdictionBlock(core, role, prompt, env);
+		if (jurisdiction) blocks.push(jurisdiction);
 		if (blocks.length === 0) return null;
 		return {
 			hookSpecificOutput: {
@@ -322,6 +390,15 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			// LEASE_UNVERIFIABLE rather than as an empty board.
 			leases: await leasesForDecision({ core, claude }, role, toolName, payload?.tool_input, env, now),
 			selfAgentId: env.PASEO_AGENT_ID?.trim() || null,
+			topology: core.teamTopology(env),
+			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
+			promptTarget: promptTargetForDecision(
+				{ core, claude },
+				role,
+				toolName,
+				payload?.tool_input,
+				env,
+			),
 		});
 		if (!reason) return null; // allow: say nothing, let normal permissions apply
 		return {

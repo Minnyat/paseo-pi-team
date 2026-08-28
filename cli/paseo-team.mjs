@@ -218,7 +218,8 @@ const DOC_ENV = [
 	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated extra tools per profile" },
 	{ key: "PASEO_TEAM_PROMPTS_DIR", scope: "host", where: "machine env", purpose: "override prompts directory" },
 	{ key: "PASEO_TEAM_SCRIPTS_DIR", scope: "host", where: "machine env", purpose: "override support-scripts directory" },
-	{ key: "PASEO_TEAM_DOMAIN", scope: "per-agent", where: "paseo run --env / provider env", purpose: "jurisdiction of this seat; also set it as the team.domain label so `ls --label` and team_chat 'domain:<name>' broadcasts can find it" },
+	{ key: "PASEO_TEAM_TOPOLOGY", scope: "per-agent", where: "paseo run --env / provider env", purpose: "single (default) | multi — 'multi' turns on the several-Supervisor governance rules: DOMAIN on supervisor blocks, recovery_for inside the supervisor's own domain, and the send_agent_prompt ownership wall. Any unrecognized value resolves to 'multi' (the side that only denies)" },
+	{ key: "PASEO_TEAM_DOMAIN", scope: "per-agent", where: "paseo run --env / provider env", purpose: "jurisdiction of this seat; also set it as the team.domain label so `ls --label` and team_chat 'domain:<name>' broadcasts can find it. Required on every Lead and Supervisor under PASEO_TEAM_TOPOLOGY=multi" },
 	{ key: "PASEO_TEAM_ROOMS", scope: "per-agent", where: "paseo run --env / provider env", purpose: "comma-separated chat-room allowlist for team_chat; unset = any room (chat rooms have no ACL of their own)" },
 	{ key: "PASEO_HOME", scope: "host", where: "machine env", purpose: "Paseo's own home; the CLI reads agent state from $PASEO_HOME/agents (defaults to ~/.paseo)" },
 ];

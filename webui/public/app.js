@@ -583,7 +583,7 @@ function renderDiagram(graph) {
 				class: "node-sub",
 				x: 12,
 				y: 41,
-				text: `${roleLabel(node.role)}${node.family ? ` (${familyLabel(node.family)})` : ""} · ${statusLabel(node.status)}`,
+				text: `${roleLabel(node.role)}${node.family ? ` (${familyLabel(node.family)})` : ""}${node.domain ? ` · ${node.domain}` : ""} · ${statusLabel(node.status)}`,
 			}),
 		);
 		if (node.pendingPermissions > 0) {
@@ -629,6 +629,7 @@ function renderList(graph) {
 				el("td", {}, [
 					el("span", { text: roleLabel(node.role) }),
 					node.family ? el("span", { class: "pill", text: familyLabel(node.family) }) : null,
+					node.domain ? el("span", { class: "pill", text: node.domain }) : null,
 				]),
 				el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
 				el("td", { text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
@@ -641,7 +642,81 @@ function renderList(graph) {
 
 let teamRenderedSig = "";
 
-function renderTeam(graph) {
+/** Human label for a seat's jurisdiction. */
+function domainLabel(domain) {
+	return domain ? domain : "chưa đặt phạm vi";
+}
+
+/**
+ * Keep the domain <select> in step with what is actually on the board, without
+ * throwing away the operator's current choice: a filter that resets itself on
+ * every 5s poll is worse than no filter.
+ */
+function syncDomainFilter(graph) {
+	const select = $("graph-domain");
+	if (!select) return;
+	const domains = [...new Set((graph.nodes ?? []).map((node) => node.domain).filter(Boolean))].sort();
+	const wanted = ["", ...domains].join("|");
+	if (select.dataset.options !== wanted) {
+		const previous = select.value;
+		select.dataset.options = wanted;
+		clear(select);
+		select.appendChild(el("option", { value: "", text: "tất cả phạm vi" }));
+		for (const domain of domains) select.appendChild(el("option", { value: domain, text: domain }));
+		select.value = domains.includes(previous) ? previous : "";
+	}
+	return select.value;
+}
+
+/**
+ * Restrict the board to one jurisdiction.
+ *
+ * Edges are kept only when BOTH ends survive: half an edge pointing into
+ * nothing would read as a message to an agent that does not exist.
+ */
+function filterByDomain(graph, domain) {
+	if (!domain) return graph;
+	const nodes = (graph.nodes ?? []).filter((node) => node.domain === domain);
+	const kept = new Set(nodes.map((node) => node.id));
+	return {
+		...graph,
+		nodes,
+		edges: (graph.edges ?? []).filter((edge) => kept.has(edge.from) && kept.has(edge.to)),
+	};
+}
+
+/**
+ * Two Supervisors over one domain is not a cosmetic labelling problem: a Lead
+ * under both refuses BOTH decisions and escalates, so governance stops for
+ * everyone underneath. It gets its own notice rather than a line in the
+ * degraded list.
+ */
+function renderJurisdiction(graph) {
+	const box = $("graph-jurisdiction");
+	if (!box) return;
+	const jurisdiction = graph.jurisdiction ?? {};
+	const conflicts = jurisdiction.conflicts ?? [];
+	const unlabeled = jurisdiction.unlabeled ?? [];
+	const lines = [];
+	for (const conflict of conflicts) lines.push(`Chồng lấn phạm vi: ${conflict.detail}`);
+	if (unlabeled.length > 0) {
+		lines.push(
+			`${unlabeled.length} ghế Trưởng nhóm/Giám sát chưa có nhãn team.domain — ở chế độ nhiều Giám sát (PASEO_TEAM_TOPOLOGY=multi) họ không quản được ai và cũng không ai quản được họ.`,
+		);
+	}
+	box.textContent = lines.join(" ");
+	box.classList.toggle("hidden", lines.length === 0);
+	box.classList.toggle("alert", conflicts.length > 0);
+}
+
+function renderTeam(fullGraph) {
+	const domain = syncDomainFilter(fullGraph);
+	const graph = filterByDomain(fullGraph, domain);
+	renderJurisdiction(fullGraph);
+	return renderTeamGraph(graph, fullGraph);
+}
+
+function renderTeamGraph(graph, fullGraph) {
 	// Same payload, same picture: skip the diagram/list rebuild so the 5s poll
 	// does not wipe hover state while idle. collectedAt / pendingParents /
 	// inspectSpent move on every snapshot but only feed the meta line, the
@@ -654,8 +729,13 @@ function renderTeam(graph) {
 		else renderList(graph);
 	}
 
-	const counts = graph.counts ?? {};
-	$("graph-meta").textContent = `${counts.agents ?? 0} agent · cập nhật ${relativeTime(graph.collectedAt)}`;
+	const counts = fullGraph.counts ?? {};
+	const shown = (graph.nodes ?? []).length;
+	const total = counts.agents ?? shown;
+	const scope = shown === total ? `${total} agent` : `${shown}/${total} agent`;
+	const messages = (graph.edges ?? []).filter((edge) => edge.type === "message").length;
+	$("graph-meta").textContent =
+		`${scope}${messages ? ` · ${messages} nhắn tin` : ""} · cập nhật ${relativeTime(graph.collectedAt)}`;
 
 	const notice = $("graph-degraded");
 	const sentence = degradedSentence(graph.degraded ?? [], graph.pendingParents ?? 0);
@@ -678,6 +758,13 @@ function openDrawer(node) {
 		["Thư mục làm việc", node.cwd],
 		["Chờ bạn duyệt", node.pendingPermissions || "không có"],
 	];
+	if (node.role === "supervisor" || node.role === "lead") {
+		facts.push(["Phạm vi quản (team.domain)", domainLabel(node.domain)]);
+	}
+	if (node.forkOf) {
+		const source = lastGraph?.nodes?.find((other) => other.id === node.forkOf);
+		facts.push(["Bàn giao từ", source ? source.name || node.forkOf : node.forkOf]);
+	}
 	if (node.orphan) facts.push(["Người giao việc", "không có trong danh sách này (có thể đã lưu trữ)"]);
 	if (advanced) facts.push(["Mã agent", node.id], ["Nhà cung cấp", node.provider], ["Mức suy nghĩ", node.thinking]);
 	body.appendChild(kvTable(facts));
@@ -711,9 +798,28 @@ function openDrawer(node) {
 
 $("drawer-close").addEventListener("click", () => $("node-drawer").classList.add("hidden"));
 
+/**
+ * Chat rooms are opt-in because each one costs a daemon round trip. The field
+ * is normalized here so a stray space or trailing comma does not turn into a
+ * rejected request the operator has to decode.
+ */
+function graphRooms() {
+	return ($("graph-rooms")?.value ?? "")
+		.split(",")
+		.map((room) => room.trim())
+		.filter((room) => /^[A-Za-z0-9._-]{1,128}$/.test(room))
+		.slice(0, 8)
+		.join(",");
+}
+
 async function refreshGraph({ silent = false } = {}) {
 	try {
-		lastGraph = (await api(`/api/graph${$("graph-all").checked ? "?all=1" : ""}`)).data;
+		const params = new URLSearchParams();
+		if ($("graph-all").checked) params.set("all", "1");
+		const rooms = graphRooms();
+		if (rooms) params.set("withChat", rooms);
+		const query = params.toString();
+		lastGraph = (await api(`/api/graph${query ? `?${query}` : ""}`)).data;
 		if (activeTab === "graph") renderTeam(lastGraph);
 	} catch (error) {
 		if (!silent) toastError(error);
@@ -727,6 +833,14 @@ loaders.graph = async () => {
 
 $("graph-refresh").addEventListener("click", () => refreshGraph());
 $("graph-all").addEventListener("change", () => refreshGraph());
+// A room read costs a round trip, so it fires on commit (blur/Enter), not on
+// every keystroke.
+$("graph-rooms").addEventListener("change", () => refreshGraph());
+// The domain filter is a local view change: no request, just a redraw.
+$("graph-domain").addEventListener("change", () => {
+	teamRenderedSig = "";
+	if (lastGraph) renderTeam(lastGraph);
+});
 
 // A paseo round trip costs ~3s, so 5s is the floor that still leaves the daemon
 // idle between polls. The server caches, so extra tabs cost nothing.

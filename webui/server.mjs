@@ -110,6 +110,11 @@ export const ROUTES = {
 				"graph",
 				...(q.all === "1" ? ["--all"] : []),
 				...(q.maxInspect ? ["--max-inspect", match(q.maxInspect, /^\d{1,3}$/, "maxInspect")] : []),
+				// Coordination view: each room costs one round trip, so it is
+				// opt-in and the room list is pattern-checked before it reaches
+				// argv — the CLI validates again, but a WebUI that forwards
+				// arbitrary text into a command line is a bug on its own.
+				...(q.withChat ? ["--with-chat", match(q.withChat, /^[A-Za-z0-9._-]{1,128}(,[A-Za-z0-9._-]{1,128}){0,7}$/, "withChat")] : []),
 			],
 		}),
 		// Slightly under the UI's poll interval so a poll usually gets a fresh

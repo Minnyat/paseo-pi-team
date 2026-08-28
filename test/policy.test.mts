@@ -1427,7 +1427,7 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 
 // --- Examples regression: every V3 brief in examples/*.md must parse clean ---
 
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1643,6 +1643,128 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		else process.env.PASEO_AGENT_ID = prevSelf;
 		if (prevScripts === undefined) delete process.env.PASEO_TEAM_SCRIPTS_DIR;
 		else process.env.PASEO_TEAM_SCRIPTS_DIR = prevScripts;
+	}
+}
+
+
+/** Restore an env var to exactly what it was, absence included. */
+function restoreEnv(name: string, previous: string | undefined): void {
+	if (previous === undefined) delete process.env[name];
+	else process.env[name] = previous;
+}
+
+// --- PR-D governance: the Pi extension really applies the ownership wall ----
+// The rules themselves are covered in governance.test.mts. This drives the
+// extension's own handlers, because a rule the adapter never calls is a rule
+// that does not exist (OCR-007).
+{
+	const prevRole = process.env.PASEO_PI_ROLE;
+	const prevSelf = process.env.PASEO_AGENT_ID;
+	const prevHome = process.env.PASEO_HOME;
+	const prevTopology = process.env.PASEO_TEAM_TOPOLOGY;
+	const prevDomain = process.env.PASEO_TEAM_DOMAIN;
+
+	const LEAD_A = "aaaaaaaa-3333-4333-8333-333333333333";
+	const LEAD_B = "bbbbbbbb-4444-4444-8444-444444444444";
+	const PEER_OF_B = "cccccccc-5555-4555-8555-555555555555";
+	const SUP_A = "dddddddd-6666-4666-8666-666666666666";
+
+	const home = mkdtempSync(join(tmpdir(), "pst-gov-home-"));
+	const agentsDir = join(home, "agents", "D--repo");
+	const writeState = (id: string, provider: string, labels: Record<string, string>) =>
+		writeFileSync(join(agentsDir, `${id}.json`), JSON.stringify({ id, provider, labels }), "utf8");
+	mkdirSync(agentsDir, { recursive: true });
+	writeState(PEER_OF_B, "pi-peer/anthropic/model", { "paseo.parent-agent-id": LEAD_B });
+	writeState(LEAD_B, "pi-lead/anthropic/model", { "team.domain": "frontend" });
+	writeState(SUP_A, "pi-supervisor/anthropic/model", { "team.domain": "backend" });
+
+	process.env.PASEO_PI_ROLE = "lead";
+	process.env.PASEO_AGENT_ID = LEAD_A;
+	process.env.PASEO_HOME = home;
+	process.env.PASEO_TEAM_DOMAIN = "backend.auth";
+	try {
+		const { piStub, handlers } = makePiStub(["read", "mcp"]);
+		process.env.PASEO_TEAM_TOPOLOGY = "multi";
+		const createExtension = await loadFreshExtension("lifecycle=governance");
+		createExtension(piStub);
+		const toolCall = requireHandler(handlers, "tool_call");
+		const prompt = async (agentId: string) =>
+			(await toolCall({
+				toolName: "mcp",
+				input: { tool: "send_agent_prompt", args: { agentId, prompt: "status?" } },
+			})) as { block?: boolean; reason?: string } | undefined;
+
+		const foreign = await prompt(PEER_OF_B);
+		assert.equal(foreign?.block, true, "the Pi extension applies the send_agent_prompt ownership wall");
+		assert.match(String(foreign?.reason), /PROMPT_TARGET_NOT_OWNED/);
+		assert.match(String(foreign?.reason), /bbbbbbbb/, "and names the Lead that owns it");
+
+		assert.equal((await prompt(LEAD_B))?.block, undefined, "another Lead stays reachable");
+		assert.equal((await prompt(SUP_A))?.block, undefined, "a Supervisor stays reachable");
+
+		const unknown = await prompt("eeeeeeee-7777-4777-8777-777777777777");
+		assert.equal(unknown?.block, true, "an unresolvable target is fail-closed");
+		assert.match(String(unknown?.reason), /PROMPT_TARGET_UNKNOWN/);
+
+		// The jurisdiction verdict reaches the Lead's turn.
+		const beforeStart = requireHandler(handlers, "before_agent_start");
+		const decision = [
+			"SUPERVISOR_OBSERVATION",
+			"",
+			"PROJECT_ID: shop",
+			"DOMAIN: frontend",
+			`FROM_AGENT_ID: ${SUP_A}`,
+			"SUPERVISOR_DECISION:",
+			"  DECISION: retry the failed step",
+			"  REVERSIBILITY: reversible",
+		].join("\n");
+		const result = (await beforeStart({ prompt: decision, systemPrompt: "BASE" })) as
+			| { systemPrompt?: string }
+			| undefined;
+		assert.match(String(result?.systemPrompt), /JURISDICTION_MISMATCH/);
+		assert.match(String(result?.systemPrompt), /Do NOT act on it/);
+
+		const inJurisdiction = (await beforeStart({
+			prompt: decision.replace("DOMAIN: frontend", "DOMAIN: backend"),
+			systemPrompt: "BASE",
+		})) as { systemPrompt?: string } | undefined;
+		assert.match(String(inJurisdiction?.systemPrompt), /JURISDICTION_OK/);
+
+		// An ordinary prompt carries no supervisor block and gains no notice.
+		const plain = (await beforeStart({ prompt: "please review PR 12", systemPrompt: "BASE" })) as
+			| { systemPrompt?: string }
+			| undefined;
+		assert.ok(!String(plain?.systemPrompt).includes("Jurisdiction"));
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+		restoreEnv("PASEO_PI_ROLE", prevRole);
+		restoreEnv("PASEO_AGENT_ID", prevSelf);
+		restoreEnv("PASEO_HOME", prevHome);
+		restoreEnv("PASEO_TEAM_TOPOLOGY", prevTopology);
+		restoreEnv("PASEO_TEAM_DOMAIN", prevDomain);
+	}
+}
+
+// Single topology must leave the previous behaviour untouched: the pack ships
+// with one Lead in production and PR-D may not change what that Lead can do.
+{
+	const prevRole = process.env.PASEO_PI_ROLE;
+	const prevTopology = process.env.PASEO_TEAM_TOPOLOGY;
+	process.env.PASEO_PI_ROLE = "lead";
+	delete process.env.PASEO_TEAM_TOPOLOGY;
+	try {
+		const { piStub, handlers } = makePiStub(["read", "mcp"]);
+		const createExtension = await loadFreshExtension("lifecycle=governance-single");
+		createExtension(piStub);
+		const toolCall = requireHandler(handlers, "tool_call");
+		const sent = (await toolCall({
+			toolName: "mcp",
+			input: { tool: "send_agent_prompt", args: { agentId: "whoever", prompt: "status?" } },
+		})) as { block?: boolean } | undefined;
+		assert.equal(sent?.block, undefined, "single topology leaves send_agent_prompt open");
+	} finally {
+		restoreEnv("PASEO_PI_ROLE", prevRole);
+		restoreEnv("PASEO_TEAM_TOPOLOGY", prevTopology);
 	}
 }
 

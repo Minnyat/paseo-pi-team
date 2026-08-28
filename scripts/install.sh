@@ -56,6 +56,7 @@ TEAM_SUPPORT_FILES=(
   team-communication.mjs
   team-chat.mjs
   team-lease.mjs
+  team-fork.mjs
   ocr-review.mjs
   remote-paseo.mjs
   model-routing.mjs

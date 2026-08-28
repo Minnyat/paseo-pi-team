@@ -89,6 +89,20 @@
 					<label class="check" data-advanced>
 						<input type="checkbox" id="graph-all" /> Hiện cả agent đã lưu trữ
 					</label>
+					<label class="check" data-advanced>
+						Phòng chat
+						<input
+							type="text"
+							id="graph-rooms"
+							placeholder="ví dụ: leases,coord"
+							size="18"
+							title="Đọc thêm các phòng chat để vẽ đường nhắn tin giữa các Trưởng nhóm. Mỗi phòng tốn thêm một lượt gọi daemon."
+						/>
+					</label>
+					<label class="check" data-advanced>
+						Phạm vi
+						<select id="graph-domain"><option value="">tất cả</option></select>
+					</label>
 					<span id="graph-meta" class="meta"></span>
 				</div>
 
@@ -107,6 +121,8 @@
 
 				<div id="list-wrap" class="hidden"><div id="agent-list"></div></div>
 
+				<div id="graph-jurisdiction" class="notice hidden"></div>
+
 				<div id="graph-degraded" class="notice hidden"></div>
 
 				<div class="legend">
@@ -115,6 +131,8 @@
 					<span><i class="swatch role-peer"></i>Thành viên</span>
 					<span><i class="swatch role-unknown"></i>Chưa rõ vai trò</span>
 					<span><i class="line solid"></i>giao việc</span>
+					<span><i class="line dashed"></i>nhắn tin (phòng chat)</span>
+					<span><i class="line forked"></i>bàn giao (fork phiên)</span>
 				</div>
 			</section>
 

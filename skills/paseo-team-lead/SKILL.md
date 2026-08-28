@@ -390,6 +390,47 @@ Report:
 
 Never merge or deploy yourself — that decision belongs to Human.
 
+## Handing the seat over (`team_fork`)
+
+Two mechanisms, chosen by what the receiver needs — not by what is convenient:
+
+| Situation | Mechanism |
+|---|---|
+| The receiver must be **independent** (reviewer, challenger, supervisor) | **Briefing handoff.** `team_fork` refuses it: a fork inherits the framing the role exists to question. |
+| The context summarizes cleanly | Briefing handoff — the documented path, and the default |
+| The reasoning history itself must travel (split load, change host/model, take over mid-flight) | **Session fork** |
+| You are near the context limit | **Neither** — run `/compact`. Auto-compaction fires on the fork too, so a fork buys a compacted agent and a second seat. |
+
+The fork cycle, in order:
+
+1. **Claim or plan the lease.** A fork with `reason: "split-load"` or
+   `"takeover"` must name the `scope` it will own. On a handover: the successor
+   claims, then you release — never the reverse, and never neither.
+2. ```text
+   team_fork { action: "fork", agentId: "<source>", reason: "takeover",
+               disposition: "lead", scope: "<scope>",
+               provider: "<role-provider>/<...>/<model-id>",
+               model: "<model-id>", thinkingOptionId: "<level>",
+               labels: { "team.domain": "<domain>" } }
+   ```
+   This copies the transcript (no LLM turn) and imports it. It returns the new
+   `agentId`, a `seedPrompt`, and the `update_agent` call you must make next.
+3. **Route the model** with the returned `update_agent` args. The CLI has no
+   `--model`; only MCP moves it.
+4. ```text
+   team_fork { action: "verify", agentId: "<fork>", model: "<model-id>",
+               thinkingOptionId: "<level>" }
+   ```
+   Reads `runtimeInfo` — never `persistence.metadata.model`, which is a stale
+   creation-time snapshot. A mismatch is `BLOCKED: FORK_MODEL_UNROUTABLE` and
+   the fork is **deleted**; fork again rather than keep an unrouted agent.
+5. **Send the seed prompt as the fork's first message, unedited.** It revokes
+   the inherited identity: the fork holds no lease, owns no Peer, and must not
+   act as the source agent. A fork inherits belief, not authority.
+
+The source's Peers stay with the source. There is no reparent API, and `detach`
+is a Human action that leaves a Peer unable to escalate — let them finish.
+
 ## Task brief template
 
 Every Peer prompt is a V3 brief — read-only ones included: an

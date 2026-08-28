@@ -147,6 +147,44 @@ export const TEAM_TOOLS = [
 			additionalProperties: false,
 		},
 	},
+	{
+		name: "team_fork",
+		// Mirrors policy-core's teamForkToolDescription(); the parity test pins them.
+		description:
+			"Hand a session over WITHOUT retelling it: copy an agent's transcript into a new session file and import it as a new agent. `fork` validates, copies and imports, then returns the update_agent call that routes the model (the CLI cannot set it) plus a seed prompt that revokes the inherited identity; `verify` confirms the fork runs the requested model and DELETES it if not; `seed` returns the seed prompt alone. Choose a fork only when the reasoning history itself must travel (split-load, change-host, change-model, takeover). A role that must be independent (reviewer, challenger, supervisor) is refused — a fork inherits the framing it exists to question. Running out of context is NOT a fork reason: auto-compaction fires on the copy too, so use /compact instead. A fork inherits no lease and no Peers; claim your own scope before staffing a writer.",
+		roles: ["lead", "supervisor"],
+		script: "team-fork.mjs",
+		// A fork is a file copy plus one `paseo import`; the import is the slow
+		// half and shares the ~3s-per-command cost of every other Paseo call.
+		timeoutMs: 60_000,
+		buildArgs: (params) => {
+			const { action, ...rest } = params ?? {};
+			return [typeof action === "string" ? action : "seed", JSON.stringify(rest)];
+		},
+		inputSchema: {
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["fork", "verify", "seed"] },
+				agentId: { type: "string", maxLength: 64 },
+				// Mirrors FORK_REASONS in policy-core; the parity test pins them.
+				reason: { type: "string", enum: ["split-load", "change-host", "change-model", "takeover"] },
+				disposition: { type: "string", maxLength: 64 },
+				scope: { type: "string", maxLength: 256 },
+				rationale: { type: "string", maxLength: 2000 },
+				provider: { type: "string", maxLength: 256 },
+				model: { type: "string", maxLength: 128 },
+				thinkingOptionId: { type: "string", maxLength: 64 },
+				cwd: { type: "string", maxLength: 512 },
+				owns: { type: "string", maxLength: 512 },
+				doesNotOwn: { type: "string", maxLength: 512 },
+				forkAgentId: { type: "string", maxLength: 64 },
+				labels: { type: "object", additionalProperties: { type: "string" } },
+				keep: { type: "boolean" },
+			},
+			required: ["action"],
+			additionalProperties: false,
+		},
+	},
 ];
 
 /** Same two-candidate resolution the Pi extension uses for support scripts. */

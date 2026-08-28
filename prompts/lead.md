@@ -92,7 +92,51 @@ implementation still goes to an Engineer Peer.
    - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
      not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**
-7. **Browser authority is explicit and narrow**: only grant
+6b. **A supervisor decision only binds you inside its jurisdiction.** Under
+   `PASEO_TEAM_TOPOLOGY=multi` every `SUPERVISOR_OBSERVATION` /
+   `SUPERVISOR_DECISION` carries `DOMAIN:`, and your own seat carries
+   `team.domain` / `PASEO_TEAM_DOMAIN`. The runtime computes the verdict for you
+   and puts it in your turn context; act on it:
+   - `JURISDICTION_OK` → the decision is a valid delegated decision, treat it as
+     one.
+   - `JURISDICTION_MISMATCH` / `JURISDICTION_UNDECLARED` /
+     `SUPERVISOR_BLOCK_MALFORMED` → refuse. Reply `BLOCKED: <code>` and refer
+     the Supervisor to the Lead that owns the domain it named.
+   - `JURISDICTION_UNVERIFIABLE` (your seat has no domain label) → refuse and
+     ask the Human to label the seat. Do not guess your own jurisdiction.
+   - `JURISDICTION_OVERLAP` (two Supervisors claim you) → refuse BOTH and
+     escalate to the Human. Acting on either one ratifies a governance conflict
+     nobody resolved.
+   You may prompt an agent you created, or another Lead/Supervisor. Prompting
+   another Lead's Peer is refused (`BLOCKED: PROMPT_TARGET_NOT_OWNED`) — use
+   `team_chat` to reach that Lead instead. Note that parentage is a declared
+   label rather than an authenticated fact, so this guard catches mistakes, not
+   forgery.
+   With `PASEO_TEAM_TOPOLOGY` unset or `single`, none of this applies.
+7. **Handing work over: pick the mechanism, and say why.** There are two, and
+   they are not interchangeable:
+
+   | Situation | Mechanism |
+   |---|---|
+   | A role that must be **independent** (reviewer, challenger, supervisor) | **Briefing handoff.** Forking is refused — a fork inherits the framing the role exists to question. |
+   | The context is compact enough to summarize | Briefing handoff (the documented path, and the default) |
+   | The reasoning history itself must travel: splitting load, changing host or model, taking over mid-flight | **Session fork** (`team_fork`) |
+   | You are running out of context | **Neither.** Run `/compact`. Auto-compaction fires on the fork too, so a fork gives you a compacted agent and a second seat. |
+
+   A fork is a file copy — no LLM turn, near-instant. Rules the policy enforces:
+   - the fork inherits **belief, not authority**: it starts with no lease, no
+     Peers and no scope. `team_fork` returns a seed prompt that says so; send it
+     as the fork's first message, unedited.
+   - a fork that will WRITE must name the scope it takes, and you must hold the
+     lease for it. A handoff is `claim` by the successor and `release` by you —
+     a fork without that is simply two writers.
+   - the old Lead's Peers are **not** transferred. There is no reparent API, and
+     `detach` is a Human action that leaves the Peer unable to escalate. Let them
+     finish under their current Lead.
+   - `team_fork fork` stops before the model is routed (the CLI cannot set it):
+     run the `update_agent` call it hands back, then `team_fork verify`. A fork
+     on the wrong model is deleted, not kept — `BLOCKED: FORK_MODEL_UNROUTABLE`.
+8. **Browser authority is explicit and narrow**: only grant
    `BROWSER_MCP_AUTHORITY: allowed` when the Peer needs browser automation;
    this does not grant Paseo MCP or unrelated MCP servers.
 

@@ -457,4 +457,127 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 	);
 }
 
+// --- PR-D governance: the same three walls reach the Claude runtime ---------
+// Parity, not repetition: the rules are pinned in governance.test.mts, and what
+// is pinned HERE is that the Claude adapter consults them. A governance rule
+// present on one runtime only would let an operator pick a provider to escape
+// it — the exact failure the chat guard hit before the core split.
+{
+	const LEAD_A = "aaaaaaaa-3333-4333-8333-333333333333";
+	const LEAD_B = "bbbbbbbb-4444-4444-8444-444444444444";
+	const PEER_OF_B = "cccccccc-5555-4555-8555-555555555555";
+
+	const peerOfB = {
+		agentId: PEER_OF_B,
+		parentAgentId: LEAD_B,
+		provider: "pi-peer/anthropic/model",
+		role: "peer",
+		domain: null,
+	};
+	const promptCall = (over = {}) =>
+		claudeToolBlockReason({
+			role: "lead",
+			toolName: "mcp__paseo__send_agent_prompt",
+			toolInput: { agentId: PEER_OF_B, prompt: "status?" },
+			brief: null,
+			selfAgentId: LEAD_A,
+			topology: "multi",
+			promptTarget: peerOfB,
+			...over,
+		});
+
+	assert.match(String(promptCall()), /PROMPT_TARGET_NOT_OWNED/);
+	assert.match(String(promptCall()), /bbbbbbbb/, "and names the owning Lead");
+	assert.equal(
+		promptCall({ promptTarget: { ...peerOfB, parentAgentId: LEAD_A } }),
+		null,
+		"this Lead's own Peer is reachable",
+	);
+	assert.equal(
+		promptCall({ promptTarget: { ...peerOfB, role: "lead" } }),
+		null,
+		"another Lead is reachable — that is the coordination path",
+	);
+	assert.match(
+		String(promptCall({ promptTarget: null })),
+		/PROMPT_TARGET_UNKNOWN/,
+		"an unresolvable target is fail-closed on this runtime too",
+	);
+	assert.equal(
+		promptCall({ topology: "single" }),
+		null,
+		"single topology leaves send_agent_prompt exactly as it was",
+	);
+	assert.equal(
+		claudeToolBlockReason({
+			role: "lead",
+			toolName: "mcp__paseo__send_agent_prompt",
+			toolInput: { agentId: PEER_OF_B, prompt: "status?" },
+			brief: null,
+			selfAgentId: LEAD_A,
+		}),
+		null,
+		"a caller that passes no topology gets the pre-PR-D behaviour",
+	);
+
+	// recovery_for must stay inside the Supervisor's own jurisdiction here too.
+	const recovery = (over = {}) =>
+		claudeToolBlockReason({
+			role: "supervisor",
+			toolName: "mcp__paseo__create_agent",
+			toolInput: {
+				provider: "claude-lead/claude-opus-5",
+				labels: { purpose: "recovery", recovery_for: "frontend.shell" },
+				settings: { thinkingOptionId: "high" },
+			},
+			brief: null,
+			topology: "multi",
+			selfDomain: "backend",
+			...over,
+		});
+	assert.match(String(recovery()), /RECOVERY_OUT_OF_JURISDICTION/);
+	assert.equal(recovery({ selfDomain: "frontend" }), null);
+	assert.match(String(recovery({ selfDomain: null })), /JURISDICTION_UNDECLARED/);
+	assert.equal(recovery({ topology: "single" }), null, "single topology keeps the old recovery gate");
+
+	// The observation loop's heartbeat is allowed for both coordinating roles —
+	// it is what replaces polling list_agents.
+	for (const role of ["supervisor", "lead"]) {
+		assert.equal(
+			claudeToolBlockReason({
+				role,
+				toolName: "mcp__paseo__create_heartbeat",
+				toolInput: { prompt: "observation round", cron: "*/15 * * * *" },
+				brief: null,
+			}),
+			null,
+			`${role} may arm an observation heartbeat`,
+		);
+	}
+	// A schedule starts a fresh AGENT on a cron. That is orchestration, and the
+	// Supervisor does not orchestrate.
+	assert.match(
+		String(
+			claudeToolBlockReason({
+				role: "supervisor",
+				toolName: "mcp__paseo__create_schedule",
+				toolInput: { prompt: "x", cron: "* * * * *", provider: "pi-peer/x/y" },
+				brief: null,
+			}),
+		),
+		/blocked/i,
+	);
+	assert.match(
+		String(
+			claudeToolBlockReason({
+				role: "peer",
+				toolName: "mcp__paseo__create_heartbeat",
+				toolInput: { prompt: "x", cron: "* * * * *" },
+				brief: null,
+			}),
+		),
+		/Peer cannot orchestrate/,
+	);
+}
+
 console.log("claude policy tests passed");
