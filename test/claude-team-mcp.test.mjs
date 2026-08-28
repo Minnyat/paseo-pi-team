@@ -120,6 +120,15 @@ assert.deepEqual(
 		!/only sanctioned/i.test(chat.description),
 		"and must not overstate closure: the bash rules are heuristics, not a boundary",
 	);
+
+	// The payload ceiling exists in three unlinked copies for the same reason the
+	// description does: this file cannot import the .ts core, and team-chat.mjs is
+	// a separate process. Only team-chat.mjs ENFORCES it — the other two advertise
+	// it — so drift would leave a schema promising more than the tool accepts.
+	const { TEAM_CHAT_MAX_BODY_BYTES: coreCeiling } = await import("../extensions/paseo-team-core/policy-core.ts");
+	const { MAX_BODY_BYTES: enforcedCeiling } = await import("../scripts/team-chat.mjs");
+	assert.equal(chat.inputSchema.properties.message.maxLength, enforcedCeiling, "the Claude schema advertises what team-chat.mjs enforces");
+	assert.equal(coreCeiling, enforcedCeiling, "and so does the shared core");
 }
 
 console.log("claude team mcp tests passed");

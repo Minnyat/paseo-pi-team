@@ -22,6 +22,13 @@ import { fileURLToPath } from "node:url";
 import { isEntrypoint } from "./lib-common.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/**
+ * The advertised payload ceiling. team-chat.mjs enforces the real one, so drift
+ * here would only desynchronize what the schema promises from what the tool
+ * accepts — fail-closed, but confusing. The parity test keeps them equal.
+ */
+export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
+
 export const SERVER_NAME = "paseo-team";
 export const SERVER_VERSION = "1.0.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
@@ -99,7 +106,9 @@ export const TEAM_TOOLS = [
 					enum: ["handoff", "dependency", "claim", "release", "question", "decision", "progress"],
 				},
 				topic: { type: "string", maxLength: 128 },
-				message: { type: "string", minLength: 1, maxLength: 8192 },
+				// Mirrors MAX_BODY_BYTES in team-chat.mjs (and TEAM_CHAT_MAX_BODY_BYTES
+				// in policy-core). claude-team-mcp.test.mjs pins the three together.
+				message: { type: "string", minLength: 1, maxLength: TEAM_CHAT_MAX_BODY_BYTES },
 				to: { type: "array", items: { type: "string", maxLength: 136 }, minItems: 1, maxItems: 64 },
 				correlationId: { type: "string", maxLength: 128 },
 				replyTo: { type: "string", maxLength: 128 },
