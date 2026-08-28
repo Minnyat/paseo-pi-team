@@ -27,8 +27,8 @@
 //                    [--disposition <d>] [--title <t>] [--project <id>]
 //                    (disposition independent-reviewer forces worktree isolation)
 //   agents           --host-id <id> [--all]             paseo ls -g
-//   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
-//                    --thinking <level> [--workspace <wks>] [--title <t>]
+//   run              --host-id <id> --provider <role-provider>/<model-ref>
+//                    --thinking <level> [--mode <m>] [--workspace <wks>] [--title <t>]
 //                    [--prompt <text> | --brief <file>] [--wait-timeout <dur>]
 //   status           --agent-ref <host-id>/<agent-id>   paseo inspect
 //   cancel           --agent-ref <host-id>/<agent-id>   paseo stop
@@ -63,12 +63,14 @@ import {
 import { classifyRemoteFailure } from "./reliability.mjs";
 import {
 	ROLE_PROVIDERS,
-	THINKING_LEVELS,
+	THINKING_LEVELS_BY_FAMILY,
 	RoutingError,
 	cmdPercentExpansionRisk,
 	composeProviderModel,
 	loadClusterConfig,
+	providerFamily,
 	splitProviderModel,
+	validateModelForFamily,
 	validateRemoteEndpoint,
 } from "./model-routing.mjs";
 
@@ -189,6 +191,7 @@ const COMMAND_FLAG_KEYS = {
 		"hostId",
 		"provider",
 		"thinking",
+		"mode",
 		"workspace",
 		"title",
 		"prompt",
@@ -325,26 +328,30 @@ export function parseAgentRef(ref, cluster, options = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * Validate the FULL create_agent provider string
- * `<role-provider>/<pi-provider>/<model-id>`. Paseo splits at the FIRST slash
- * only, so model ids may contain further slashes. Returns the canonical form.
+ * Validate the FULL create_agent provider string. Paseo splits at the FIRST
+ * slash only, so the model part is whatever follows the role provider — but
+ * its SHAPE is per family and is not interchangeable:
+ *
+ *   pi-peer/<pi-provider>/<model-id>   pi ids carry their own provider segment,
+ *                                      and may contain further slashes
+ *   claude-peer/<model-id>             Claude ids are one bare segment
+ *
+ * A pi-shaped model on a Claude route is a config error, not something to
+ * normalise, so the family decides the check. Returns the canonical form.
  */
 export function validateRunProvider(provider) {
 	if (typeof provider !== "string" || provider.trim() === "") {
 		throw usageError(
-			"--provider <role-provider>/<pi-provider>/<model-id> is required",
+			"--provider <role-provider>/<model-ref> is required (pi: <pi-provider>/<model-id>, claude: bare model id)",
 		);
 	}
 	let roleProvider, model;
 	try {
 		({ provider: roleProvider, model } = splitProviderModel(provider));
-		// The model part must itself be <pi-provider>/<model-id> — both sides
-		// non-empty — or the route is unverifiable.
-		splitProviderModel(model);
 	} catch (error) {
 		if (error instanceof RoutingError) {
 			throw usageError(
-				`--provider must be <role-provider>/<pi-provider>/<model-id> (got "${provider}")`,
+				`--provider must be <role-provider>/<model-ref> (got "${provider}")`,
 			);
 		}
 		throw error;
@@ -354,17 +361,36 @@ export function validateRunProvider(provider) {
 			`role provider "${roleProvider}" is not a durable role profile (${ROLE_PROVIDERS.join(", ")})`,
 		);
 	}
+	// The family is known only once the role provider is, so the model check
+	// comes second — never the pi shape applied to every family.
+	const family = providerFamily(roleProvider);
+	try {
+		validateModelForFamily(family, model, (message) => new RoutingError("CONFIG_INVALID", message));
+	} catch (error) {
+		if (error instanceof RoutingError) {
+			throw usageError(`--provider "${provider}": ${error.message.replace(/^CONFIG_INVALID: /, "")}`);
+		}
+		throw error;
+	}
 	return {
 		roleProvider,
+		family,
 		model,
 		provider: composeProviderModel(roleProvider, model),
 	};
 }
 
-export function validateThinking(thinking) {
-	if (typeof thinking !== "string" || !THINKING_LEVELS.includes(thinking)) {
+/**
+ * Thinking levels belong to the runtime family: `minimal` exists only on pi and
+ * `ultracode` only on Claude. Validating against a union would accept a level
+ * the target runtime silently clamps away, which is the exact failure mode this
+ * wrapper exists to prevent. `family` defaults to pi, which predates Claude.
+ */
+export function validateThinking(thinking, family = "pi") {
+	const levels = THINKING_LEVELS_BY_FAMILY[family] ?? THINKING_LEVELS_BY_FAMILY.pi;
+	if (typeof thinking !== "string" || !levels.includes(thinking)) {
 		throw usageError(
-			`--thinking must be one of ${THINKING_LEVELS.join(" | ")} (got "${thinking}")`,
+			`--thinking must be one of ${levels.join(" | ")} for the ${family} family (got "${thinking}")`,
 		);
 	}
 	return thinking;
@@ -589,8 +615,22 @@ export function buildArgv(command, opts, endpoint) {
 			return argv;
 		}
 		case "run": {
-			const { provider } = validateRunProvider(opts.provider);
-			validateThinking(opts.thinking);
+			const { provider, family } = validateRunProvider(opts.provider);
+			validateThinking(opts.thinking, family);
+			// Permission modes belong to the provider and are NOT inherited from
+			// the caller: whenever the target provider declares modes and its id
+			// differs from the caller's (in this pack it always does — lead and
+			// peer are different profiles), Paseo refuses the create outright.
+			// pi declares no modes, so only the Claude family needs one.
+			const mode =
+				typeof opts.mode === "string" && opts.mode.trim() !== ""
+					? opts.mode.trim()
+					: null;
+			if (family === "claude" && !mode) {
+				throw usageError(
+					'a claude-* route requires --mode <plan|default|acceptEdits|auto|bypassPermissions> — Paseo cannot inherit a permission mode across providers. Use "default" unless the brief already grants EDIT_AUTHORITY (then "acceptEdits"); never "bypassPermissions"',
+				);
+			}
 			if (typeof opts.workspace !== "string" || opts.workspace.trim() === "") {
 				throw usageError(
 					"run requires --workspace <id> — the remote workspace id from `workspaces`/`workspace-create` (a remote agent without a workspace would run in the controller's cwd)",
@@ -605,6 +645,7 @@ export function buildArgv(command, opts, endpoint) {
 				"--thinking",
 				opts.thinking,
 			];
+			if (mode) argv.push("--mode", mode);
 			if (typeof opts.workspace === "string" && opts.workspace.trim() !== "") {
 				argv.push("--workspace", opts.workspace.trim());
 			}

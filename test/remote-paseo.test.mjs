@@ -1171,5 +1171,115 @@ assert.deepEqual(
 }
 
 // ---------------------------------------------------------------------------
+// Mixed fleet: a claude-* route is not a pi route
+// ---------------------------------------------------------------------------
+
+{
+	const t = "validateRunProvider: a Claude route carries a BARE model id";
+	const out = validateRunProvider("claude-peer/claude-opus-5");
+	assert.equal(out.roleProvider, "claude-peer", t);
+	assert.equal(out.model, "claude-opus-5", t);
+	assert.equal(out.provider, "claude-peer/claude-opus-5", t);
+}
+
+{
+	// A pi-shaped model on a Claude route is a config error, not something to
+	// normalise (docs/claude-runtime.md, "Two families, one control plane").
+	expectRemoteError("USAGE", () =>
+		validateRunProvider("claude-peer/anthropic/claude-opus-5"),
+	);
+	expectRemoteError("USAGE", () => validateRunProvider("claude-peer"));
+	expectRemoteError("USAGE", () => validateRunProvider("claude-peer/"));
+}
+
+{
+	const t = "validateThinking: levels are per family, never a union";
+	validateThinking("ultracode", "claude");
+	validateThinking("minimal", "pi");
+	assert.equal(validateThinking("high"), "high", t);
+	// `minimal` exists only on pi and `ultracode` only on Claude — a union would
+	// silently accept a level the target runtime clamps away.
+	expectRemoteError("USAGE", () => validateThinking("ultracode", "pi"));
+	expectRemoteError("USAGE", () => validateThinking("minimal", "claude"));
+}
+
+{
+	const t = "buildArgv: a Claude run forwards --mode";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "claude-peer/claude-opus-5",
+			thinking: "ultracode",
+			mode: "default",
+			workspace: "wks-1",
+			title: "t",
+			prompt: "x",
+		},
+		EP,
+	);
+	assert.deepEqual(
+		argv,
+		[
+			"run",
+			"--host",
+			EP,
+			"--provider",
+			"claude-peer/claude-opus-5",
+			"--thinking",
+			"ultracode",
+			"--mode",
+			"default",
+			"--workspace",
+			"wks-1",
+			"--title",
+			"t",
+			"-d",
+			"--json",
+			"x",
+		],
+		t,
+	);
+}
+
+{
+	// Paseo refuses to inherit a permission mode across providers, so a Claude
+	// agent created without one dies at the daemon with a confusing message.
+	// Catch it here, where the reason can be stated.
+	expectRemoteError("USAGE", () =>
+		buildArgv(
+			"run",
+			{
+				provider: "claude-peer/claude-opus-5",
+				thinking: "ultracode",
+				workspace: "wks-1",
+				prompt: "x",
+			},
+			EP,
+		),
+	);
+}
+
+{
+	const t = "buildArgv: a pi run needs no mode and is unchanged";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "pi-peer/testprov/model-b",
+			thinking: "medium",
+			workspace: "wks-1",
+			prompt: "x",
+		},
+		EP,
+	);
+	assert.ok(!argv.includes("--mode"), t);
+}
+
+{
+	const out = parseArgs(["run", "--host-id", "h", "--mode", "default"]);
+	assert.equal(out.mode, "default");
+	validateFlags("run", { ...out, provider: "p", thinking: "low", prompt: "x" });
+}
+
+// ---------------------------------------------------------------------------
 
 console.log("remote-paseo.test.mjs: all tests passed");
