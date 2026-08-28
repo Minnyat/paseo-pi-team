@@ -362,4 +362,65 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 	assert.equal(bash("peer", "node /x/paseo-team-scripts/team-communication.mjs ask-lead {}"), null);
 }
 
+// --- scope lease: the same rule reaches the Claude runtime -------------------
+// The rule itself is pinned in scope-lease.test.mts. What is pinned HERE is that
+// the Claude adapter actually consults it — the leg that, for the chat guard,
+// was missing on this runtime and would have made `claude-lead` a one-provider
+// bypass.
+{
+	const { resolveLeases } = await import("../extensions/paseo-team-core/policy-core.ts");
+	const LEAD_A = "aaaaaaaa-1111-4111-8111-111111111111";
+	const LEAD_B = "bbbbbbbb-2222-4222-8222-222222222222";
+	const now = 10_000_000;
+	const claim = (author, scope) => ({
+		author,
+		createdAt: new Date(now - 1000).toISOString(),
+		body: `LEASE_V1\nACTION: claim\nSCOPE: ${scope}\nTTL_MS: 3600000`,
+	});
+	const writerBrief = [
+		"PASEO_TEAM_TASK_V3_BEGIN",
+		"TASK_ID: T-1",
+		"DISPOSITION: engineer",
+		"MODE: write",
+		"OWNED_SCOPE: src/auth",
+		"EDIT_AUTHORITY: allowed",
+		"PASEO_TEAM_TASK_V3_END",
+	].join("\n");
+	const createAgent = (leases, selfAgentId, prompt = writerBrief) =>
+		claudeToolBlockReason({
+			role: "lead",
+			toolName: "mcp__paseo__create_agent",
+			toolInput: { initialPrompt: prompt },
+			brief: null,
+			leases,
+			selfAgentId,
+		});
+
+	assert.equal(
+		createAgent(resolveLeases([claim(LEAD_A, "src/auth")], { now }), LEAD_A),
+		null,
+		"the holder may staff its own scope",
+	);
+	assert.match(
+		String(createAgent(resolveLeases([claim(LEAD_B, "src/auth")], { now }), LEAD_A)),
+		/SCOPE_LEASE_HELD/,
+		"another Lead's scope is refused on this runtime too",
+	);
+	assert.match(
+		String(createAgent(resolveLeases([], { now }), LEAD_A)),
+		/SCOPE_LEASE_MISSING/,
+		"and staffing an unclaimed scope is refused",
+	);
+	// The hook could not read the ledger. Fail closed: a Lead that cannot create
+	// a writer is a visible incident, two writers on one scope is a silent one.
+	assert.match(String(createAgent(null, LEAD_A)), /LEASE_UNVERIFIABLE/);
+	assert.match(String(createAgent(undefined, LEAD_A)), /LEASE_UNVERIFIABLE/, "a caller that forgot to fetch is not a free pass");
+
+	// A read-only peer shares the tree by design and is never gated.
+	assert.equal(
+		createAgent(resolveLeases([claim(LEAD_B, "src/auth")], { now }), LEAD_A, writerBrief.replace("MODE: write", "MODE: read-only")),
+		null,
+	);
+}
+
 console.log("claude policy tests passed");

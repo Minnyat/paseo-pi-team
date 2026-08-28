@@ -39,6 +39,7 @@ $teamSupportFiles = @(
   "watchdog.mjs",
   "team-communication.mjs",
   "team-chat.mjs",
+  "team-lease.mjs",
   "ocr-review.mjs",
   "remote-paseo.mjs",
   "model-routing.mjs",

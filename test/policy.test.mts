@@ -1412,7 +1412,8 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 
 // --- Examples regression: every V3 brief in examples/*.md must parse clean ---
 
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1541,6 +1542,75 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 
 	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
 	else process.env.PASEO_PI_ROLE = prevRole;
+}
+
+// --- scope lease: the Pi extension really consults the ledger ---------------
+// Same lesson as the support-script guard: a rule the adapter never calls is a
+// rule that does not exist. This drives the extension's own tool_call handler
+// with the support script stubbed, so deleting the gate fails here.
+{
+	const { piStub, handlers } = makePiStub(["read", "mcp"]);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	const prevSelf = process.env.PASEO_AGENT_ID;
+	const prevScripts = process.env.PASEO_TEAM_SCRIPTS_DIR;
+	const LEAD_A = "aaaaaaaa-1111-4111-8111-111111111111";
+	const LEAD_B = "bbbbbbbb-2222-4222-8222-222222222222";
+
+	// A stub support-script directory whose team-lease.mjs prints a ledger in
+	// which LEAD_B holds src/auth.
+	const stubDir = mkdtempSync(join(tmpdir(), "pst-lease-stub-"));
+	const ledger = JSON.stringify({
+		ok: true,
+		entries: [
+			{
+				author: LEAD_B,
+				createdAt: new Date().toISOString(),
+				body: "LEASE_V1\nACTION: claim\nSCOPE: src/auth\nTTL_MS: 3600000",
+			},
+		],
+	});
+	writeFileSync(join(stubDir, "team-lease.mjs"), `console.log(${JSON.stringify(ledger)});\n`, "utf8");
+
+	process.env.PASEO_PI_ROLE = "lead";
+	process.env.PASEO_AGENT_ID = LEAD_A;
+	process.env.PASEO_TEAM_SCRIPTS_DIR = stubDir;
+	try {
+		const createExtension = await loadFreshExtension("lifecycle=lease");
+		createExtension(piStub);
+		const toolCall = requireHandler(handlers, "tool_call");
+		const writerBrief = [
+			"PASEO_TEAM_TASK_V3_BEGIN",
+			"TASK_ID: T-1",
+			"DISPOSITION: engineer",
+			"MODE: write",
+			"OWNED_SCOPE: src/auth/login",
+			"EDIT_AUTHORITY: allowed",
+			"PASEO_TEAM_TASK_V3_END",
+		].join("\n");
+		const create = async (prompt: string) =>
+			(await toolCall({
+				toolName: "mcp",
+				input: { tool: "create_agent", args: { initialPrompt: prompt } },
+			})) as { block?: boolean; reason?: string } | undefined;
+
+		const blocked = await create(writerBrief);
+		assert.equal(blocked?.block, true, "the Pi extension consults the lease ledger");
+		assert.match(String(blocked?.reason), /SCOPE_LEASE_HELD/);
+		assert.match(String(blocked?.reason), /bbbbbbbb/, "and names the Lead to go talk to");
+
+		// A read-only peer on the very same scope is untouched: the lease guards
+		// writers, not parallelism.
+		const readOnly = await create(writerBrief.replace("MODE: write", "MODE: read-only"));
+		assert.equal(readOnly?.block, undefined);
+	} finally {
+		rmSync(stubDir, { recursive: true, force: true });
+		if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+		else process.env.PASEO_PI_ROLE = prevRole;
+		if (prevSelf === undefined) delete process.env.PASEO_AGENT_ID;
+		else process.env.PASEO_AGENT_ID = prevSelf;
+		if (prevScripts === undefined) delete process.env.PASEO_TEAM_SCRIPTS_DIR;
+		else process.env.PASEO_TEAM_SCRIPTS_DIR = prevScripts;
+	}
 }
 
 console.log("[paseo-team] policy tests passed");

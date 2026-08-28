@@ -29,7 +29,10 @@ import {
 	callsAgentBrowserCli,
 	callsPaseoCli,
 	coordinationCliBlockReason,
+	leaseBlockReason,
+	type LeaseHolder,
 	supportScriptBlockReason,
+	writerScopeFromCreateAgent,
 	extraTools,
 	gitAuthorityBlockReason,
 	isAgentBrowserMcpTarget,
@@ -184,6 +187,11 @@ export interface ClaudeToolDecisionInput {
 	toolName: string;
 	toolInput?: unknown;
 	brief: ParsedTaskBrief | null;
+	/** Live scope leases, resolved by policy-core. Required only when the call
+	 *  staffs a writer; null means the ledger could not be read (fail-closed). */
+	leases?: Map<string, LeaseHolder> | null;
+	/** This agent's own Paseo id, to match against the lease holder. */
+	selfAgentId?: string | null;
 }
 
 function bashCommand(toolInput: unknown): string {
@@ -208,6 +216,25 @@ export function claudeToolBlockReason(
 
 	if (classified.kind === "team") {
 		return teamToolBlockReason(role, teamToolName(toolName), brief);
+	}
+
+	// Same scope-lease rule the Pi extension applies. The ledger cannot be read
+	// from a synchronous guard, so the hook fetches it and hands it in; an
+	// absent `leases` when one is actually needed is treated as unreadable,
+	// which is fail-closed rather than a silent allow.
+	if (
+		role === "lead" &&
+		classified.kind === "paseo-mcp" &&
+		matchesPaseoToolName(classified.target ?? "", ["create_agent"]) &&
+		writerScopeFromCreateAgent(input.toolInput)
+	) {
+		const leaseReason = leaseBlockReason({
+			role,
+			args: input.toolInput,
+			leases: input.leases ?? null,
+			selfAgentId: input.selfAgentId ?? null,
+		});
+		if (leaseReason) return leaseReason;
 	}
 
 	if (classified.kind === "paseo-mcp") {

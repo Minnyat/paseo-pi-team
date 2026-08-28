@@ -78,7 +78,7 @@ const TOKEN = /^[A-Za-z0-9._:-]{1,128}$/;
 const MENTION_TOKEN = /^[A-Za-z0-9-]{4,64}$/;
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const DOMAIN_PREFIX = "domain:";
-const ALLOWED_FIELDS = new Set(["room", "kind", "topic", "message", "to", "correlationId", "hop", "ttl", "replyTo"]);
+const ALLOWED_FIELDS = new Set(["room", "kind", "topic", "message", "to", "correlationId", "hop", "ttl", "replyTo", "notify"]);
 
 function bad(code, message) {
 	return Object.assign(new Error(message), { code });
@@ -133,8 +133,18 @@ export function validateTeamMessage(input) {
 	}
 	token("room", room);
 	token("topic", topic);
-	if (!Array.isArray(to) || to.length === 0) {
-		throw bad("RECIPIENTS_MISSING", "to must be a non-empty array of agent refs or 'domain:<name>' entries");
+	// `notify: false` marks a RECORD rather than a request — a ledger entry that
+	// belongs in the room's history but that nobody has to wake up for. Mentions
+	// are what wake an agent, so a record simply has none. Default is true: a
+	// message with no audience must be a deliberate choice, never an omission.
+	const notify = input.notify === undefined ? true : input.notify;
+	if (typeof notify !== "boolean") throw bad("FIELD_INVALID", "notify must be a boolean");
+	if (notify) {
+		if (!Array.isArray(to) || to.length === 0) {
+			throw bad("RECIPIENTS_MISSING", "to must be a non-empty array of agent refs or 'domain:<name>' entries");
+		}
+	} else if (Array.isArray(to) && to.length > 0) {
+		throw bad("FIELD_INVALID", "notify: false posts a record, so it cannot also carry recipients");
 	}
 	const hop = input.hop === undefined ? 0 : input.hop;
 	if (!Number.isInteger(hop) || hop < 0 || hop >= MAX_HOP) {
@@ -149,7 +159,8 @@ export function validateTeamMessage(input) {
 		kind,
 		topic,
 		message: message.trim(),
-		to: [...to],
+		to: notify ? [...to] : [],
+		notify,
 		hop,
 		ttl,
 		replyTo: input.replyTo === undefined ? null : token("replyTo", input.replyTo),
@@ -317,7 +328,10 @@ export async function postTeamMessage(input, options = {}) {
 		throw bad("ROOM_NOT_ALLOWED", `ROOM_NOT_ALLOWED: '${message.room}' is outside this agent's room allowlist`);
 	}
 	const run = options.runPaseo ?? runPaseo;
-	const { mentions, agentIds } = await expandRecipients(message.to, { runPaseo: run, selfAgentId: ctx.selfAgentId });
+	// A record resolves no recipients, so it also costs no `paseo ls` round trip.
+	const { mentions, agentIds } = message.notify
+		? await expandRecipients(message.to, { runPaseo: run, selfAgentId: ctx.selfAgentId })
+		: { mentions: [], agentIds: [] };
 	const body = buildEnvelope(message, {
 		fromAgentId: ctx.selfAgentId,
 		fromRole: ctx.role,

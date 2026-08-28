@@ -55,6 +55,7 @@ TEAM_SUPPORT_FILES=(
   watchdog.mjs
   team-communication.mjs
   team-chat.mjs
+  team-lease.mjs
   ocr-review.mjs
   remote-paseo.mjs
   model-routing.mjs

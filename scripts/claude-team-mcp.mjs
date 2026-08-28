@@ -121,6 +121,32 @@ export const TEAM_TOOLS = [
 			additionalProperties: false,
 		},
 	},
+	{
+		name: "team_lease",
+		// Mirrors policy-core's teamLeaseToolDescription(); the parity test pins them.
+		description:
+			"Take, extend, release or inspect a scope lease — the record of which Lead may put a WRITER on which files. `claim` before creating an engineer; `release` when the work is done; `renew` for long work; `status` to see the board. Scopes are repo-relative paths and nest: holding `src` also holds `src/auth`. A claim can lose — read `granted` in the result, not merely `ok`. Creating a write-mode Peer without a covering lease is refused.",
+		// Supervisor is included so it can read the board; the per-action gate in
+		// policy-core refuses it claim/renew/release.
+		roles: ["lead", "supervisor"],
+		script: "team-lease.mjs",
+		timeoutMs: 30_000,
+		buildArgs: (params) => {
+			const { action, ...rest } = params ?? {};
+			return [typeof action === "string" ? action : "status", JSON.stringify(rest)];
+		},
+		inputSchema: {
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["claim", "renew", "release", "status"] },
+				scope: { type: "string", maxLength: 256 },
+				ttlMs: { type: "integer", minimum: 1, maximum: 43200000 },
+				taskId: { type: "string", maxLength: 128 },
+			},
+			required: ["action"],
+			additionalProperties: false,
+		},
+	},
 ];
 
 /** Same two-candidate resolution the Pi extension uses for support scripts. */

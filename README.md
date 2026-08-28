@@ -300,7 +300,7 @@ When the `claude` CLI is present, the installers also run
 skips that step; it is not an error.
 
 The support scripts are `lib-common`, `reliability`, `watchdog`,
-`team-communication`, `team-chat`, `ocr-review`, `remote-paseo`,
+`team-communication`, `team-chat`, `team-lease`, `ocr-review`, `remote-paseo`,
 `model-routing`, `team-scripts-path`, `claude-hook` and `claude-team-mcp`.
 They are copied **flat**, so every import between them
 must stay `./<name>.mjs`. `installer-contract.test.mjs` guards that: every
