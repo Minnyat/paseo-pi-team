@@ -312,6 +312,47 @@ export function callsPaseoChatCli(command: string): boolean {
 }
 
 /**
+ * Direct invocation of a pack support script that grants authority the caller's
+ * role does not have.
+ *
+ * Blocking `paseo chat` while leaving `node .../team-chat.mjs` open moves the
+ * bypass one word to the left: the script's own gate reads PASEO_PI_ROLE and
+ * PASEO_AGENT_ID from an environment the calling process owns, so it can only
+ * check what the caller asserts. This puts both spellings at the same bar.
+ *
+ * Two scripts are deliberately NOT listed:
+ *   - ocr-review.mjs        the Reviewer skill runs it directly, by design
+ *   - team-communication.mjs equivalent to peer_ask_lead — same parent-scoped,
+ *                            fail-closed sender, no authority a Peer lacks
+ *
+ * Like every bash rule in this file this is a HEURISTIC, not an authorization
+ * boundary: a determined process can always re-spell the invocation. It closes
+ * the obvious door, and the daemon remains the only real boundary.
+ */
+const AUTHORITY_SUPPORT_SCRIPTS = ["team-chat.mjs", "remote-paseo.mjs"];
+const SUPPORT_SCRIPT_RE = new RegExp(
+	`(?:^|[\\s"'\`/\\\\])(${AUTHORITY_SUPPORT_SCRIPTS.map((name) => name.replace(".", "\\.")).join("|")})(?=$|["'\`\\s])`,
+	"i",
+);
+
+export function callsTeamSupportScript(command: string): boolean {
+	if (typeof command !== "string" || command.trim() === "") return false;
+	// Require an actual invocation, not a bare mention in prose or an echo.
+	if (!/\bnode(?:\.exe)?\b/i.test(command)) return false;
+	return SUPPORT_SCRIPT_RE.test(command);
+}
+
+/** Reason a Peer may not run a pack support script from bash. */
+export function supportScriptBlockReason(
+	role: TeamRole,
+	command: string,
+): string | null {
+	if (role !== "peer") return null;
+	if (!callsTeamSupportScript(command)) return null;
+	return "Peer cannot run this Paseo team support script from bash — it would grant coordination or remote-host authority the Peer role does not have. Use peer_ask_lead to raise a DEPENDENCY_REQUEST instead.";
+}
+
+/**
  * Lead/Supervisor bash guard: redirect the chat CLI to the typed tool.
  *
  * Deliberately narrow -- a chat-only redirect, not a new CLI ban. Every other
@@ -329,6 +370,23 @@ export function coordinationCliBlockReason(
 	if (role !== "lead" && role !== "supervisor") return null;
 	if (!callsPaseoChatCli(command)) return null;
 	return `Use the team_chat tool instead of the Paseo chat CLI. The typed tool enforces the TEAM_MESSAGE_V1 envelope, the room allowlist, the ${TEAM_CHAT_MAX_BODY_BYTES}-byte payload ceiling and hop/TTL loop protection - none of which exist when the command is typed by hand.`;
+}
+
+/**
+ * One sentence the runtime adapters put in the team_chat tool description.
+ * Deliberately does NOT claim the chat surface is sealed: the bash rules are
+ * heuristics, rooms are unrestricted unless PASEO_TEAM_ROOMS is set, and chat
+ * rooms have no ACL of their own.
+ */
+export function teamChatToolDescription(): string {
+	return (
+		"Coordinate with other Leads and Supervisors through a Paseo chat room. " +
+		"`post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; " +
+		"`read` returns the room with envelopes parsed; `rooms` lists rooms. " +
+		"Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. " +
+		"Use this instead of the Paseo chat CLI, which the bash guard redirects here. " +
+		"Rooms are unrestricted unless PASEO_TEAM_ROOMS is set."
+	);
 }
 
 // ---------------------------------------------------------------------------

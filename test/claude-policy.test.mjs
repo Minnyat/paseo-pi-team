@@ -350,4 +350,16 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 	);
 }
 
+// --- OCR-001 parity: the support-script side door is shut on Claude too ----
+{
+	const bash = (role, command) =>
+		claudeToolBlockReason({ role, toolName: "Bash", toolInput: { command }, brief: null });
+
+	assert.match(String(bash("peer", "node /x/paseo-team-scripts/team-chat.mjs post {}")), /support script/i);
+	assert.match(String(bash("peer", "node /x/paseo-team-scripts/remote-paseo.mjs run")), /support script/i);
+	// The Reviewer Peer runs this one by design.
+	assert.equal(bash("peer", "node /x/paseo-team-scripts/ocr-review.mjs --repo r"), null);
+	assert.equal(bash("peer", "node /x/paseo-team-scripts/team-communication.mjs ask-lead {}"), null);
+}
+
 console.log("claude policy tests passed");

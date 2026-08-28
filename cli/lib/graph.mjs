@@ -249,6 +249,17 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 		const hasParentInfo = hasInspectParent || hasStateParent;
 		const parentId = hasInspectParent ? parents[agent.id] : (state?.parentAgentId ?? null);
 		const parentSource = hasInspectParent ? "inspect" : hasStateParent ? "state" : null;
+		// Neither source carries a timestamp we can compare, so precedence cannot
+		// also mean "fresher". When they disagree the inspect answer still wins —
+		// but saying so out loud beats resolving it invisibly, the same way
+		// modelDrift is surfaced rather than smoothed over.
+		if (hasInspectParent && hasStateParent && (state?.parentAgentId ?? null) !== parents[agent.id]) {
+			faults.push({
+				agentId: agent.id,
+				reason: "PARENT_SOURCE_DISAGREEMENT",
+				detail: `inspect=${parents[agent.id] ?? "null"} state=${state?.parentAgentId ?? "null"}`,
+			});
+		}
 		// An agent whose parent exists but is not in the listing (archived, or
 		// living in a directory this listing did not cover) must not be drawn
 		// as a root: that would silently flatten the tree.
@@ -289,12 +300,16 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			edges.push({ type: "spawn", from: node.parentId, to: node.id, confidence: "confirmed" });
 		}
 	}
-	// Message edges are keyed by correlationId: the same PEER_MESSAGE_V1 block
-	// can be seen twice (sender log and recipient prompt) and must draw once.
+	// The same block can be seen twice (a sender log and a recipient prompt, or
+	// one room read overlapping another) and must draw once. The key includes the
+	// participants and the room, NOT correlationId alone: that id is chosen by the
+	// sender, so keying on it lets one message — careless or crafted — erase a
+	// different real edge that happens to share it.
 	const seen = new Set();
 	for (const message of messages) {
 		if (!message || typeof message.from !== "string" || typeof message.to !== "string") continue;
-		const key = message.correlationId ?? `${message.from}->${message.to}:${message.ts ?? ""}`;
+		const identity = message.correlationId ?? `${message.ts ?? ""}`;
+		const key = `${message.room ?? ""}|${message.from}->${message.to}|${identity}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		edges.push({

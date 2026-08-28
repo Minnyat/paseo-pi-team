@@ -71,7 +71,9 @@ import {
 	TEAM_CHAT_MAX_BODY_BYTES,
 	TEAM_MESSAGE_KIND_NAMES,
 	coordinationCliBlockReason,
+	supportScriptBlockReason,
 	teamChatToolBlockReason,
+	teamChatToolDescription,
 	type ParsedTaskBrief,
 	type PeerMode,
 	type Policy,
@@ -148,8 +150,7 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 	pi.registerTool({
 		name: TEAM_CHAT_TOOL,
 		label: "team_chat",
-		description:
-			"Coordinate with other Leads and Supervisors through a Paseo chat room. `post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; `read` returns the room with envelopes parsed; `rooms` lists rooms. Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. This is the only sanctioned chat path — the Paseo chat CLI is blocked.",
+		description: teamChatToolDescription(),
 		parameters: {
 			type: "object",
 			properties: {
@@ -387,6 +388,10 @@ export default function (pi: ExtensionAPI) {
 					reason:
 						"Peer cannot run agent-browser CLI through bash; BROWSER_MCP_AUTHORITY only permits the typed agent-browser MCP surface.",
 				};
+			}
+			const supportScriptReason = supportScriptBlockReason(r, command);
+			if (supportScriptReason) {
+				return { block: true, reason: supportScriptReason };
 			}
 			const gitBlockReason = gitAuthorityBlockReason(
 				command,

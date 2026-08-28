@@ -449,4 +449,45 @@ function fakeRunner(overrides = {}) {
 	assert.ok(result.degraded.some((f) => f.reason === "CHAT_READ_FAILED" && f.detail.includes("broken")));
 }
 
+// --- OCR-005: dedup must not let one message erase another -----------------
+// correlationId is chosen by the sender, so it is not a unique key. Two
+// distinct messages sharing one must both draw, or a crafted (or merely
+// careless) collision silently deletes a real edge from the graph.
+{
+	const A = "aaaaaaaa-1111-4111-8111-111111111111";
+	const Bq = "bbbbbbbb-2222-4222-8222-222222222222";
+	const graph = buildGraph({
+		agents: [
+			{ id: A, shortId: "aaaaaaa", provider: "pi-lead/o/m", status: "idle" },
+			{ id: Bq, shortId: "bbbbbbb", provider: "pi-lead/o/m", status: "idle" },
+		],
+		messages: [
+			{ from: A, to: Bq, kind: "question", correlationId: "same", room: "coord", confidence: "confirmed" },
+			{ from: Bq, to: A, kind: "decision", correlationId: "same", room: "coord", confidence: "confirmed" },
+			{ from: A, to: Bq, kind: "question", correlationId: "same", room: "leases", confidence: "confirmed" },
+			// A true duplicate (same room, same author, same correlation) still draws once.
+			{ from: A, to: Bq, kind: "question", correlationId: "same", room: "coord", confidence: "confirmed" },
+		],
+		now: 0,
+	});
+	const messages = graph.edges.filter((e) => e.type === "message");
+	assert.equal(messages.length, 3, "distinct author/room pairs survive; the exact repeat is deduped");
+}
+
+// --- OCR-004: a parent disagreement is reported, not silently resolved ------
+{
+	const graph = buildGraph({
+		agents: AGENTS,
+		parents: { peer: "lead" },
+		states: { peer: { agentId: "peer", parentAgentId: "sup" } },
+		now: 0,
+	});
+	const peer = graph.nodes.find((n) => n.id === "peer");
+	assert.equal(peer.parentId, "lead", "the paid-for inspect answer still wins");
+	assert.ok(
+		graph.degraded.some((f) => f.reason === "PARENT_SOURCE_DISAGREEMENT" && f.agentId === "peer"),
+		"but the operator is told the two sources disagree",
+	);
+}
+
 console.log("graph tests passed");

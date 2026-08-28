@@ -29,6 +29,7 @@ import {
 	callsAgentBrowserCli,
 	callsPaseoCli,
 	coordinationCliBlockReason,
+	supportScriptBlockReason,
 	extraTools,
 	gitAuthorityBlockReason,
 	isAgentBrowserMcpTarget,
@@ -286,6 +287,8 @@ export function claudeToolBlockReason(
 		if (callsAgentBrowserCli(command)) {
 			return "Peer cannot run agent-browser CLI through bash; BROWSER_MCP_AUTHORITY only permits the typed agent-browser MCP surface.";
 		}
+		const supportScriptReason = supportScriptBlockReason(role, command);
+		if (supportScriptReason) return supportScriptReason;
 		return gitAuthorityBlockReason(
 			command,
 			peerGitAuthority(brief),

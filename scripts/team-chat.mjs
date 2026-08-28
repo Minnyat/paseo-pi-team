@@ -59,13 +59,23 @@ export const TEAM_MESSAGE_KINDS = Object.freeze([
 
 export const TEAM_CHAT_ROLES = Object.freeze(["lead", "supervisor"]);
 
-/** Portable payload ceiling (see the header note on argv limits). */
+/** Portable payload ceiling for the message text (see the argv note above). */
 export const MAX_BODY_BYTES = 8192;
+/**
+ * Ceiling for the WHOLE posted body. argv is what the platform bounds, and the
+ * mention head grows with the recipient count, so a wide `domain:` fan-out can
+ * push a legal message past the budget. Kept well under the ~32K Windows limit
+ * so the room stays postable from any host.
+ */
+export const MAX_ENVELOPE_BYTES = 16_384;
 /** A message may be relayed at most this many times. */
 export const MAX_HOP = 8;
 export const DEFAULT_TTL = 8;
 
 const TOKEN = /^[A-Za-z0-9._:-]{1,128}$/;
+/** A mention is interpolated into the body, so its charset is what keeps the
+ *  envelope from being forgeable — a newline here would inject header lines. */
+const MENTION_TOKEN = /^[A-Za-z0-9-]{4,64}$/;
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const DOMAIN_PREFIX = "domain:";
 const ALLOWED_FIELDS = new Set(["room", "kind", "topic", "message", "to", "correlationId", "hop", "ttl", "replyTo"]);
@@ -165,6 +175,12 @@ export async function expandRecipients(to, options = {}) {
 	const add = (id, shortId) => {
 		if (self && (id === self || (shortId && self.startsWith(shortId)))) return;
 		const mention = shortId ?? String(id).slice(0, 7);
+		// Explicit recipients are AGENT_REF-checked above; rows from `paseo ls` are
+		// not, and they end up inside the message body. Fail closed rather than
+		// embed whatever the daemon happened to return.
+		if (!MENTION_TOKEN.test(mention)) {
+			throw bad("RECIPIENT_INVALID", `refusing to embed mention ${JSON.stringify(mention)}: not a plain token`);
+		}
 		if (seen.has(mention)) return;
 		seen.add(mention);
 		mentions.push(mention);
@@ -308,6 +324,13 @@ export async function postTeamMessage(input, options = {}) {
 		fromDomain: ctx.domain,
 		mentions,
 	});
+	const envelopeBytes = Buffer.byteLength(body, "utf8");
+	if (envelopeBytes > MAX_ENVELOPE_BYTES) {
+		throw bad(
+			"MESSAGE_TOO_LARGE",
+			`the envelope is ${envelopeBytes} bytes with ${mentions.length} mention(s), too large (max ${MAX_ENVELOPE_BYTES}). Narrow the recipients or send the detail by pointer.`,
+		);
+	}
 	const args = ["chat", "post", message.room, body];
 	if (message.replyTo) args.push("--reply-to", message.replyTo);
 	// One shot. `post` is a mutation with delivery ambiguity: a retry would
@@ -321,7 +344,7 @@ export async function postTeamMessage(input, options = {}) {
 		correlationId: message.correlationId,
 		recipients: agentIds,
 		mentions,
-		bytes: Buffer.byteLength(body, "utf8"),
+		bytes: envelopeBytes,
 		response,
 	};
 }
