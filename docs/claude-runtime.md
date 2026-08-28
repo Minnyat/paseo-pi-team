@@ -101,7 +101,8 @@ write mode even if the previous turn had it.
 | Read/Glob/Grep | yes | yes | yes |
 | Bash | no | yes | yes, guarded |
 | Write/Edit | no | only with `PASEO_TEAM_LEAD_WRITE=1` | only with `MODE: write` + `EDIT_AUTHORITY: allowed` |
-| `mcp__paseo__*` | monitoring + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
+| `mcp__paseo__*` | monitoring + `create_heartbeat`/`delete_heartbeat` + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
+| `mcp__paseo-team__*` | `team_watchdog`, `team_chat`, `team_fork`, `team_lease` (`status` only) | all four, `team_lease` unrestricted | `peer_ask_lead` only |
 | `mcp__agent-browser__*` | no | yes | only with `BROWSER_MCP_AUTHORITY: allowed` |
 | `Task` (Claude subagents) | no | no | no |
 
@@ -155,22 +156,55 @@ stays legible in `pteam graph` and the WebUI.
 Rule of thumb: mix Peers freely, keep ONE Lead per project on ONE family for
 the life of that project — the Lead is the deterministic part of the loop.
 
-### Crossing families needs an explicit mode
+### Every Claude agent needs an explicit mode
 
-Permission modes belong to the provider and are not inherited from the caller,
-so creating a Claude agent from a pi Lead (or the reverse) fails without one:
+A permission mode belongs to the provider and is never inherited across
+providers. The check fires when the TARGET provider declares modes and its id
+differs from the caller's — and the value being legal for the target does not
+save it:
 
 ```text
-cannot inherit mode '<none>' from caller (provider 'pi-lead') for new agent
+cannot inherit mode 'auto' from caller (provider 'claude-lead') for new agent
 (provider 'claude-peer'). Pass an explicit mode. Available modes for
 'claude-peer': plan, default, acceptEdits, auto, bypassPermissions
 ```
 
-`mode: "default"` is the right answer for a Peer: every tool call raises a Paseo
-permission the Lead triages, which is the loop the pack is built around. Use
-`acceptEdits` only for a write Peer whose brief already grants `EDIT_AUTHORITY`.
-Never `bypassPermissions` — the role policy still applies, but the human loses
-the permission gate.
+`auto` is in that list and was still refused. This is not a cross-family rule:
+`claude-lead` → `claude-peer` is one family and is rejected exactly the same.
+What separates the two runtimes is that they declare different mode sets:
+
+```text
+pi-lead      Mode=default  AvailableModes=[]
+claude-lead  Mode=auto     AvailableModes=[plan, default, acceptEdits, auto, bypassPermissions]
+```
+
+pi declares none, so nothing is required and `pi-lead` → `pi-peer` has always
+worked. Claude declares five, and in this pack a Lead and a Peer are never the
+same profile — so **every `claude-*` creation needs the mode passed in, from
+either family.**
+
+The parameter is `settings.modeId`, NOT a top-level `mode`. Paseo's own contract
+is `create_agent { title, provider, initialPrompt, workspaceId?, settings?,
+labels? }` with "initial runtime settings live under `settings`: `modeId`,
+`thinkingOptionId`, features". A top-level `mode` is ignored and the create
+fails with the message above:
+
+```jsonc
+create_agent({
+  provider: "claude-peer/claude-opus-5",
+  settings: { modeId: "default", thinkingOptionId: "high" },
+  // ...
+})
+```
+
+The Paseo CLI spells the same thing `--mode` (`paseo run --mode default`), and
+so does `remote-paseo.mjs run`, which refuses a `claude-*` route without one.
+
+`modeId: "default"` is the right answer for a Peer: every tool call raises a
+Paseo permission the Lead triages, which is the loop the pack is built around.
+Use `acceptEdits` only for a write Peer whose brief already grants
+`EDIT_AUTHORITY`. Never `bypassPermissions` — the role policy still applies, but
+the human loses the permission gate.
 
 ## Verifying
 

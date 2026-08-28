@@ -295,10 +295,19 @@ hierarchical: `backend` contains `backend.auth`, `*` is the root) and every
 computes the verdict and injects it into the Lead's turn context — a misrouted
 **observation** is a warning (noise costs nothing), a misrouted **decision** is
 refused (that is the one the Lead would act on), and an overlap refuses both
-Supervisors and escalates to the Human. Two ownership guards come with it:
+Supervisors and escalates to the Human, and a DECISION with no `FROM_AGENT_ID`
+is refused (`JURISDICTION_UNATTRIBUTED`) because an unsigned one cannot be
+checked for overlap at all. Two ownership guards come with it:
 `send_agent_prompt` may not target another Lead's Peer
 (`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and a Supervisor's `recovery_for` must
-fall inside its own domain. Parentage is a declared label, not an authenticated
+fall inside its own domain.
+
+One ownership rule is deliberately NOT gated on the flag: a Supervisor
+prompting a Peer is refused (`BLOCKED: PROMPT_TARGET_IS_PEER`) under `single`
+too. It is the Supervisor's own role boundary, not a jurisdiction question, and
+gating it meant the default pack enforced it nowhere. That check is fail-OPEN
+on a target it cannot resolve under `single` (fail-closed under `multi`), so an
+unreadable state file cannot silence a Supervisor that works today. Parentage is a declared label, not an authenticated
 fact — these catch mistakes, not forgery.
 
 ### Handing a seat over — briefing handoff vs `team_fork`

@@ -186,8 +186,11 @@ This is the exact failure mode the cluster config exists to prevent.
    convention `title: "review:<TASK_ID>"` (or a `worktreeSlug` containing
    `review`) with `isolation: "worktree"` — the policy extension blocks a
    review-marked workspace that requests local isolation.
-9. Call `create_agent` with the exact provider string + thinking. NEVER omit
-   the model to inherit a daemon default.
+9. Call `create_agent` with the exact provider string and the runtime settings
+   under `settings`: `{ thinkingOptionId, modeId }`. `modeId` is REQUIRED on
+   every `claude-*` route and goes inside `settings` — a top-level `mode` is
+   ignored (see "Every `claude-*` agent you create needs `settings.modeId`").
+   NEVER omit the model to inherit a daemon default.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
     `runtimeInfo.thinkingOptionId` until startup identity is populated. Missing
     identity during the bounded startup window is
@@ -221,10 +224,13 @@ local one. In the commands below, `<id>` is the HOST_ID from
    `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules;
    unverifiable is not a pass).
 6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
-   ID has no meaning on the Mac. The disposition rule of the local cycle applies
-   unchanged: a read-only Peer that is not the independent reviewer gets NO
-   workspace (omit `--workspace`) so it stays nested under you in the Paseo
-   tree; only writers and reviewers get one:
+   ID has no meaning on the Mac. Note the asymmetry with the local cycle: remote
+   `run` REQUIRES `--workspace` for every disposition, because a remote agent
+   without one would run in the CONTROLLER's cwd. So a remote read-only Peer
+   cannot stay nested under you the way a local one does — it is still your
+   subagent (`ParentAgentId` is unchanged), it simply renders in its own
+   workspace. That is a property of remote execution, not something to work
+   around:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
    For an independent-reviewer workspace, pass
@@ -286,16 +292,37 @@ Hard rules for a mixed fleet:
   than the brief assigned is an AUTHORITY_MISMATCH, not a detail.
 - Claude Peers cannot spawn Claude subagents (the `Task` tool is denied for
   every role). Fan-out is always yours, through Paseo.
-- **Crossing families requires an explicit `mode` in `create_agent`.** Permission
-  modes are provider-specific and are NOT inherited from the caller, so a pi
-  Lead creating a `claude-*` agent without one is rejected outright:
+- **Every `claude-*` agent you create needs `settings.modeId`.** A permission
+  mode is never inherited across providers. The check fires when the TARGET
+  provider declares modes and its id differs from the caller's, and a value that
+  is legal for the target does NOT save it:
 
   ```text
-  cannot inherit mode '<none>' from caller (provider 'pi-lead') for new agent
+  cannot inherit mode 'auto' from caller (provider 'claude-lead') for new agent
   (provider 'claude-peer'). Pass an explicit mode.
   ```
 
-  Use `mode: "default"` — every Peer tool call then raises a Paseo permission
+  `auto` is in `claude-peer`'s own list and was still refused. So this is not a
+  crossing-families rule — `claude-lead` → `claude-peer` is one family and fails
+  identically. pi declares NO modes (`AvailableModes=[]`), which is the only
+  reason `pi-lead` → `pi-peer` has always worked; Claude declares five, and a
+  Lead is never the same profile as a Peer. Treat it as: pi route → nothing to
+  pass, Claude route → always pass it, whichever family you are.
+
+  The field is `settings.modeId`, NOT a top-level `mode` — Paseo's contract puts
+  every initial runtime setting under `settings` (`modeId`, `thinkingOptionId`,
+  `features`), and a top-level `mode` is ignored, leaving you with the error
+  above and no clue why:
+
+  ```jsonc
+  create_agent({ provider: "claude-peer/claude-opus-5", /* ... */
+                 settings: { modeId: "default", thinkingOptionId: "high" } })
+  ```
+
+  The CLI and `remote-paseo.mjs run` spell it `--mode`; the wrapper refuses a
+  `claude-*` route that has none.
+
+  Use `modeId: "default"` — every Peer tool call then raises a Paseo permission
   you triage with `list_pending_permissions` / `respond_to_permission`, which is
   the designed loop. `acceptEdits` is acceptable for a write Peer whose brief
   already grants `EDIT_AUTHORITY` and whose round-trips you want to cut. NEVER
@@ -409,8 +436,10 @@ Under `multi`, your seat carries a domain (`team.domain` label /
 `SUPERVISOR_DECISION` reaching you carries `DOMAIN:`. You do not compute the
 verdict — the runtime puts it in your turn context. Act on it as invariant 6b
 of the Lead prompt requires: `JURISDICTION_OK` is a valid delegated decision;
-`JURISDICTION_MISMATCH`, `JURISDICTION_UNDECLARED` and
-`SUPERVISOR_BLOCK_MALFORMED` are refused with `BLOCKED: <code>`;
+`JURISDICTION_MISMATCH`, `JURISDICTION_UNDECLARED`,
+`JURISDICTION_UNATTRIBUTED` (a decision with no `FROM_AGENT_ID`, so it cannot be
+checked for overlap) and `SUPERVISOR_BLOCK_MALFORMED` are refused with
+`BLOCKED: <code>`;
 `JURISDICTION_UNVERIFIABLE` (your own seat unlabelled) is refused and goes to
 the Human; `JURISDICTION_OVERLAP` refuses BOTH Supervisors and escalates.
 A misrouted **observation** is only a warning — noise costs nothing. A
@@ -419,7 +448,10 @@ misrouted **decision** is refused, because that is the one you would act on.
 Two more guards are live under `multi`, and both are ownership rules:
 `send_agent_prompt` may target an agent you created, or another
 Lead/Supervisor — never another Lead's Peer; and a Supervisor's
-`recovery_for` must fall inside its own `team.domain`. Parentage is a
+`recovery_for` must fall inside its own `team.domain`. One ownership rule is
+NOT topology-gated: a Supervisor prompting a Peer is refused
+(`BLOCKED: PROMPT_TARGET_IS_PEER`) on `single` too, because that is the
+Supervisor's own role boundary rather than a jurisdiction question. Parentage is a
 declared label rather than an authenticated fact, so these catch mistakes, not
 forgery.
 

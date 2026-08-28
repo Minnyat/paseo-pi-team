@@ -278,8 +278,13 @@ function authorityBlock(describe, role, brief) {
  * friendly one.
  */
 function promptTargetForDecision({ core, claude }, role, toolName, toolInput, env) {
-	if (core.teamTopology(env) !== "multi") return undefined;
 	if (role !== "lead" && role !== "supervisor") return undefined;
+	// Same split as the Pi adapter: under `single` a Lead needs no lookup, but
+	// the Supervisor→Peer boundary is live on every topology and the core cannot
+	// apply it without knowing the target's role.
+	if (core.teamTopology(env) !== "multi" && role !== "supervisor") {
+		return undefined;
+	}
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
 	if (classified?.kind !== "paseo-mcp") return undefined;
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"])) {

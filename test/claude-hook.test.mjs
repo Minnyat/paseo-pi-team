@@ -445,7 +445,28 @@ rmSync(home, { recursive: true, force: true });
 		assert.equal(
 			await prompt(PEER_OF_B, { ...leadEnv, PASEO_TEAM_TOPOLOGY: "single" }),
 			null,
-			"single topology leaves the previous behaviour untouched",
+			"single topology leaves a Lead's previous behaviour untouched",
+		);
+
+		// The Supervisor→Peer boundary is the Supervisor's own role rule, not a
+		// jurisdiction rule, so the flag does not gate it. Same expectation as
+		// the Pi adapter's — a difference here is an authority asymmetry.
+		const supEnv = {
+			...leadEnv,
+			PASEO_PI_ROLE: "supervisor",
+			PASEO_AGENT_ID: SUP_A,
+			PASEO_TEAM_TOPOLOGY: "single",
+		};
+		assert.match(
+			String((await prompt(PEER_OF_B, supEnv))?.hookSpecificOutput?.permissionDecisionReason),
+			/PROMPT_TARGET_IS_PEER/,
+			"a Supervisor may not task a Peer, on any topology",
+		);
+		assert.equal(await prompt(LEAD_B, supEnv), null, "its Lead stays reachable");
+		assert.equal(
+			await prompt("eeeeeeee-7777-4777-8777-777777777777", supEnv),
+			null,
+			"and under single an unresolvable target stays allowed (fail-open)",
 		);
 
 		// The jurisdiction verdict has to reach the Lead's turn, the same way the

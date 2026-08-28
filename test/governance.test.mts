@@ -239,15 +239,20 @@ test("two supervisors whose jurisdictions both cover this Lead fail closed", () 
 	assert.ok(result.reason.includes(SUP_B));
 });
 
-test("an unattributed block is not an overlap when only one supervisor covers the Lead", () => {
-	// FROM_AGENT_ID missing. With one covering Supervisor there is nobody to
-	// contend with, whoever wrote it — refusing here would fire on every
-	// ordinary single-Supervisor domain and teach the Lead to ignore the alarm.
-	const single = verdict({ fromAgentId: null });
+test("an unattributed observation is not an overlap when only one supervisor covers the Lead", () => {
+	// FROM_AGENT_ID missing on an OBSERVATION. With one covering Supervisor
+	// there is nobody to contend with, whoever wrote it — refusing here would
+	// fire on every ordinary single-Supervisor domain and teach the Lead to
+	// ignore the alarm. An observation is noise at worst; nothing is acted on.
+	const single = verdict({
+		block: parseSupervisorBlock(observation()),
+		fromAgentId: null,
+	});
 	assert.ok(single);
 	assert.equal(single.ok, true);
 
 	const ambiguous = verdict({
+		block: parseSupervisorBlock(observation()),
 		fromAgentId: null,
 		supervisors: [
 			{ agentId: SUP_A, domain: "backend" },
@@ -256,7 +261,30 @@ test("an unattributed block is not an overlap when only one supervisor covers th
 	});
 	assert.ok(ambiguous);
 	assert.equal(ambiguous.code, "JURISDICTION_OVERLAP");
+	assert.equal(ambiguous.severity, "warn", "an observation is flagged, not refused");
 	assert.ok(!ambiguous.reason.includes("<unknown>"), "and does not invent a sender to name");
+});
+
+test("an unattributed DECISION is refused — dropping the field is not a way past the overlap rule", () => {
+	// The contract marks FROM_AGENT_ID required. Without it, "the one Supervisor
+	// that governs me wrote this" cannot be told apart from "one of two
+	// contending Supervisors did", so the overlap rule below has nothing to work
+	// with — and omitting a required field would be the cheapest way past it.
+	const result = verdict({ fromAgentId: null });
+	assert.ok(result);
+	assert.equal(result.code, "JURISDICTION_UNATTRIBUTED");
+	assert.equal(result.severity, "refuse");
+	assert.ok(/FROM_AGENT_ID/.test(result.reason));
+
+	// An empty field is the same thing as a missing one.
+	assert.equal(verdict({ fromAgentId: "" })?.code, "JURISDICTION_UNATTRIBUTED");
+
+	// It does not preempt the checks that come before it: a decision for the
+	// wrong domain is still a mismatch, attributed or not.
+	assert.equal(
+		verdict({ fromAgentId: null, leadDomain: "frontend" })?.code,
+		"JURISDICTION_MISMATCH",
+	);
 });
 
 test("a second supervisor over a different domain is not an overlap", () => {
@@ -373,8 +401,50 @@ const ownership = (over: Record<string, unknown> = {}) =>
 		...over,
 	} as never);
 
-test("single topology leaves send_agent_prompt exactly as it was", () => {
+test("single topology leaves a Lead's send_agent_prompt exactly as it was", () => {
 	assert.equal(ownership({ topology: "single" }), null);
+});
+
+test("a Supervisor may not task a Peer, on either topology", () => {
+	// Not a jurisdiction rule — the Supervisor's own role boundary. Leaving it
+	// to the prompt meant the DEFAULT (single) pack enforced nothing at all.
+	for (const topology of ["single", "multi"] as const) {
+		const reason = ownership({ role: "supervisor", selfAgentId: SUP_A, topology });
+		assert.ok(reason, `supervisor -> peer must be blocked under ${topology}`);
+		assert.ok(
+			/PROMPT_TARGET_IS_PEER|PROMPT_TARGET_NOT_OWNED/.test(reason),
+			reason,
+		);
+		assert.ok(reason.includes(SUP_B), "the message names the Lead to talk to");
+	}
+});
+
+test("a Supervisor still reaches Leads and other Supervisors under single", () => {
+	for (const role of ["lead", "supervisor"] as const) {
+		assert.equal(
+			ownership({
+				role: "supervisor",
+				selfAgentId: SUP_A,
+				topology: "single",
+				target: { agentId: LEAD_A, parentAgentId: null, provider: `pi-${role}/x/y`, role, domain: null },
+			}),
+			null,
+		);
+	}
+});
+
+test("under single an unresolvable target stays allowed — fail-open, nothing else changed", () => {
+	// The multi branch is fail-closed on an unknown target. Doing that under
+	// single would turn an unreadable state file into a Supervisor that can no
+	// longer deliver observations at all, on a pack where nothing else moved.
+	assert.equal(
+		ownership({ role: "supervisor", selfAgentId: SUP_A, topology: "single", target: null }),
+		null,
+	);
+	assert.ok(
+		ownership({ role: "supervisor", selfAgentId: SUP_A, topology: "multi", target: null }),
+		"multi stays fail-closed",
+	);
 });
 
 test("a Peer belonging to another Lead cannot be prompted", () => {

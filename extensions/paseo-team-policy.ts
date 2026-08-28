@@ -186,14 +186,18 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
  * local read of Paseo's own agent state (§1.4) — no daemon round trip, so it
  * is affordable on the tool-call path.
  */
-function governanceContext(input: unknown): GovernanceContext {
+function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 	const topology = teamTopology();
 	const context: GovernanceContext = {
 		topology,
 		selfAgentId: process.env.PASEO_AGENT_ID?.trim() || null,
 		selfDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
 	};
-	if (topology !== "multi") return context;
+	// Under `single` the ownership guard is off for a Lead, so it needs no
+	// lookup at all. The Supervisor still does: "a Supervisor does not task a
+	// Peer" holds on every topology, and the core cannot see the target's role
+	// without this.
+	if (topology !== "multi" && role !== "supervisor") return context;
 	const classified = classifyMcpInput(input);
 	if (
 		classified.kind === "target" &&
@@ -562,7 +566,7 @@ export default function (pi: ExtensionAPI) {
 				const blockReason = mcpBlockReason(
 					r,
 					event.input,
-					governanceContext(event.input),
+					governanceContext(event.input, r),
 				);
 				if (blockReason) {
 					return { block: true, reason: blockReason };

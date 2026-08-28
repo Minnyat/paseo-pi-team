@@ -1735,6 +1735,37 @@ function restoreEnv(name: string, previous: string | undefined): void {
 			| { systemPrompt?: string }
 			| undefined;
 		assert.ok(!String(plain?.systemPrompt).includes("Jurisdiction"));
+
+		// A Supervisor does not task a Peer, and that rule is NOT gated on the
+		// topology flag: on `single` — the default pack — it must still bite, or
+		// the boundary exists only in the prompt.
+		process.env.PASEO_PI_ROLE = "supervisor";
+		process.env.PASEO_AGENT_ID = SUP_A;
+		process.env.PASEO_TEAM_TOPOLOGY = "single";
+		const { piStub: supStub, handlers: supHandlers } = makePiStub(["read", "mcp"]);
+		(await loadFreshExtension("lifecycle=governance-single-supervisor"))(supStub);
+		const supToolCall = requireHandler(supHandlers, "tool_call");
+		const supPrompt = async (agentId: string) =>
+			(await supToolCall({
+				toolName: "mcp",
+				input: { tool: "send_agent_prompt", args: { agentId, prompt: "do this" } },
+			})) as { block?: boolean; reason?: string } | undefined;
+
+		const peerUnderSingle = await supPrompt(PEER_OF_B);
+		assert.equal(peerUnderSingle?.block, true, "supervisor -> peer is blocked under single too");
+		assert.match(String(peerUnderSingle?.reason), /PROMPT_TARGET_IS_PEER/);
+		assert.match(String(peerUnderSingle?.reason), /bbbbbbbb/, "and names the Lead to talk to");
+
+		assert.equal(
+			(await supPrompt(LEAD_B))?.block,
+			undefined,
+			"the Lead the Supervisor governs stays reachable",
+		);
+		assert.equal(
+			(await supPrompt("eeeeeeee-7777-4777-8777-777777777777"))?.block,
+			undefined,
+			"under single an unresolvable target stays allowed — fail-open, nothing else changed",
+		);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 		restoreEnv("PASEO_PI_ROLE", prevRole);

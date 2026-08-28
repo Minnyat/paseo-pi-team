@@ -249,6 +249,11 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 				deny: [],
 			};
 		case "supervisor":
+			// The bare Paseo names below are documentation, not authority: Paseo
+			// tools reach pi through the `mcp` proxy, applyPolicy() filters this
+			// list against the tools actually registered, and the deny backstop
+			// (ALL_PASEO_TOOLS) is checked FIRST. The surface that decides what
+			// the Supervisor may call is SUPERVISOR_ALLOWED_MCP_TARGETS.
 			return {
 				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, TEAM_LEASE_TOOL, TEAM_FORK_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
 				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
@@ -1068,13 +1073,27 @@ export function supervisorJurisdictionVerdict({
 			`The supervisor speaks for "${block.domain}", which does not cover this Lead's domain "${own}". Refuse the decision and refer the Supervisor to the Lead that owns "${block.domain}".`,
 		);
 	}
+	// Attribution is what makes the overlap check below possible at all: with no
+	// FROM_AGENT_ID there is no way to tell "the one Supervisor that governs me
+	// wrote this" from "one of two contending Supervisors did". The supervisor
+	// contract marks the field required, so a DECISION that omits it is refused
+	// rather than credited — otherwise dropping a required field would be the
+	// cheapest way past the overlap rule below. An OBSERVATION stays lenient: it
+	// is noise at worst, and the overlap rule still catches it when one applies.
+	if (block.kind === "decision" && !fromAgentId) {
+		return verdict(
+			"JURISDICTION_UNATTRIBUTED",
+			"The decision carries no FROM_AGENT_ID, so which Supervisor issued it cannot be established and a competing claim over this domain cannot be ruled out. Ask the Supervisor to resend the block with FROM_AGENT_ID filled; do not act on it meanwhile.",
+		);
+	}
 	const covering = (supervisors ?? []).filter(
 		(seat) =>
 			seat &&
 			normalizeDomain(seat.domain) !== null &&
 			domainConflicts(seat.domain, own),
 	);
-	// An unattributed message (no FROM_AGENT_ID) is not automatically an overlap:
+	// An unattributed OBSERVATION (no FROM_AGENT_ID; a decision was already
+	// refused above) is not automatically an overlap:
 	// with exactly ONE Supervisor covering this Lead there is nobody it could be
 	// contending with, whoever wrote it. Treating "I do not know who sent this"
 	// as a conflict would refuse every decision on a perfectly ordinary
@@ -1140,6 +1159,15 @@ export function sendAgentPromptTargetId(input: unknown): string | null {
  * authenticated fact (§1.10), so this guards against mistakes and drift — not
  * against an agent that sets out to forge one.
  */
+/** Shared wording for "the Supervisor does not task a Peer", both topologies. */
+function supervisorPeerPromptBlockReason(
+	targetId: string,
+	target: AgentOwnership,
+): string {
+	const owner = target.parentAgentId ?? "an unknown Lead";
+	return `BLOCKED: PROMPT_TARGET_IS_PEER — agent ${targetId} is a Peer of ${owner}. A Supervisor observes Peers but never tasks one directly: a prompt straight to a Peer bypasses its Lead's brief, authority accounting and scope lease. Send the observation to ${owner} instead.`;
+}
+
 export function sendAgentPromptBlockReason({
 	role,
 	selfAgentId,
@@ -1153,8 +1181,21 @@ export function sendAgentPromptBlockReason({
 	target: AgentOwnership | null;
 	topology: TeamTopology;
 }): string | null {
-	if (topology !== "multi") return null;
 	if (role !== "lead" && role !== "supervisor") return null;
+	if (topology !== "multi") {
+		// `single` turns the multi-supervisor rules off by design. One rule here
+		// is not a jurisdiction rule at all, though: a Supervisor does not task a
+		// Peer — that is the role's own boundary (supervisor.md, "Authority"),
+		// and leaving it to the prompt meant the DEFAULT pack enforced nothing.
+		//
+		// Fail-OPEN on an unresolved target, unlike the `multi` branch below.
+		// Nothing else changes under `single`, so an unreadable state file must
+		// not start blocking observations that work today; only a target that
+		// positively resolves to a Peer is refused.
+		return role === "supervisor" && targetId && target?.role === "peer"
+			? supervisorPeerPromptBlockReason(targetId, target)
+			: null;
+	}
 	if (!targetId) {
 		return "BLOCKED: PROMPT_TARGET_MISSING — send_agent_prompt was called without an agentId, so the target cannot be checked against this seat's ownership.";
 	}

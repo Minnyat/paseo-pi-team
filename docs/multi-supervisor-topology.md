@@ -451,8 +451,9 @@ có thể đang ghi dở chính là nước cờ sinh ra writer thứ hai).
 | Cờ `PASEO_TEAM_TOPOLOGY` (`single` mặc định; giá trị lạ → `multi`, phía chỉ-từ-chối) | `policy-core.ts` `teamTopology()` |
 | Ngữ pháp domain: `normalizeDomain` / `domainCovers` / `domainConflicts`, `*` = gốc | `policy-core.ts` |
 | Parser `SUPERVISOR_OBSERVATION` + phân biệt observation/decision + `malformed[]` | `policy-core.ts` `parseSupervisorBlock` |
-| Phán quyết jurisdiction (`JURISDICTION_OK/UNDECLARED/UNVERIFIABLE/MISMATCH/OVERLAP`, `SUPERVISOR_BLOCK_MALFORMED`) | `policy-core.ts` `supervisorJurisdictionVerdict` |
+| Phán quyết jurisdiction (`JURISDICTION_OK/UNDECLARED/UNVERIFIABLE/MISMATCH/OVERLAP/UNATTRIBUTED`, `SUPERVISOR_BLOCK_MALFORMED`) | `policy-core.ts` `supervisorJurisdictionVerdict` |
 | Guard `send_agent_prompt` theo quyền sở hữu + `agentOwnership()` đọc state file | `policy-core.ts`, gọi trong `mcpBlockReason` |
+| Supervisor **không** prompt thẳng Peer — `PROMPT_TARGET_IS_PEER`, áp dụng ở **mọi** topology (fail-open khi không resolve được target dưới `single`, fail-closed dưới `multi`) | `policy-core.ts` `sendAgentPromptBlockReason` |
 | `recovery_for ⊆ team.domain` của supervisor | `supervisorCreateAgentArgsBlockReason(args, { topology, selfDomain })` |
 | Nhóm tool `heartbeat` (`create_heartbeat` / `delete_heartbeat`) cho lead + supervisor | `PASEO_TOOLS.heartbeat` + hai allowlist |
 | Bind vào Pi (governanceContext + jurisdiction notice trong `before_agent_start`) | `extensions/paseo-team-policy.ts` |
@@ -462,7 +463,7 @@ có thể đang ghi dở chính là nước cờ sinh ra writer thứ hai).
 | WebUI: lọc theo phạm vi, cảnh báo chồng lấn, domain trên node/list/drawer | `webui/public/*` |
 | Prompt: mục *Jurisdiction*, heartbeat loop, `DOMAIN:`/`FROM_AGENT_ID:` trong output contract | `prompts/supervisor.md`, `prompts/lead.md` §6b |
 
-Test: `test/governance.test.mjs` (33 case thuần), cộng wiring test trong
+Test: `test/governance.test.mts` (38 case thuần), cộng wiring test trong
 `policy.test.mts`, `claude-policy.test.mjs`, `claude-hook.test.mjs` và
 `graph.test.mjs`.
 
@@ -742,21 +743,23 @@ Test bằng fake `paseo` CLI (đã có khuôn `test/fixtures/fake-paseo.mjs`).
 
 | # | Case | Kỳ vọng | Ở đâu |
 |---|---|---|---|
-| D1 | `PASEO_TEAM_TOPOLOGY` không đặt / `single` | Mọi guard PR-D trả `null` | `governance.test.mjs`, wiring test hai runtime |
-| D2 | Giá trị lạ (`mult`, `many`) | Đọc là `multi` — phía chỉ từ chối | `governance.test.mjs` |
-| D3 | `backend` vs `backend.auth` vs `backendops`; `Backend/Auth` | Chứa nhau theo đoạn, không theo chuỗi con; chuẩn hoá về một cách viết | `governance.test.mjs` |
-| D4 | `SUPERVISOR_OBSERVATION` nhắc trong văn xuôi | KHÔNG parse thành block | `governance.test.mjs` |
-| D5 | `SUPERVISOR_DECISION:` rỗng | Vẫn là observation | `governance.test.mjs` |
-| D6 | Decision tự khai `REVERSIBILITY: irreversible` | `malformed` → từ chối | `governance.test.mjs` |
-| D7 | Decision ngoài domain / observation ngoài domain | Từ chối / chỉ cảnh báo | `governance.test.mjs` |
-| D8 | Lead không có `team.domain` | `JURISDICTION_UNVERIFIABLE` | `governance.test.mjs` |
-| D9 | Hai supervisor cùng phủ một Lead | `JURISDICTION_OVERLAP`, nêu tên cả hai, escalate Human | `governance.test.mjs`, `graph.test.mjs` |
-| D10 | `recovery_for` ngoài domain / supervisor chưa gán domain | `RECOVERY_OUT_OF_JURISDICTION` / `JURISDICTION_UNDECLARED` | `governance.test.mjs` + hai runtime |
+| D1 | `PASEO_TEAM_TOPOLOGY` không đặt / `single` | Mọi guard PR-D trả `null` | `governance.test.mts`, wiring test hai runtime |
+| D2 | Giá trị lạ (`mult`, `many`) | Đọc là `multi` — phía chỉ từ chối | `governance.test.mts` |
+| D3 | `backend` vs `backend.auth` vs `backendops`; `Backend/Auth` | Chứa nhau theo đoạn, không theo chuỗi con; chuẩn hoá về một cách viết | `governance.test.mts` |
+| D4 | `SUPERVISOR_OBSERVATION` nhắc trong văn xuôi | KHÔNG parse thành block | `governance.test.mts` |
+| D5 | `SUPERVISOR_DECISION:` rỗng | Vẫn là observation | `governance.test.mts` |
+| D6 | Decision tự khai `REVERSIBILITY: irreversible` | `malformed` → từ chối | `governance.test.mts` |
+| D7 | Decision ngoài domain / observation ngoài domain | Từ chối / chỉ cảnh báo | `governance.test.mts` |
+| D8 | Lead không có `team.domain` | `JURISDICTION_UNVERIFIABLE` | `governance.test.mts` |
+| D9 | Hai supervisor cùng phủ một Lead | `JURISDICTION_OVERLAP`, nêu tên cả hai, escalate Human | `governance.test.mts`, `graph.test.mjs` |
+| D10 | `recovery_for` ngoài domain / supervisor chưa gán domain | `RECOVERY_OUT_OF_JURISDICTION` / `JURISDICTION_UNDECLARED` | `governance.test.mts` + hai runtime |
 | D11 | `send_agent_prompt` tới Peer của Lead khác | `PROMPT_TARGET_NOT_OWNED`, nêu tên Lead sở hữu | `policy.test.mts`, `claude-policy.test.mjs`, `claude-hook.test.mjs` |
 | D12 | Target không đọc được state | `PROMPT_TARGET_UNKNOWN` (fail-closed) | như trên |
 | D13 | Target là Lead/Supervisor khác | Cho qua — đây là đường điều phối | như trên |
 | D14 | Hook Claude tự **resolve** ownership từ state file | Chặn đúng bằng dữ liệu thật, không phải do thiếu tham số | `claude-hook.test.mjs` |
 | D15 | `create_heartbeat` cho lead/supervisor; `create_schedule` cho supervisor | Cho / chặn | `claude-policy.test.mjs` |
+| D16 | DECISION không có `FROM_AGENT_ID` | `JURISDICTION_UNATTRIBUTED` (từ chối) — bỏ trống field bắt buộc không được là đường vòng qua luật overlap; OBSERVATION vẫn khoan dung | `governance.test.mts` |
+| D17 | Supervisor `send_agent_prompt` thẳng tới Peer, topology `single` **và** `multi` | Chặn (`PROMPT_TARGET_IS_PEER` / `PROMPT_TARGET_NOT_OWNED`); target không resolve được thì `single` cho qua, `multi` chặn | `governance.test.mts` |
 | E1 | Fork thiếu `reason`, hoặc reason lạ | `FORK_REASON_INVALID` | `team-fork.test.mjs` |
 | E2 | Fork vai độc lập (reviewer/challenger/supervisor/auditor) | `FORK_ROLE_MUST_BE_INDEPENDENT` | `team-fork.test.mjs` |
 | E3 | Lý do "hết context" — kể cả nằm trong `rationale` | `FORK_FOR_CONTEXT` + gợi ý `/compact` | `team-fork.test.mjs` |

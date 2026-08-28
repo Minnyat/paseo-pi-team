@@ -63,8 +63,10 @@ implementation still goes to an Engineer Peer.
 3. **The Lead owns observed routing evidence**: resolve the route from the
    controller-local `cluster-routing.local.json`, verify with
    `list_providers`/`list_models` on the EXACT target daemon, create the agent
-   with exact `<role-provider>/<pi-provider>/<model-id>` +
-   `settings.thinkingOptionId`, then bounded-poll
+   with the exact `<role-provider>/<model-ref>` string +
+   `settings.thinkingOptionId` — plus `settings.modeId` on every `claude-*`
+   route, because Paseo never inherits a permission mode across providers and a
+   top-level `mode` is ignored — then bounded-poll
    `get_agent_status → snapshot.runtimeInfo` within the startup timeout.
    Identity not yet populated means `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`
    and no archive; only an identity that appeared but mismatches is
@@ -106,6 +108,9 @@ implementation still goes to an Engineer Peer.
    - `JURISDICTION_MISMATCH` / `JURISDICTION_UNDECLARED` /
      `SUPERVISOR_BLOCK_MALFORMED` → refuse. Reply `BLOCKED: <code>` and refer
      the Supervisor to the Lead that owns the domain it named.
+   - `JURISDICTION_UNATTRIBUTED` (a DECISION with no `FROM_AGENT_ID`) → refuse.
+     An unsigned decision cannot be told apart from a second Supervisor's, so
+     it cannot be checked for overlap. Ask for it again, signed.
    - `JURISDICTION_UNVERIFIABLE` (your seat has no domain label) → refuse and
      ask the Human to label the seat. Do not guess your own jurisdiction.
    - `JURISDICTION_OVERLAP` (two Supervisors claim you) → refuse BOTH and
