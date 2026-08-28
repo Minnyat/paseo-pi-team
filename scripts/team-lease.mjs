@@ -26,6 +26,7 @@
 
 import {
 	LEASE_ACTIONS,
+	LEASE_MAX_TTL_MS,
 	leaseHolderFor,
 	normalizeScope,
 	resolveLeases,
@@ -39,9 +40,25 @@ export const LEASE_ROOM = "leases";
  *  that dies holding one does not block the scope for a whole day. */
 export const DEFAULT_TTL_MS = 3_600_000;
 export const MAX_TTL_MS = 12 * 3_600_000;
-/** How many messages back to read. The ledger is append-only, so a claim older
- *  than this many messages has long since expired anyway. */
-export const LEDGER_DEPTH = 300;
+/**
+ * How far BACK the ledger is read, in time rather than in messages.
+ *
+ * Counting messages was wrong in the one way that matters: a live claim can be
+ * pushed out of a fixed window by ordinary traffic — or deliberately, since
+ * records are cheap to post — and a lease that falls outside the window reads as
+ * no lease at all, which is the silent two-writer outcome. Time is safe because
+ * one fact bounds it: nothing can outlive LEASE_MAX_TTL_MS, so a window that
+ * covers that cannot hide anything still live. The margin absorbs clock skew
+ * between the Lead's host and the daemon.
+ */
+export const LEDGER_WINDOW_MS = LEASE_MAX_TTL_MS + 3_600_000;
+/**
+ * Safety valve, not a window. If a read comes back at the cap the board may
+ * have been cut short, and a truncated board that reads as "free" is precisely
+ * the bug this replaced — so that answer is reported as unreadable rather than
+ * as empty.
+ */
+export const LEDGER_MAX_MESSAGES = 2000;
 
 function bad(code, message) {
 	return Object.assign(new Error(message), { code });
@@ -66,10 +83,7 @@ export async function fetchLeases(options = {}) {
 	const run = options.runPaseo ?? runPaseo;
 	const now = options.now ?? Date.now();
 	try {
-		const room = await readRoom(
-			{ room: options.room ?? LEASE_ROOM, limit: options.depth ?? LEDGER_DEPTH },
-			{ ...options, runPaseo: run },
-		);
+		const room = await readLedgerRoom(options, run, now);
 		return { ok: true, leases: resolveLeases(room.messages, { now }) };
 	} catch (error) {
 		return {
@@ -79,6 +93,29 @@ export async function fetchLeases(options = {}) {
 			message: String(error?.message ?? error),
 		};
 	}
+}
+
+/**
+ * Read the ledger over a window that cannot hide a live lease, and refuse to
+ * pretend a possibly-truncated answer is the whole board.
+ */
+async function readLedgerRoom(options, run, now) {
+	const limit = options.maxMessages ?? LEDGER_MAX_MESSAGES;
+	const room = await readRoom(
+		{
+			room: options.room ?? LEASE_ROOM,
+			since: new Date(now - (options.windowMs ?? LEDGER_WINDOW_MS)).toISOString(),
+			limit,
+		},
+		{ ...options, runPaseo: run },
+	);
+	if (room.count >= limit) {
+		throw bad(
+			"LEASE_LEDGER_TRUNCATED",
+			`the lease ledger returned ${room.count} messages, at or above the ${limit} cap — the board may be incomplete, so it cannot be treated as authoritative`,
+		);
+	}
+	return room;
 }
 
 function requireScope(scope) {
@@ -178,10 +215,7 @@ export const releaseScope = (input, options) => postLease("release", input, opti
 export async function leaseLedger(input = {}, options = {}) {
 	const run = options.runPaseo ?? runPaseo;
 	try {
-		const room = await readRoom(
-			{ room: input.room ?? LEASE_ROOM, limit: input.depth ?? LEDGER_DEPTH },
-			{ ...options, runPaseo: run },
-		);
+		const room = await readLedgerRoom({ ...options, room: input.room ?? LEASE_ROOM }, run, options.now ?? Date.now());
 		return {
 			ok: true,
 			room: room.room,

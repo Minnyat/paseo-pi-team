@@ -402,8 +402,12 @@ export async function readRoom(input, options = {}) {
 	const args = ["chat", "read", room];
 	if (input?.since !== undefined) args.push("--since", token("since", String(input.since)));
 	if (input?.limit !== undefined) {
-		if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 500) {
-			throw bad("FIELD_INVALID", "limit must be an integer in [1, 500]");
+		// The ceiling is high because the scope-lease ledger reads a whole time
+		// window rather than a page: a live lease that falls outside the read is
+		// invisible, and invisible reads as free. A human reading a room still
+		// wants a small limit, so the DEFAULT stays whatever the caller asks for.
+		if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 5000) {
+			throw bad("FIELD_INVALID", "limit must be an integer in [1, 5000]");
 		}
 		args.push("--limit", String(input.limit));
 	}

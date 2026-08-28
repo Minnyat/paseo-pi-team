@@ -19,6 +19,7 @@ import {
 	releaseScope,
 	renewScope,
 } from "../scripts/team-lease.mjs";
+import { LEASE_MAX_TTL_MS } from "../extensions/paseo-team-core/policy-core.ts";
 
 const SELF = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -212,6 +213,51 @@ const opts = (room, extra = {}) => ({
 		/room not found/,
 		"the caller is told what actually failed, not what the recovery attempt failed at",
 	);
+}
+
+// --- the read window must not be able to hide a live lease ------------------
+// Reading "the last N messages" made a live claim invisible once the room moved
+// past it: the scope then read as FREE, which is the silent two-writer outcome
+// this whole mechanism exists to prevent — and any Lead could force it by
+// posting cheap records until a victim's claim fell off the end.
+//
+// The window is therefore time-based, and the bound is the one fact that makes
+// it safe: no lease can outlive LEASE_MAX_TTL_MS, so nothing live can sit
+// outside a window that covers it.
+{
+	let since = null;
+	const run = async (args) => {
+		if (args[0] === "chat" && args[1] === "read") {
+			const index = args.indexOf("--since");
+			since = index >= 0 ? args[index + 1] : null;
+			return [];
+		}
+		throw new Error(`unexpected argv: ${args.join(" ")}`);
+	};
+	const result = await fetchLeases({ runPaseo: run, selfAgentId: SELF, role: "lead", now: NOW });
+	assert.equal(result.ok, true);
+	assert.ok(since, "the ledger is read by time, not by message count");
+	const windowMs = NOW - Date.parse(since);
+	assert.ok(
+		windowMs >= LEASE_MAX_TTL_MS,
+		`the window (${windowMs}ms) must cover the longest possible lease (${LEASE_MAX_TTL_MS}ms)`,
+	);
+}
+
+{
+	// If the daemon still returns a full page, the read may have been cut short
+	// and the board is not known to be complete. Report it as UNREADABLE — a
+	// truncated board that reads as "free" is exactly the failure being fixed.
+	const full = Array.from({ length: 2000 }, (_, i) => record(OTHER, "claim", `src/s${i}`, NOW - 1000));
+	const result = await fetchLeases({
+		runPaseo: async () => full,
+		selfAgentId: SELF,
+		role: "lead",
+		now: NOW,
+	});
+	assert.equal(result.ok, false, "a possibly-truncated read is not a board");
+	assert.equal(result.leases, null);
+	assert.match(String(result.code), /TRUNCATED/);
 }
 
 console.log("team-lease tests passed");
