@@ -32,9 +32,11 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 	assert.equal(await handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" }), null);
 
 	const listed = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+	// Parity with the Pi extension's registerTeamTools: a tool that exists on one
+	// runtime and not the other is a capability the other runtime silently lacks.
 	assert.deepEqual(
 		listed.result.tools.map((tool) => tool.name).sort(),
-		["peer_ask_lead", "team_watchdog"],
+		["peer_ask_lead", "team_chat", "team_watchdog"],
 	);
 	for (const tool of listed.result.tools) {
 		assert.equal(tool.inputSchema.type, "object");
@@ -76,6 +78,7 @@ assert.deepEqual(
 	TEAM_TOOLS.map((tool) => [tool.name, tool.roles]).sort(),
 	[
 		["peer_ask_lead", ["peer"]],
+		["team_chat", ["lead", "supervisor"]],
 		["team_watchdog", ["lead", "supervisor"]],
 	],
 );
@@ -98,7 +101,34 @@ assert.deepEqual(
 	const messages = stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
 	assert.deepEqual(messages.map((message) => message.id), [1, 2, null, 3]);
 	assert.equal(messages[2].error.code, -32700, "a malformed line is answered, not fatal");
-	assert.equal(messages[3].result.tools.length, 2);
+	assert.equal(messages[3].result.tools.length, TEAM_TOOLS.length);
+}
+
+// The Pi extension takes this text from policy-core's teamChatToolDescription();
+// this file is plain .mjs and cannot import the .ts core, so the string is
+// mirrored — and drift between the two runtimes is exactly what this pack's
+// parity tests exist to catch.
+{
+	const { teamChatToolDescription } = await import("../extensions/paseo-team-core/policy-core.ts");
+	const chat = TEAM_TOOLS.find((tool) => tool.name === "team_chat");
+	assert.equal(
+		chat.description,
+		teamChatToolDescription(),
+		"the Claude tool description must not drift from the shared one",
+	);
+	assert.ok(
+		!/only sanctioned/i.test(chat.description),
+		"and must not overstate closure: the bash rules are heuristics, not a boundary",
+	);
+
+	// The payload ceiling exists in three unlinked copies for the same reason the
+	// description does: this file cannot import the .ts core, and team-chat.mjs is
+	// a separate process. Only team-chat.mjs ENFORCES it — the other two advertise
+	// it — so drift would leave a schema promising more than the tool accepts.
+	const { TEAM_CHAT_MAX_BODY_BYTES: coreCeiling } = await import("../extensions/paseo-team-core/policy-core.ts");
+	const { MAX_BODY_BYTES: enforcedCeiling } = await import("../scripts/team-chat.mjs");
+	assert.equal(chat.inputSchema.properties.message.maxLength, enforcedCeiling, "the Claude schema advertises what team-chat.mjs enforces");
+	assert.equal(coreCeiling, enforcedCeiling, "and so does the shared core");
 }
 
 console.log("claude team mcp tests passed");

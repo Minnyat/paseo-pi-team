@@ -21,8 +21,10 @@
  */
 
 import { MESSAGE_KINDS } from "../../scripts/team-communication.mjs";
+import { TEAM_MESSAGE_HEADER, parseTeamMessage } from "../../scripts/team-chat.mjs";
 import { runPaseoJson, mapWithConcurrency, PaseoError } from "./paseo-bridge.mjs";
 import * as cache from "./graph-cache.mjs";
+import { readAgentStates, isAgentId } from "./agent-state.mjs";
 
 export const ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 
@@ -98,6 +100,66 @@ export function parsePeerMessage(text) {
 	};
 }
 
+/** Paseo stamps a human's `paseo chat post` with this author. */
+const HUMAN_AUTHOR = "manual";
+const MENTION = /@([A-Za-z0-9-]{4,64})/g;
+
+/**
+ * Turn one room's messages into message edges.
+ *
+ * This is the one message path that is a FACT rather than a reconstruction:
+ * `paseo chat read --json` reports the real author agent id, so the edge does
+ * not have to be inferred from a Lead's tool log. Recipients come from the
+ * `@mention` tokens the sender wrote — the same tokens Paseo uses to deliver —
+ * resolved back to full ids through the current listing.
+ *
+ * A mention nobody in the listing answers to is KEPT and flagged. Dropping it
+ * would hide exactly the case an operator needs: a message aimed at an agent
+ * that is archived, on another host, or misaddressed.
+ *
+ * @param {Array}  messages rows from `paseo chat read --json`
+ * @param {Array}  roster   rows from `paseo ls` (for shortId -> id)
+ * @param {string} room
+ */
+export function chatEdges(messages, roster = [], room = null) {
+	const byShort = new Map();
+	for (const agent of Array.isArray(roster) ? roster : []) {
+		if (typeof agent?.id !== "string") continue;
+		byShort.set(typeof agent.shortId === "string" ? agent.shortId : agent.id.slice(0, 7), agent.id);
+		byShort.set(agent.id, agent.id);
+	}
+	const edges = [];
+	for (const message of Array.isArray(messages) ? messages : []) {
+		const body = typeof message?.body === "string" ? message.body : "";
+		const envelope = parseTeamMessage(body);
+		// No envelope means ordinary room chatter. It is a real message, but it
+		// carries no protocol meaning, so it is not a graph edge.
+		if (!envelope) continue;
+		const author = typeof message?.author === "string" ? message.author : null;
+		const human = author === HUMAN_AUTHOR || !author;
+		const head = body.slice(0, body.indexOf(TEAM_MESSAGE_HEADER));
+		const mentions = [...head.matchAll(MENTION)].map((match) => match[1]);
+		for (const mention of mentions.length > 0 ? mentions : [null]) {
+			if (mention === null) continue;
+			const resolved = byShort.get(mention) ?? null;
+			edges.push({
+				type: "message",
+				from: human ? "human" : author,
+				to: resolved ?? mention,
+				kind: envelope.kind,
+				taskId: envelope.topic,
+				correlationId: envelope.correlationId,
+				ts: message?.createdAt ?? null,
+				room,
+				origin: human ? "human" : "agent",
+				unresolvedRecipient: resolved === null,
+				confidence: "confirmed",
+			});
+		}
+	}
+	return edges;
+}
+
 const PERMIT_AGENT_KEYS = ["agentId", "AgentId", "agent_id", "agent", "AgentID"];
 const PERMIT_REQUEST_KEYS = ["requestId", "RequestId", "request_id", "reqId", "ReqId", "id", "Id"];
 const PERMIT_TOOL_KEYS = ["tool", "Tool", "toolName", "ToolName", "name", "Name"];
@@ -152,12 +214,13 @@ export function normalizePermits(list) {
  * @param {object} input
  * @param {Array}  input.agents      rows from `paseo ls -g --json`
  * @param {object} input.parents     { [agentId]: parentId|null } — the known subset
+ * @param {object} [input.states]    { [agentId]: normalized agent-state.mjs record }
  * @param {Array}  input.permits     rows from `paseo permit ls --json`
  * @param {Array}  [input.messages]  reconstructed message edges
  * @param {Array}  [input.degraded]  collection faults to surface verbatim
  * @param {number} input.now
  */
-export function buildGraph({ agents = [], parents = {}, permits = [], messages = [], degraded = [], now = 0 } = {}) {
+export function buildGraph({ agents = [], parents = {}, states = {}, permits = [], messages = [], degraded = [], now = 0 } = {}) {
 	const rows = Array.isArray(agents) ? agents.filter((a) => a && typeof a.id === "string") : [];
 	const known = new Set(rows.map((a) => a.id));
 	const { permits: normalizedPermits, unclassified } = normalizePermits(permits);
@@ -176,8 +239,27 @@ export function buildGraph({ agents = [], parents = {}, permits = [], messages =
 	}
 
 	const nodes = rows.map((agent) => {
-		const hasParentInfo = Object.hasOwn(parents, agent.id);
-		const parentId = hasParentInfo ? parents[agent.id] : null;
+		const state = states[agent.id] ?? null;
+		// Precedence is deliberate: a `paseo inspect` answer was paid for and is
+		// the field Paseo documents, so it wins. The state file fills in the
+		// (usually much larger) rest for free. Recording which source answered
+		// keeps a stale state file from looking like a fresh inspect.
+		const hasInspectParent = Object.hasOwn(parents, agent.id);
+		const hasStateParent = Boolean(state);
+		const hasParentInfo = hasInspectParent || hasStateParent;
+		const parentId = hasInspectParent ? parents[agent.id] : (state?.parentAgentId ?? null);
+		const parentSource = hasInspectParent ? "inspect" : hasStateParent ? "state" : null;
+		// Neither source carries a timestamp we can compare, so precedence cannot
+		// also mean "fresher". When they disagree the inspect answer still wins —
+		// but saying so out loud beats resolving it invisibly, the same way
+		// modelDrift is surfaced rather than smoothed over.
+		if (hasInspectParent && hasStateParent && (state?.parentAgentId ?? null) !== parents[agent.id]) {
+			faults.push({
+				agentId: agent.id,
+				reason: "PARENT_SOURCE_DISAGREEMENT",
+				detail: `inspect=${parents[agent.id] ?? "null"} state=${state?.parentAgentId ?? "null"}`,
+			});
+		}
 		// An agent whose parent exists but is not in the listing (archived, or
 		// living in a directory this listing did not cover) must not be drawn
 		// as a root: that would silently flatten the tree.
@@ -200,8 +282,15 @@ export function buildGraph({ agents = [], parents = {}, permits = [], messages =
 			created: typeof agent.created === "string" ? agent.created : null,
 			parentId: hasParentInfo ? parentId : null,
 			parentKnown: hasParentInfo,
+			parentSource,
 			orphan,
 			pendingPermissions: permitCount.get(agent.id) ?? 0,
+			// From Paseo's own agent state file. A node without one still renders;
+			// these are simply null, and the read fault is in degraded[].
+			domain: state?.domain ?? null,
+			model: state?.model ?? null,
+			modelDrift: state?.modelDrift ?? false,
+			sessionId: state?.sessionId ?? null,
 		};
 	});
 
@@ -211,12 +300,16 @@ export function buildGraph({ agents = [], parents = {}, permits = [], messages =
 			edges.push({ type: "spawn", from: node.parentId, to: node.id, confidence: "confirmed" });
 		}
 	}
-	// Message edges are keyed by correlationId: the same PEER_MESSAGE_V1 block
-	// can be seen twice (sender log and recipient prompt) and must draw once.
+	// The same block can be seen twice (a sender log and a recipient prompt, or
+	// one room read overlapping another) and must draw once. The key includes the
+	// participants and the room, NOT correlationId alone: that id is chosen by the
+	// sender, so keying on it lets one message — careless or crafted — erase a
+	// different real edge that happens to share it.
 	const seen = new Set();
 	for (const message of messages) {
 		if (!message || typeof message.from !== "string" || typeof message.to !== "string") continue;
-		const key = message.correlationId ?? `${message.from}->${message.to}:${message.ts ?? ""}`;
+		const identity = message.correlationId ?? `${message.ts ?? ""}`;
+		const key = `${message.room ?? ""}|${message.from}->${message.to}|${identity}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		edges.push({
@@ -227,16 +320,28 @@ export function buildGraph({ agents = [], parents = {}, permits = [], messages =
 			taskId: message.taskId ?? null,
 			correlationId: message.correlationId ?? null,
 			ts: message.ts ?? null,
+			// Chat-derived edges carry provenance the UI needs to draw them
+			// honestly: which room, whether a person or an agent spoke, and
+			// whether the recipient could be resolved at all.
+			room: message.room ?? null,
+			origin: message.origin ?? null,
+			unresolvedRecipient: message.unresolvedRecipient ?? false,
 			confidence: message.confidence ?? "suspected",
 		});
 	}
 
 	const byRole = {};
 	const byStatus = {};
+	const byDomain = {};
 	for (const node of nodes) {
 		const role = node.role ?? "unknown";
 		byRole[role] = (byRole[role] ?? 0) + 1;
 		byStatus[node.status] = (byStatus[node.status] ?? 0) + 1;
+		// "unknown" is a real bucket, not a skip: with several supervisors on
+		// the board, an unlabelled seat is exactly the thing an operator needs
+		// to notice.
+		const domain = node.domain ?? "unknown";
+		byDomain[domain] = (byDomain[domain] ?? 0) + 1;
 	}
 
 	return {
@@ -247,6 +352,7 @@ export function buildGraph({ agents = [], parents = {}, permits = [], messages =
 			pendingPermissions: normalizedPermits.length + unclassified.length,
 			byRole,
 			byStatus,
+			byDomain,
 		},
 		nodes,
 		edges,
@@ -299,7 +405,30 @@ export async function collectGraph(options = {}) {
 
 	const store = options.cache ?? cache.readParentCache();
 	const ids = agents.map((agent) => agent.id).filter((id) => typeof id === "string");
-	const stale = cache.staleIds(ids, store, { now, ttlMs: options.parentTtlMs });
+
+	// Paseo's own state files answer parent + domain + model for free. Read them
+	// first so the `inspect` budget is spent only on what they could not answer
+	// — on a healthy machine that is nothing, turning a multi-poll cold start
+	// into a single round trip.
+	const readStates = options.readStates ?? ((wanted) => readAgentStates(wanted));
+	let states = {};
+	try {
+		// Only ask about ids that could name a state file. An id shape we do not
+		// recognize is Paseo's business, not a read fault worth reporting.
+		const read = readStates(ids.filter(isAgentId));
+		states = read?.states ?? {};
+		for (const fault of read?.degraded ?? []) {
+			// A per-agent MISSING is expected (an agent Paseo has not flushed yet)
+			// and would drown the report; only surface the structural faults.
+			if (fault?.reason !== "AGENT_STATE_MISSING") degraded.push(fault);
+		}
+	} catch (error) {
+		degraded.push({ reason: "AGENT_STATE_READ_FAILED", detail: String(error?.message ?? error) });
+	}
+
+	const stale = cache
+		.staleIds(ids, store, { now, ttlMs: options.parentTtlMs })
+		.filter((id) => !states[id]);
 	const budget = stale.slice(0, maxInspect);
 
 	const inspected = await mapWithConcurrency(budget, options.concurrency ?? 4, (id) =>
@@ -334,7 +463,23 @@ export async function collectGraph(options = {}) {
 		if (entry) parents[id] = entry.parentId;
 	}
 
-	const graph = buildGraph({ agents, parents, permits, degraded, now });
+	// Chat rooms are opt-in per call: reading them costs one round trip each,
+	// and most snapshots do not need the coordination layer.
+	const rooms = Array.isArray(options.chatRooms) ? options.chatRooms : [];
+	const messages = [];
+	if (rooms.length > 0) {
+		const read = await mapWithConcurrency(rooms, options.concurrency ?? 4, (room) =>
+			run(["chat", "read", room], { timeoutMs }),
+		);
+		read.forEach((result, index) => {
+			const room = rooms[index];
+			if (result.ok) messages.push(...chatEdges(result.value, agents, room));
+			// One unreadable room must not cost the others, nor the graph.
+			else degraded.push({ reason: "CHAT_READ_FAILED", detail: `${room}: ${String(result.error?.message ?? result.error)}` });
+		});
+	}
+
+	const graph = buildGraph({ agents, parents, states, permits, messages, degraded, now });
 	return {
 		...graph,
 		ok: true,

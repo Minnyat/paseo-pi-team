@@ -8,6 +8,9 @@ import {
 	browserMcpAllowed,
 	callsAgentBrowserCli,
 	callsPaseoCli,
+	callsTeamSupportScript,
+	coordinationCliBlockReason,
+	teamChatToolBlockReason,
 	classifyMcpInput,
 	denyReason,
 	gitAuthorityBlockReason,
@@ -1430,6 +1433,114 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		[],
 		`${file}: brief must be clean, got: ${brief.malformed.join("; ")}`,
 	);
+}
+
+// --- team_chat: the coordination channel is typed, not a raw CLI ----------
+// Chat is absent from Paseo's MCP catalog (60 tools, measured), so Lead and
+// Supervisor could only reach it through bash — a surface the policy cannot
+// inspect: no room gate, no envelope, no audit. The typed tool replaces it,
+// and the raw CLI is closed for every role.
+{
+	// B10 — a Peer never had chat and still does not: no MCP, and the Paseo
+	// CLI (which includes `chat`) is already blocked from bash.
+	assert.equal(callsPaseoCli("paseo chat post coord hello"), true);
+	assert.equal(callsPaseoCli("paseo chat read coord"), true);
+	assert.equal(teamChatToolBlockReason("peer"), "team_chat is restricted to Lead and Supervisor agents.");
+	assert.equal(teamChatToolBlockReason("lead"), null);
+	assert.equal(teamChatToolBlockReason("supervisor"), null);
+
+	// B11/B12 — Lead and Supervisor must go through team_chat too, so the
+	// envelope, the size ceiling and the room allowlist cannot be bypassed by
+	// typing the command by hand.
+	for (const role of ["lead", "supervisor"] as const) {
+		const reason = coordinationCliBlockReason(role, "paseo chat post coord hello");
+		assert.match(String(reason), /team_chat/, `${role} is redirected to the typed tool`);
+	}
+	// Everything else a Lead does with the Paseo CLI is untouched: this is a
+	// chat-only redirect, not a new CLI ban.
+	assert.equal(coordinationCliBlockReason("lead", "paseo ls -g"), null);
+	assert.equal(coordinationCliBlockReason("lead", "paseo inspect abc"), null);
+	assert.equal(coordinationCliBlockReason("supervisor", "paseo status"), null);
+	assert.equal(coordinationCliBlockReason("peer", "paseo chat ls"), null, "the peer path stays where it is");
+	// Wrappers and alternate spellings must not reopen it.
+	assert.match(String(coordinationCliBlockReason("lead", "paseo.cmd chat ls")), /team_chat/);
+	assert.match(String(coordinationCliBlockReason("lead", "echo hi && paseo chat post r x")), /team_chat/);
+}
+
+// --- OCR-001: the support script is not a side door ------------------------
+// Blocking `paseo chat` while leaving `node .../team-chat.mjs` open would move
+// the bypass one word to the left. The bar is the same for both spellings —
+// and, like every bash rule here, it is a heuristic, not an authorization
+// boundary: the script's own gate reads env the caller owns.
+{
+	assert.equal(callsTeamSupportScript("node /x/paseo-team-scripts/team-chat.mjs post {}"), true);
+	assert.equal(callsTeamSupportScript("node ~/.pi/agent/extensions/paseo-team-scripts/remote-paseo.mjs run"), true);
+	assert.equal(callsTeamSupportScript("node team-chat.mjs rooms"), true);
+	assert.equal(callsTeamSupportScript('node "C:\\x y\\team-chat.mjs" post {}'), true);
+
+	// The Reviewer skill runs this one directly, by design — it must stay open.
+	assert.equal(callsTeamSupportScript("node /x/paseo-team-scripts/ocr-review.mjs --repo r"), false);
+	// Equivalent to peer_ask_lead (same parent-scoped, fail-closed sender).
+	assert.equal(callsTeamSupportScript("node /x/paseo-team-scripts/team-communication.mjs ask-lead {}"), false);
+	assert.equal(callsTeamSupportScript("node scripts/model-routing.mjs resolve"), false);
+	assert.equal(callsTeamSupportScript("echo team-chat"), false, "a bare mention is not an invocation");
+	assert.equal(callsTeamSupportScript(""), false);
+}
+
+// --- OCR-007: the Pi extension really wires the guard ----------------------
+// policy-core owns the rule and the Claude adapter has its own test; this pins
+// the third leg — that the Pi extension reads the right event field and blocks.
+{
+	const { piStub, handlers } = makePiStub(["read", "bash"]);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	process.env.PASEO_PI_ROLE = "lead";
+	const createExtension = await loadFreshExtension("lifecycle=chat");
+	createExtension(piStub);
+
+	const toolCall = requireHandler(handlers, "tool_call");
+	const bash = async (command: string) =>
+		(await toolCall({ toolName: "bash", input: { command } })) as
+			| { block?: boolean; reason?: string }
+			| undefined;
+
+	const blocked = await bash("paseo chat ls");
+	assert.equal(blocked?.block, true);
+	assert.match(String(blocked?.reason), /team_chat/);
+	assert.equal((await bash("paseo ls -g"))?.block, undefined, "the redirect stays chat-only");
+	assert.equal((await bash("git status"))?.block, undefined);
+
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
+}
+
+// The peer branch is a SEPARATE leg of the same handler, and
+// supportScriptBlockReason returns null for a Lead by construction — so the
+// block above cannot reach it. Without this, deleting the peer wiring in the
+// extension leaves the whole suite green.
+{
+	const { piStub, handlers } = makePiStub(["read", "bash"]);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	process.env.PASEO_PI_ROLE = "peer";
+	const createExtension = await loadFreshExtension("lifecycle=support-script");
+	createExtension(piStub);
+
+	const toolCall = requireHandler(handlers, "tool_call");
+	const bash = async (command: string) =>
+		(await toolCall({ toolName: "bash", input: { command } })) as
+			| { block?: boolean; reason?: string }
+			| undefined;
+
+	const blocked = await bash("node /x/paseo-team-scripts/team-chat.mjs post {}");
+	assert.equal(blocked?.block, true, "the peer support-script guard is wired into the Pi extension");
+	assert.match(String(blocked?.reason), /support script/i);
+	assert.equal(
+		(await bash("node /x/paseo-team-scripts/ocr-review.mjs --repo r"))?.block,
+		undefined,
+		"the Reviewer skill's own wrapper stays runnable",
+	);
+
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
 }
 
 console.log("[paseo-team] policy tests passed");

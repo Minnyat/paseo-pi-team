@@ -20,6 +20,10 @@ function run(args, extraEnv = {}) {
 			...process.env,
 			PASEO_TEAM_PASEO_EXEC: `node "${FAKE}"`,
 			PI_HOME: join(sandbox, "pi"),
+			// Paseo's own home, so the graph never reads the developer's real
+			// agent state — that difference is what let a bug reach CI green here
+			// and red on every runner.
+			PASEO_HOME: join(sandbox, "paseo"),
 			PST_TEAM_CONFIG_DIR: join(sandbox, "team"),
 			PASEO_CONFIG_JSON: join(sandbox, "paseo-config.json"),
 			// The Claude half of the pack lives in two more user-owned files;

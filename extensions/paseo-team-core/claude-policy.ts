@@ -28,6 +28,8 @@ import {
 	ALL_PASEO_TOOLS,
 	callsAgentBrowserCli,
 	callsPaseoCli,
+	coordinationCliBlockReason,
+	supportScriptBlockReason,
 	extraTools,
 	gitAuthorityBlockReason,
 	isAgentBrowserMcpTarget,
@@ -271,6 +273,12 @@ export function claudeToolBlockReason(
 
 	if (classified.kind === "write" || classified.kind === "edit") return null;
 
+	if (classified.kind === "bash" && (role === "lead" || role === "supervisor")) {
+		// Same wall as the Pi adapter: a Lead on Claude must not be able to reach
+		// the chat CLI either, or the typed channel is decoration on one runtime.
+		return coordinationCliBlockReason(role, bashCommand(input.toolInput));
+	}
+
 	if (classified.kind === "bash" && role === "peer") {
 		const command = bashCommand(input.toolInput);
 		if (callsPaseoCli(command)) {
@@ -279,6 +287,8 @@ export function claudeToolBlockReason(
 		if (callsAgentBrowserCli(command)) {
 			return "Peer cannot run agent-browser CLI through bash; BROWSER_MCP_AUTHORITY only permits the typed agent-browser MCP surface.";
 		}
+		const supportScriptReason = supportScriptBlockReason(role, command);
+		if (supportScriptReason) return supportScriptReason;
 		return gitAuthorityBlockReason(
 			command,
 			peerGitAuthority(brief),
