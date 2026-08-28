@@ -276,11 +276,11 @@ try {
 			writeFileSync(p, content);
 		};
 		mk(join("extensions", "paseo-team-policy.ts"), "export {};");
-		// The shared policy modules install next to the extension and must go
-		// with it: left behind, they would keep a Claude hook working after the
-		// pack is uninstalled.
-		mk(join("extensions", "policy-core.mts"), "export {};");
-		mk(join("extensions", "claude-policy.mts"), "export {};");
+		// The shared policy core installs next to the extension and must go with
+		// it: left behind, it would keep a Claude hook working after the pack is
+		// uninstalled.
+		mk(join("extensions", "paseo-team-core", "policy-core.ts"), "export {};");
+		mk(join("extensions", "paseo-team-core", "claude-policy.ts"), "export {};");
 		for (const role of ["supervisor", "lead", "peer"]) {
 			mk(join("extensions", "prompts", `${role}.md`), "prompt");
 		}

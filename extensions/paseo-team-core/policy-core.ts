@@ -1,5 +1,5 @@
 /**
- * policy-core.mts — runtime-neutral role policy for the Paseo team pack.
+ * policy-core.ts — runtime-neutral role policy for the Paseo team pack.
  *
  * This module holds every rule that is TRUE REGARDLESS of which coding agent
  * executes the turn: task-brief parsing, peer authority derivation, the Paseo
@@ -8,13 +8,15 @@
  * It imports nothing from any agent runtime. Two thin adapters bind it to a
  * runtime and both MUST route every decision through here — a rule that lives
  * in only one adapter is a rule the other runtime silently lacks:
- *   - extensions/paseo-team-policy.ts  → Pi (extension API: setActiveTools + tool_call)
- *   - extensions/claude-policy.mts     → Claude Code (settings hooks: PreToolUse)
+ *   - extensions/paseo-team-policy.ts              → Pi (extension API)
+ *   - extensions/paseo-team-core/claude-policy.ts  → Claude Code (settings hooks)
  *
- * File extension is `.mts` ON PURPOSE: Pi discovers `~/.pi/agent/extensions/*.ts`
- * as extensions, and this module has no default export. `.mts` is skipped by
- * that scan (loader.js isExtensionFile: name.endsWith(".ts")), so the core can
- * sit next to the extension without being loaded as one.
+ * This module lives in a SUBDIRECTORY on purpose. Pi discovers
+ * `~/.pi/agent/extensions/*.ts` as extensions, and a subdirectory is only
+ * entered when it carries an index.ts/index.js or a package.json with a `pi`
+ * field (loader.js resolveExtensionEntries) — neither exists here, so the core
+ * is invisible to that scan while staying a plain `.ts` file that the repo's
+ * review harness — and every tool that globs TypeScript sources — can see.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -1102,14 +1104,26 @@ export function gitAuthorityBlockReason(
 // Role prompts
 // ---------------------------------------------------------------------------
 
+/**
+ * Where the role prompts live, resolved from THIS module's location.
+ *
+ * Three candidates because the layouts differ: installed, the prompts sit in
+ * the extensions directory one level above this core
+ * (`<ext>/prompts`, core in `<ext>/paseo-team-core/`); in a source checkout
+ * they sit at the repo root, two levels above (`<repo>/prompts`, core in
+ * `<repo>/extensions/paseo-team-core/`). The first candidate covers a
+ * self-contained copy that ships prompts beside the core.
+ */
 export function promptsDir(): string {
 	const override = process.env.PASEO_TEAM_PROMPTS_DIR;
 	if (override) return override;
-	const extDir = dirname(fileURLToPath(import.meta.url));
-	const primary = join(extDir, "prompts");
-	const secondary = join(dirname(extDir), "prompts");
-	if (existsSync(primary)) return primary;
-	return existsSync(secondary) ? secondary : primary;
+	const coreDir = dirname(fileURLToPath(import.meta.url));
+	const candidates = [
+		join(coreDir, "prompts"),
+		join(dirname(coreDir), "prompts"),
+		join(dirname(dirname(coreDir)), "prompts"),
+	];
+	return candidates.find((candidate) => existsSync(candidate)) ?? candidates[1]!;
 }
 
 const promptCache = new Map<TeamRole, string>();

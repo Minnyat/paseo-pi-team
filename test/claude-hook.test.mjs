@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	clearSessionState,
 	handleEvent,
 	lastUserPrompt,
 	readSessionState,
@@ -241,6 +242,26 @@ assert.equal(runHook("pre-tool-use", { session_id: "s0", tool_name: "Write" }, b
 		supEnv,
 	);
 	assert.match(supDenied.hookSpecificOutput.permissionDecisionReason, /supervisor role policy/);
+}
+
+// --- a failed state write must not leave the previous turn's authority --------
+{
+	const env = { ...peerEnv };
+	await handleEvent("user-prompt-submit", { session_id: "s9", prompt: V3_WRITE }, env);
+	assert.ok(readSessionState("s9", env)?.brief, "write brief recorded");
+
+	// Simulate the write failing on the next turn: the hook clears the state
+	// rather than letting turn 1's authority stand in for turn 2.
+	assert.equal(clearSessionState("s9", env), true);
+	assert.equal(readSessionState("s9", env), null);
+	const denied = await handleEvent(
+		"pre-tool-use",
+		{ session_id: "s9", tool_name: "Write" },
+		env,
+	);
+	assert.match(denied.hookSpecificOutput.permissionDecisionReason, /read-only/);
+	// Clearing a session that was never written is a no-op, not an error.
+	assert.equal(clearSessionState("never-existed", env), true);
 }
 
 // --- fail-closed when the policy modules cannot be loaded ---------------------

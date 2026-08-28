@@ -21,6 +21,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { verify as verifyClaudeSetup } from "./claude-setup.mjs";
 import {
 	describeCdpTarget,
@@ -375,16 +376,41 @@ if (wantPi) {
 {
 	// Both runtimes read the SAME policy core and the SAME role prompts, so
 	// these are checked regardless of family.
-	const extensionsDir = join(homedir(), ".pi", "agent", "extensions");
-	const missingModules = ["policy-core.mts", "claude-policy.mts"].filter(
-		(name) => !existsSync(join(extensionsDir, name)),
+	const coreDir = join(homedir(), ".pi", "agent", "extensions", "paseo-team-core");
+	const missingModules = ["policy-core.ts", "claude-policy.ts"].filter(
+		(name) => !existsSync(join(coreDir, name)),
 	);
-	if (missingModules.length === 0) pass("policy-core", extensionsDir);
-	else
+	if (missingModules.length > 0) {
 		fail(
 			"policy-core",
-			`missing ${missingModules.join(", ")} in ${extensionsDir} → run scripts/install.{sh,ps1}`,
+			`missing ${missingModules.join(", ")} in ${coreDir} → run scripts/install.{sh,ps1}`,
 		);
+	} else {
+		// Presence is not enough. Pi's extension loader SWALLOWS an import
+		// failure and starts with no policy at all, so a core that is present
+		// but unparseable — or an adapter left pointing at an old filename —
+		// looks identical to a healthy install until a Peer runs unrestricted.
+		// Importing it here is the only check that actually proves it loads.
+		try {
+			const core = await import(pathToFileURL(join(coreDir, "policy-core.ts")).href);
+			const claudeDialect = await import(
+				pathToFileURL(join(coreDir, "claude-policy.ts")).href
+			);
+			if (
+				typeof core.parseTaskBrief !== "function" ||
+				typeof claudeDialect.claudeToolBlockReason !== "function"
+			) {
+				fail("policy-core", `${coreDir} loaded but does not export the policy API`);
+			} else {
+				pass("policy-core", coreDir);
+			}
+		} catch (error) {
+			fail(
+				"policy-core",
+				`${coreDir} failed to load (pi would start with NO policy): ${String(error?.message ?? error).slice(0, 200)}`,
+			);
+		}
+	}
 }
 if (wantClaude) {
 	// In-process rather than a subprocess: the verifier is a sibling module and

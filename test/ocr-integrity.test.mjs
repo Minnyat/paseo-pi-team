@@ -98,13 +98,13 @@ assert.match(remotePaseo, /REVIEW_WORKTREE_UNAVAILABLE/);
 // Layer-1 local guard: the runtime-neutral policy core gates MCP
 // create_workspace args, and BOTH runtime adapters route through that core —
 // a gate that lived in only one adapter would leave the other runtime open.
-const policyCore = read("extensions/policy-core.mts");
+const policyCore = read("extensions/paseo-team-core/policy-core.ts");
 assert.match(policyCore, /leadCreateWorkspaceBlockReason/);
 assert.match(policyCore, /REVIEW_WORKTREE_UNAVAILABLE/);
 const policyExtension = read("extensions/paseo-team-policy.ts");
-assert.match(policyExtension, /from "\.\/policy-core\.mts"/);
-const claudePolicy = read("extensions/claude-policy.mts");
-assert.match(claudePolicy, /from "\.\/policy-core\.mts"/);
+assert.match(policyExtension, /from "\.\/paseo-team-core\/policy-core\.ts"/);
+const claudePolicy = read("extensions/paseo-team-core/claude-policy.ts");
+assert.match(claudePolicy, /from "\.\/policy-core\.ts"/);
 assert.match(claudePolicy, /leadCreateWorkspaceArgsBlockReason/);
 assert.match(leadSkill, /review:<TASK_ID>/);
 

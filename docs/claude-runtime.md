@@ -31,25 +31,28 @@ agent as `mcp__paseo__<tool>`.
 ## Three layers, one rule set
 
 ```text
-                    extensions/policy-core.mts
+              extensions/paseo-team-core/policy-core.ts
               (briefs, authority, allowlists, git guard)
                         ▲                  ▲
         ┌───────────────┘                  └───────────────┐
-extensions/paseo-team-policy.ts              extensions/claude-policy.mts
+extensions/paseo-team-policy.ts        extensions/paseo-team-core/claude-policy.ts
    pi extension API                             Claude tool dialect
    setActiveTools + tool_call                          ▲
                                             scripts/claude-hook.mjs
                                      SessionStart / UserPromptSubmit / PreToolUse
 ```
 
-`policy-core.mts` imports nothing from any runtime. A rule that lives in only
+`policy-core.ts` imports nothing from any runtime. A rule that lives in only
 one adapter is a rule the other runtime silently lacks, so both adapters route
 every decision through the core — `test/ocr-integrity.test.mjs` asserts that
 both import it.
 
-`.mts` is deliberate: pi discovers `~/.pi/agent/extensions/*.ts` as extensions,
-and these modules have no default export. The `.mts` suffix keeps them out of
-that scan while sitting in the same directory.
+The subdirectory is deliberate: pi discovers `~/.pi/agent/extensions/*.ts` as
+extensions, and enters a subdirectory only when it carries an index or a `pi`
+package.json. `paseo-team-core/` has neither, so the core stays invisible to
+that scan while remaining plain `.ts` — which matters because the repo's own
+OCR review harness only selects TypeScript sources, and files it cannot select
+are files nobody reviews.
 
 ## Vocabulary translation
 

@@ -6,11 +6,11 @@
  *   - applies a per-role tool allowlist via setActiveTools();
  *   - blocks policy-violating tool calls as a backstop via tool_call.
  *
- * Every RULE lives in ./policy-core.mts, which knows nothing about Pi; this
+ * Every RULE lives in ./paseo-team-core/policy-core.ts, which knows nothing about Pi; this
  * file only binds those rules to Pi's extension API and re-exports the core so
  * existing importers (tests, tooling) keep one entry point. The Claude Code
  * adapter binds the SAME core through settings hooks — see
- * ./claude-policy.mts and scripts/claude-hook.mjs.
+ * ./paseo-team-core/claude-policy.ts and scripts/claude-hook.mjs.
  *
  * When PASEO_PI_ROLE is unset the extension stays passive: no prompt
  * injection, no tool restriction. Safe to install globally.
@@ -71,13 +71,13 @@ import {
 	type PeerMode,
 	type Policy,
 	type TeamRole,
-} from "./policy-core.mts";
+} from "./paseo-team-core/policy-core.ts";
 
 /**
  * Re-export the whole core so `paseo-team-policy.ts` stays the single import
  * surface for tests and tooling that predate the core split.
  */
-export * from "./policy-core.mts";
+export * from "./paseo-team-core/policy-core.ts";
 
 function supportScriptPath(name: string): string {
 	const configured = process.env.PASEO_TEAM_SCRIPTS_DIR?.trim();

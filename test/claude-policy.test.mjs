@@ -14,8 +14,8 @@ import {
 	describeClaudePolicy,
 	teamToolName,
 	CLAUDE_PASEO_TOOL_NAMES,
-} from "../extensions/claude-policy.mts";
-import { parseTaskBrief } from "../extensions/policy-core.mts";
+} from "../extensions/paseo-team-core/claude-policy.ts";
+import { parseTaskBrief } from "../extensions/paseo-team-core/policy-core.ts";
 
 const brief = (lines) => parseTaskBrief(lines.join("\n"));
 

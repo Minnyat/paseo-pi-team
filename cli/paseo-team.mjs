@@ -250,8 +250,22 @@ function cmdInstall(argv) {
 
 function cmdClaudeSetup(argv) {
 	const known = ["--install", "--verify", "--uninstall", "--print-providers"];
-	const mode = argv.find((arg) => known.includes(arg)) ?? "--verify";
-	const rest = argv.filter((arg) => arg !== mode);
+	const passthrough = ["--json"];
+	// Fail closed on anything unrecognised: silently degrading a mistyped
+	// --instal into a read-only --verify would report success for work that
+	// never happened, and the rest of this CLI rejects unknown flags outright.
+	const unknown = argv.filter(
+		(arg) => !known.includes(arg) && !passthrough.includes(arg),
+	);
+	if (unknown.length > 0) {
+		fail(
+			`claude-setup: unknown flag '${unknown[0]}' (allowed: ${[...known, ...passthrough].join(", ")})`,
+		);
+	}
+	const modes = argv.filter((arg) => known.includes(arg));
+	if (modes.length > 1) fail(`claude-setup: pick one of ${known.join(", ")}`);
+	const mode = modes[0] ?? "--verify";
+	const rest = argv.filter((arg) => passthrough.includes(arg));
 	const res = spawnSync(
 		process.execPath,
 		[join(ROOT, "scripts", "claude-setup.mjs"), mode, ...rest],

@@ -235,7 +235,11 @@ function applyToFile(path, transform, { label, createIfMissing = true }) {
 export async function buildProviderSnippet(env = process.env) {
 	const claudePolicy = await import(
 		pathToFileURL(
-			join(env.PASEO_TEAM_POLICY_DIR?.trim() || join(HERE, "..", "extensions"), "claude-policy.mts"),
+			join(
+				env.PASEO_TEAM_POLICY_DIR?.trim() ||
+					join(HERE, "..", "extensions", "paseo-team-core"),
+				"claude-policy.ts",
+			),
 		).href
 	);
 	const labels = {
@@ -303,6 +307,32 @@ export function uninstall(env = process.env) {
 	};
 }
 
+/**
+ * Every hook script path recorded in the settings file, taken from our own
+ * tagged entries. The command is `"<node>" "<script>" <event>`, so the second
+ * quoted token is the script.
+ *
+ * All three are collected, not just the first: an install that was partially
+ * re-pointed (one event still calling a moved checkout) is precisely the
+ * stale-install failure this command exists to catch.
+ */
+export function installedHookScripts(settings) {
+	const scripts = new Set();
+	for (const event of Object.keys(HOOK_EVENTS)) {
+		const entries = Array.isArray(settings?.hooks?.[event])
+			? settings.hooks[event]
+			: [];
+		for (const entry of entries) {
+			if (!isOurEntry(entry)) continue;
+			for (const hook of entry.hooks ?? []) {
+				const quoted = String(hook?.command ?? "").match(/"([^"]+)"\s+"([^"]+)"/);
+				if (quoted?.[2]) scripts.add(quoted[2]);
+			}
+		}
+	}
+	return [...scripts];
+}
+
 export function verify(env = process.env) {
 	const settings = readJsonOrNull(claudeSettingsPath(env));
 	const userConfig = readJsonOrNull(claudeUserConfigPath(env));
@@ -313,14 +343,21 @@ export function verify(env = process.env) {
 			: [];
 		hookState[event] = entries.some(isOurEntry);
 	}
-	const scriptPresent = existsSync(hookScriptPath(env));
+	// Check the script the INSTALLED hook actually calls, not the one this
+	// checkout would install. They differ whenever the pack was installed from
+	// somewhere else, and a hook pointing at a moved or deleted checkout is
+	// exactly the stale-install failure this command exists to catch.
+	const registeredScripts = installedHookScripts(settings);
+	const checkedScripts = registeredScripts.length > 0 ? registeredScripts : [hookScriptPath(env)];
+	const missingScripts = checkedScripts.filter((script) => !existsSync(script));
+	const scriptPresent = missingScripts.length === 0;
 	const mcpPresent = Boolean(userConfig?.mcpServers?.[TEAM_MCP_SERVER_NAME]);
 	const missing = [
 		...Object.entries(hookState)
 			.filter(([, installed]) => !installed)
 			.map(([event]) => `hook:${event}`),
 		...(mcpPresent ? [] : [`mcp:${TEAM_MCP_SERVER_NAME}`]),
-		...(scriptPresent ? [] : ["script:claude-hook.mjs"]),
+		...missingScripts.map((script) => `script:${script}`),
 	];
 	return {
 		action: "verify",
@@ -328,7 +365,8 @@ export function verify(env = process.env) {
 		userConfigPath: claudeUserConfigPath(env),
 		hooks: hookState,
 		mcpServer: mcpPresent,
-		hookScript: scriptPresent ? hookScriptPath(env) : null,
+		hookScript: scriptPresent ? checkedScripts[0] : null,
+		hookScripts: checkedScripts,
 		missing,
 		ok: missing.length === 0,
 	};
@@ -368,8 +406,23 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		process.stdout.write(`${JSON.stringify(result.agents, null, 2)}\n`);
 	} else {
 		const lines = [`[paseo-team] claude ${result.action}: ${result.ok ? "ok" : "FAILED"}`];
-		if (result.hooks) lines.push(`  hooks -> ${result.hooks.path} (${result.hooks.status})`);
-		if (result.mcp) lines.push(`  mcp   -> ${result.mcp.path} (${result.mcp.status})`);
+		if (result.action === "verify") {
+			// verify reports STATE (which hooks are present), not a write result:
+			// printing it through the install shape yields "undefined (undefined)".
+			lines.push(
+				`  hooks -> ${result.settingsPath}`,
+				...Object.entries(result.hooks).map(
+					([event, installed]) => `    ${installed ? "✓" : "✗"} ${event}`,
+				),
+				`  mcp   -> ${result.mcpServer ? "✓" : "✗"} ${TEAM_MCP_SERVER_NAME} in ${result.userConfigPath}`,
+				...(result.hookScripts ?? []).map(
+					(script) => `  script -> ${result.missing.includes(`script:${script}`) ? "✗ MISSING" : "✓"} ${script}`,
+				),
+			);
+		} else {
+			if (result.hooks) lines.push(`  hooks -> ${result.hooks.path} (${result.hooks.status})`);
+			if (result.mcp) lines.push(`  mcp   -> ${result.mcp.path} (${result.mcp.status})`);
+		}
 		if (result.missing?.length) lines.push(`  missing: ${result.missing.join(", ")}`);
 		if (result.action === "install") {
 			lines.push(

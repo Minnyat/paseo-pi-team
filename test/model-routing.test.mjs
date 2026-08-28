@@ -230,7 +230,7 @@ assert.equal(providerFamily("codex-peer"), null);
 // The role-provider list is duplicated in the policy core (which must not
 // depend on the routing script). Assert the two never drift.
 {
-	const core = await import("../extensions/policy-core.mts");
+	const core = await import("../extensions/paseo-team-core/policy-core.ts");
 	assert.deepEqual([...ROLE_PROVIDERS].sort(), [...core.ROLE_PROVIDERS].sort());
 }
 

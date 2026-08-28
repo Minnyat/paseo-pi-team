@@ -7,7 +7,7 @@
 //   session-start       → inject the role prompt, reset per-session state
 //   user-prompt-submit  → parse the turn's V3 brief, persist it, inject the
 //                         resolved authority block
-//   pre-tool-use        → allow/deny the call through extensions/claude-policy.mts
+//   pre-tool-use        → allow/deny the call through the shared policy core
 //
 // The per-turn brief therefore cannot live in memory the way it does in the Pi
 // extension. It is written once per prompt to
@@ -31,17 +31,22 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const SESSION_STATE_TTL_MS = 12 * 60 * 60 * 1000;
 
 /**
- * The policy modules live next to the Pi extension after install
- * (`<ext>/policy-core.mts`, this script in `<ext>/paseo-team-scripts/`) and in
- * `extensions/` in a source checkout. Same two-candidate shape the Pi
- * extension uses for support scripts, resolved at runtime because the two
- * layouts differ by one directory level.
+ * The policy modules ship as a directory next to the Pi extension
+ * (`<ext>/paseo-team-core/`, with this script in `<ext>/paseo-team-scripts/`)
+ * and as `extensions/paseo-team-core/` in a source checkout. Same
+ * two-candidate shape the Pi extension uses for support scripts, resolved at
+ * runtime because the two layouts differ by one directory level.
  */
+export const POLICY_CORE_DIR = "paseo-team-core";
+
 export function policyModulePath(name, env = process.env) {
 	const configured = env.PASEO_TEAM_POLICY_DIR?.trim();
 	const candidates = configured
 		? [join(configured, name)]
-		: [join(HERE, "..", name), join(HERE, "..", "extensions", name)];
+		: [
+				join(HERE, "..", POLICY_CORE_DIR, name),
+				join(HERE, "..", "extensions", POLICY_CORE_DIR, name),
+			];
 	const found = candidates.find((candidate) => existsSync(candidate));
 	if (!found) {
 		throw new Error(
@@ -55,10 +60,10 @@ let policyModules = null;
 async function loadPolicy(env = process.env) {
 	if (policyModules) return policyModules;
 	const core = await import(
-		pathToFileURL(policyModulePath("policy-core.mts", env)).href
+		pathToFileURL(policyModulePath("policy-core.ts", env)).href
 	);
 	const claude = await import(
-		pathToFileURL(policyModulePath("claude-policy.mts", env)).href
+		pathToFileURL(policyModulePath("claude-policy.ts", env)).href
 	);
 	policyModules = { core, claude };
 	return policyModules;
@@ -96,6 +101,20 @@ export function readSessionState(sessionId, env = process.env, now = Date.now())
 		return parsed;
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * Drop a session's stored brief. Used when the per-turn write fails: leaving
+ * the previous turn's state behind would let its authority survive into a turn
+ * that never granted it, which is the one thing this design must not do.
+ */
+export function clearSessionState(sessionId, env = process.env) {
+	try {
+		rmSync(sessionStatePath(sessionId, env), { force: true });
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -315,6 +334,13 @@ export async function main(argv = process.argv, env = process.env) {
 	} catch (error) {
 		const message = error?.message ?? String(error);
 		process.stderr.write(`[paseo-team] hook error: ${message}\n`);
+		// If THIS turn's authority could not be recorded, the previous turn's
+		// must not stand in for it: drop the state so the next tool call falls
+		// back to the transcript (which carries this turn's prompt) or, failing
+		// that, to read-only.
+		if (event === "user-prompt-submit" || event === "session-start") {
+			clearSessionState(payload?.session_id, env);
+		}
 		// Fail closed, but only where a decision is being made: a broken policy
 		// hook must not silently hand a Peer the tools it was meant to gate.
 		if (event === "pre-tool-use" && env.PASEO_PI_ROLE?.trim()) {

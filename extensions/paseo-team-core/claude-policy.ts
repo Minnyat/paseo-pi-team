@@ -1,8 +1,8 @@
 /**
- * claude-policy.mts — Claude Code dialect of the Paseo team role policy.
+ * claude-policy.ts — Claude Code dialect of the Paseo team role policy.
  *
  * Same three roles, same fail-closed invariants, different runtime surface.
- * Every RULE is imported from ./policy-core.mts; this module only translates
+ * Every RULE is imported from ./policy-core.ts; this module only translates
  * between Claude's tool vocabulary and the core's decisions:
  *
  *   Pi                        Claude Code
@@ -45,7 +45,7 @@ import {
 	TEAM_WATCHDOG_TOOL,
 	type ParsedTaskBrief,
 	type TeamRole,
-} from "./policy-core.mts";
+} from "./policy-core.ts";
 
 /** Paseo injects its own MCP server under exactly this name (daemon-side). */
 export const PASEO_MCP_SERVER = "paseo";

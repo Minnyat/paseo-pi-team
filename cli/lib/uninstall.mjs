@@ -73,11 +73,11 @@ export function removeMcpEntry(mcpPath = cw.mcpConfigPath()) {
 }
 
 /**
- * Policy modules shared by the pi extension and the Claude hook. Installed
- * next to the extension, removed with it — leaving them behind would keep a
- * Claude hook working after the pack is gone.
+ * Directory holding the policy modules shared by the pi extension and the
+ * Claude hook. Installed next to the extension, removed with it — leaving it
+ * behind would keep a Claude hook working after the pack is gone.
  */
-export const POLICY_MODULES = ["policy-core.mts", "claude-policy.mts"];
+export const POLICY_CORE_DIR = "paseo-team-core";
 
 /**
  * Claude Code side: the tagged hook entries in ~/.claude/settings.json and the
@@ -113,9 +113,7 @@ export function removeClaudeIntegration() {
 export function uninstall({ purge = false } = {}) {
 	const targets = [
 		removePath("policy-extension", cw.policyExtensionPath()),
-		...POLICY_MODULES.map((name) =>
-			removePath(`policy-module-${name}`, join(cw.extensionsDir(), name)),
-		),
+		removePath("policy-core", join(cw.extensionsDir(), POLICY_CORE_DIR)),
 		...cw.ROLE_PROMPTS.map((role) => removePath(`prompt-${role}`, cw.rolePromptPath(role))),
 		...cw.PACK_SKILLS.map((name) => removePath(`skill-${name}`, cw.skillDirPath(name))),
 		removePath("team-scripts", teamScriptsDir()),

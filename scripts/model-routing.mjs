@@ -54,7 +54,7 @@ export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
  * The durable Paseo role profiles — one per (family, role). Model-per-role
  * profiles are not created; the model is chosen per route instead.
  *
- * MUST stay in sync with ROLE_PROVIDERS in extensions/policy-core.mts
+ * MUST stay in sync with ROLE_PROVIDERS in extensions/paseo-team-core/policy-core.ts
  * (test/model-routing.test.mjs asserts the two agree).
  */
 export const ROLE_PROVIDERS = Object.freeze(

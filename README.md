@@ -10,8 +10,8 @@ lifecycle/workspace/control-plane truth; the role pack owns role invariants
 (prompt + tool policy); the Lead skill owns the orchestration procedure.
 
 The role invariants live in one runtime-neutral core
-(`extensions/policy-core.mts`) with a thin adapter per runtime: a Pi extension,
-and Claude Code hooks. A rule denied on one runtime is denied on the other.
+(`extensions/paseo-team-core/`) with a thin adapter per runtime: a Pi
+extension, and Claude Code hooks. A rule denied on one runtime is denied on the other.
 
 Full design reference:
 [`docs/demonthorn-agent-orchestration-deep-dive.md`](docs/demonthorn-agent-orchestration-deep-dive.md).
@@ -63,9 +63,10 @@ paseo-pi-team/
 │   ├── lead.md                     # Project Lead (orchestration owner)
 │   └── peer.md                     # execution Peer (bounded worker)
 ├── extensions/
-│   ├── policy-core.mts             # runtime-neutral rules: briefs, authority, allowlists, guards
 │   ├── paseo-team-policy.ts        # Pi adapter: prompt injection + per-role tool policy
-│   └── claude-policy.mts           # Claude adapter: tool dialect + per-turn decisions
+│   └── paseo-team-core/            # shared, runtime-neutral (invisible to pi's extension scan)
+│       ├── policy-core.ts          # briefs, authority, allowlists, bash + git guards
+│       └── claude-policy.ts        # Claude adapter: tool dialect + per-turn decisions
 ├── skills/
 │   ├── paseo-team-lead/
 │   │   └── SKILL.md                # Lead orchestration workflow + routing cycle
@@ -280,7 +281,7 @@ What the installers copy:
 | Source | Destination |
 |---|---|
 | `extensions/paseo-team-policy.ts` | `~/.pi/agent/extensions/` |
-| `extensions/policy-core.mts`, `extensions/claude-policy.mts` | `~/.pi/agent/extensions/` |
+| `extensions/paseo-team-core/` | `~/.pi/agent/extensions/paseo-team-core/` |
 | `prompts/*.md` | `~/.pi/agent/extensions/prompts/` |
 | `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` |
 | `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` |
@@ -431,7 +432,7 @@ also runs plain pi or plain Claude Code.
 
 The same three roles run on either coding agent. The Paseo provider names the
 family and the role — `pi-peer`, `claude-lead`, … — and one rule set covers
-both: `extensions/policy-core.mts` holds every decision, with a Pi extension
+both: `extensions/paseo-team-core/` holds every decision, with a Pi extension
 and a set of Claude Code hooks as adapters.
 
 ```bash

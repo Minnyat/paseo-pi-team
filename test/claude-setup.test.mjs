@@ -15,7 +15,9 @@ import {
 	claudeSettingsPath,
 	claudeUserConfigPath,
 	hookEntry,
+	hookScriptPath,
 	install,
+	installedHookScripts,
 	mergeHooks,
 	mergeMcpServer,
 	normalizePath,
@@ -189,6 +191,41 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 	const result = await install(freshEnv);
 	assert.equal(result.hooks.status, "created");
 	assert.ok(existsSync(join(freshDir, "settings.json")));
+}
+
+// --- verify reports the REGISTERED script, not the one we would install -------
+//
+// A hook left pointing at a moved checkout is the stale-install failure mode
+// this command exists to catch, so verify must read the path out of the
+// settings file and check every one of them.
+{
+	const staleDir = mkdtempSync(join(tmpdir(), "paseo-claude-stale-"));
+	const staleEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: staleDir,
+		PASEO_TEAM_CLAUDE_USER_CONFIG: join(staleDir, ".claude.json"),
+	};
+	await install(staleEnv);
+	const settingsFile = join(staleDir, "settings.json");
+	const settings = JSON.parse(readFileSync(settingsFile, "utf8"));
+	assert.deepEqual(installedHookScripts(settings), [hookScriptPath(staleEnv)]);
+	assert.deepEqual(installedHookScripts({}), []);
+	assert.equal((await verify(staleEnv)).ok, true);
+
+	// Break ONE event only: a partially re-pointed install must still fail.
+	for (const entry of settings.hooks.PreToolUse) {
+		if (!entry[PASEO_TEAM_HOOK_TAG]) continue;
+		entry.hooks[0].command = entry.hooks[0].command.replace(
+			/"[^"]+claude-hook\.mjs"/,
+			'"/nowhere/claude-hook.mjs"',
+		);
+	}
+	writeFileSync(settingsFile, JSON.stringify(settings, null, 2), "utf8");
+	const stale = await verify(staleEnv);
+	assert.equal(stale.ok, false, "a hook pointing at a missing script is not ok");
+	assert.ok(stale.missing.some((item) => item.includes("/nowhere/claude-hook.mjs")));
+	assert.ok(stale.hookScripts.includes("/nowhere/claude-hook.mjs"));
+	rmSync(staleDir, { recursive: true, force: true });
 }
 
 // --- provider snippet ---------------------------------------------------------

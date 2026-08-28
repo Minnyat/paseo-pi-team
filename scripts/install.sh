@@ -3,8 +3,8 @@
 #
 # Copies:
 #   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/   (pi adapter)
-#   extensions/policy-core.mts      -> ~/.pi/agent/extensions/   (shared rules)
-#   extensions/claude-policy.mts    -> ~/.pi/agent/extensions/   (claude dialect)
+#   extensions/paseo-team-core/     -> ~/.pi/agent/extensions/   (shared rules +
+#                                                                claude dialect)
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
 #
@@ -65,12 +65,11 @@ TEAM_SUPPORT_FILES=(
   claude-team-mcp.mjs
 )
 
-# Policy modules shared by BOTH runtime adapters. .mts on purpose: pi discovers
-# extensions/*.ts, and these have no default export.
-POLICY_MODULES=(
-  policy-core.mts
-  claude-policy.mts
-)
+# Policy modules shared by BOTH runtime adapters. They ship as a SUBDIRECTORY:
+# pi discovers extensions/*.ts as extensions and only enters a subdirectory that
+# carries an index or a pi package.json, so a plain directory keeps them out of
+# that scan while leaving them reviewable .ts files.
+POLICY_CORE_DIR="paseo-team-core"
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
 # Routing configs live here (model-routing.local.json, cluster-routing.local.json);
@@ -78,9 +77,8 @@ mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
 mkdir -p "$HOME/.paseo-pi-team"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
-for policy_module in "${POLICY_MODULES[@]}"; do
-  cp -f "$ROLE_PACK_ROOT/extensions/$policy_module" "$EXT_DIR/$policy_module"
-done
+rm -rf "$EXT_DIR/$POLICY_CORE_DIR"
+cp -R "$ROLE_PACK_ROOT/extensions/$POLICY_CORE_DIR" "$EXT_DIR/$POLICY_CORE_DIR"
 cp -f "$ROLE_PACK_ROOT"/prompts/*.md "$PROMPT_DIR/"
 rm -rf "$SKILL_DIR"
 cp -R "$ROLE_PACK_ROOT/skills/paseo-team-lead" "$SKILL_DIR"
@@ -120,7 +118,7 @@ if command -v claude >/dev/null 2>&1; then
   if env \
     PASEO_TEAM_HOOK_SCRIPT="$TEAM_SCRIPTS_DIR/claude-hook.mjs" \
     PASEO_TEAM_MCP_SCRIPT="$TEAM_SCRIPTS_DIR/claude-team-mcp.mjs" \
-    PASEO_TEAM_POLICY_DIR="$EXT_DIR" \
+    PASEO_TEAM_POLICY_DIR="$EXT_DIR/$POLICY_CORE_DIR" \
     node "$ROLE_PACK_ROOT/scripts/claude-setup.mjs" --install; then
     CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server)"
   else
@@ -136,7 +134,7 @@ echo "  prompts   -> $PROMPT_DIR"
 echo "  lead skill -> $SKILL_DIR"
 echo "  OCR skill  -> $OCR_SKILL_DIR"
 echo "  support   -> $TEAM_SCRIPTS_DIR"
-echo "  policy    -> $EXT_DIR/policy-core.mts + claude-policy.mts (shared by both runtimes)"
+echo "  policy    -> $EXT_DIR/$POLICY_CORE_DIR/ (shared core, both runtimes)"
 echo "  claude    -> $CLAUDE_SETUP_STATUS"
 export PASEO_TEAM_SCRIPTS_DIR="$TEAM_SCRIPTS_DIR"
 echo "  support env -> PASEO_TEAM_SCRIPTS_DIR=$TEAM_SCRIPTS_DIR (current process)"

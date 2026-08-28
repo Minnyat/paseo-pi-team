@@ -121,7 +121,7 @@ assert.match(installedRemote, /from "\.\/reliability\.mjs"/);
 // proven by running the hook in a replica of the installed tree.
 for (const installer of ["install.sh", "install.ps1"]) {
   const text = readFileSync(join(root, "scripts", installer), "utf8");
-  for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "policy-core.mts", "claude-policy.mts"]) {
+  for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "paseo-team-core"]) {
     assert.ok(text.includes(file), `${installer} must ship ${file}`);
   }
 }
@@ -131,8 +131,9 @@ for (const installer of ["install.sh", "install.ps1"]) {
   const scriptsDir = join(extDir, "paseo-team-scripts");
   mkdirSync(scriptsDir, { recursive: true });
   mkdirSync(join(extDir, "prompts"), { recursive: true });
-  for (const file of ["policy-core.mts", "claude-policy.mts"]) {
-    cpSync(join(root, "extensions", file), join(extDir, file));
+  mkdirSync(join(extDir, "paseo-team-core"), { recursive: true });
+  for (const file of ["policy-core.ts", "claude-policy.ts"]) {
+    cpSync(join(root, "extensions", "paseo-team-core", file), join(extDir, "paseo-team-core", file));
   }
   for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "lib-common.mjs"]) {
     cpSync(join(source, file), join(scriptsDir, file));
@@ -147,7 +148,7 @@ for (const installer of ["install.sh", "install.ps1"]) {
     PASEO_TEAM_HOME: join(unrelatedCwd, "claude-state"),
   };
   // No brief anywhere → read-only, so a write tool must be denied. This proves
-  // the hook found policy-core.mts through the installed layout: a resolution
+  // the hook found the policy core through the installed layout: a resolution
   // failure would surface as the fail-closed "hook failed" reason instead.
   const denied = execFileSync(process.execPath, [hookPath, "pre-tool-use"], {
     cwd: unrelatedCwd,

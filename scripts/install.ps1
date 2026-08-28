@@ -2,8 +2,8 @@
 #
 # Copies:
 #   extensions/paseo-team-policy.ts -> ~/.pi/agent/extensions/   (pi adapter)
-#   extensions/policy-core.mts      -> ~/.pi/agent/extensions/   (shared rules)
-#   extensions/claude-policy.mts    -> ~/.pi/agent/extensions/   (claude dialect)
+#   extensions/paseo-team-core/     -> ~/.pi/agent/extensions/   (shared rules +
+#                                                                claude dialect)
 #   prompts/*.md                   -> ~/.pi/agent/extensions/prompts/
 #   skills/paseo-team-lead/         -> ~/.pi/agent/skills/paseo-team-lead/
 #
@@ -49,21 +49,20 @@ $teamSupportFiles = @(
   "claude-team-mcp.mjs"
 )
 
-# Policy modules shared by BOTH runtime adapters. .mts on purpose: pi discovers
-# extensions/*.ts, and these have no default export.
-$policyModules = @(
-  "policy-core.mts",
-  "claude-policy.mts"
-)
+# Policy modules shared by BOTH runtime adapters. They ship as a SUBDIRECTORY:
+# pi discovers extensions/*.ts as extensions and only enters a subdirectory that
+# carries an index or a pi package.json, so a plain directory keeps them out of
+# that scan while leaving them reviewable .ts files.
+$policyCoreDir = "paseo-team-core"
 
 New-Item -ItemType Directory -Force -Path $extDir, $promptDir, $skillsDir | Out-Null
 # Routing configs live in ~/.paseo-pi-team (model-routing.local.json, cluster-routing.local.json).
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.paseo-pi-team" | Out-Null
 
 Copy-Item (Join-Path $RolePackRoot "extensions\paseo-team-policy.ts") (Join-Path $extDir "paseo-team-policy.ts") -Force
-foreach ($policyModule in $policyModules) {
-  Copy-Item (Join-Path $RolePackRoot "extensions\$policyModule") (Join-Path $extDir $policyModule) -Force
-}
+$policyCoreTarget = Join-Path $extDir $policyCoreDir
+if (Test-Path $policyCoreTarget) { Remove-Item -Recurse -Force $policyCoreTarget }
+Copy-Item -Recurse -Force (Join-Path $RolePackRoot "extensions\$policyCoreDir") $policyCoreTarget
 Copy-Item (Join-Path $RolePackRoot "prompts\*.md") $promptDir -Force
 # Replace skill directories deterministically; Copy-Item -Recurse otherwise
 # merges stale files and can create nested directories on repeated installs.
@@ -99,7 +98,7 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
   # deleting this checkout cannot break a configured Claude agent.
   $env:PASEO_TEAM_HOOK_SCRIPT = (Join-Path $teamScriptsDir "claude-hook.mjs")
   $env:PASEO_TEAM_MCP_SCRIPT  = (Join-Path $teamScriptsDir "claude-team-mcp.mjs")
-  $env:PASEO_TEAM_POLICY_DIR  = $extDir
+  $env:PASEO_TEAM_POLICY_DIR  = $policyCoreTarget
   & node (Join-Path $RolePackRoot "scripts\claude-setup.mjs") --install
   if ($LASTEXITCODE -ne 0) {
     throw "claude setup failed with exit code $LASTEXITCODE"
@@ -114,7 +113,7 @@ Write-Host "  prompts   -> $promptDir"
 Write-Host "  lead skill -> $skillDir"
 Write-Host "  OCR skill  -> $ocrSkillDir"
 Write-Host "  support   -> $teamScriptsDir"
-Write-Host "  policy    -> $extDir\policy-core.mts + claude-policy.mts (shared by both runtimes)"
+Write-Host "  policy    -> $policyCoreTarget (shared core, both runtimes)"
 Write-Host "  claude    -> $claudeSetupStatus"
 $env:PASEO_TEAM_SCRIPTS_DIR = $teamScriptsDir
 Write-Host "  support env -> PASEO_TEAM_SCRIPTS_DIR=$teamScriptsDir (current process only)"
