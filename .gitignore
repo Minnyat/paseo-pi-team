@@ -11,3 +11,12 @@ node_modules/
 # cluster-routing.local.json, so they are not listed separately.
 *.local.json
 auth.json
+
+# Per-session scratch written by the coding agents that work in this repo:
+# `.zcode/plans/` holds one plan file per session, `.claude/worktrees/` holds
+# throwaway worktrees. Both are machine- and session-local, and neither is
+# project content. `.claude/` is listed even though it is currently invisible
+# to `git status` — git skips EMPTY directories, so it stays quiet only until
+# the next session drops a file in it.
+.zcode/
+.claude/
