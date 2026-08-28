@@ -838,13 +838,28 @@ assert.equal(
 	mcpScriptBlockReason("lead", "const r = await tools.paseo_list_agents();"),
 	null,
 );
-assert.equal(
-	mcpScriptBlockReason(
-		"lead",
-		'await tools.call("paseo_create_agent", { provider: "pi-peer/x" });',
+// create_agent and send_agent_prompt are NOT reachable from a Lead's mcp_script,
+// for the reason the Supervisor's set already documents: a script's arguments
+// cannot be statically verified. Both calls carry the V3 brief that arms a
+// writer, and the scope-lease gate works by INSPECTING those arguments — so
+// leaving them here would keep a first-class path the gate never sees. The Lead
+// uses the direct `mcp` tool for these two.
+assert.match(
+	String(
+		mcpScriptBlockReason(
+			"lead",
+			'await tools.call("paseo_create_agent", { provider: "pi-peer/x" });',
+		),
 	),
-	null,
+	/not in the lead MCP allowlist/,
 );
+assert.match(
+	String(mcpScriptBlockReason("lead", "await tools.paseo_send_agent_prompt({});")),
+	/not in the lead MCP allowlist/,
+);
+// Everything else a Lead scripts is untouched.
+assert.equal(mcpScriptBlockReason("lead", "await tools.paseo_list_models({});"), null);
+assert.equal(mcpScriptBlockReason("lead", "await tools.paseo_get_agent_status({});"), null);
 assert.match(
 	mcpScriptBlockReason("lead", "await tools.paseo_create_terminal();") ?? "",
 	/allowlist/,
@@ -1602,6 +1617,24 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		// writers, not parallelism.
 		const readOnly = await create(writerBrief.replace("MODE: write", "MODE: read-only"));
 		assert.equal(readOnly?.block, undefined);
+
+		// The brief arms a Peer whether it arrives at creation or in a later turn,
+		// so send_agent_prompt is gated identically. Without this the two-step —
+		// create something benign, then send the write brief — walks past the
+		// lease untouched.
+		const sent = (await toolCall({
+			toolName: "mcp",
+			input: { tool: "send_agent_prompt", args: { agentId: "some-peer", prompt: writerBrief } },
+		})) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(sent?.block, true, "a write brief sent after creation is lease-checked too");
+		assert.match(String(sent?.reason), /SCOPE_LEASE_HELD/);
+
+		// An ordinary follow-up carries no brief and is not gated.
+		const followUp = await toolCall({
+			toolName: "mcp",
+			input: { tool: "send_agent_prompt", args: { agentId: "some-peer", prompt: "please add a test" } },
+		});
+		assert.equal((followUp as { block?: boolean } | undefined)?.block, undefined);
 	} finally {
 		rmSync(stubDir, { recursive: true, force: true });
 		if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;

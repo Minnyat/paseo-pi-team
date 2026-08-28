@@ -133,10 +133,13 @@ function runSupportScript(name: string, args: string[], signal?: AbortSignal, ti
  * arbitrated by policy-core, so the Pi and Claude adapters cannot disagree
  * about who holds a scope.
  */
-async function leadCreateAgentLeaseReason(input: unknown): Promise<string | null> {
+async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 	const classified = classifyMcpInput(input);
 	if (classified.kind !== "target") return null;
-	if (!matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return null;
+	// Both calls can deliver the brief that arms a writer.
+	if (!matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"])) {
+		return null;
+	}
 
 	const args = extractCreateAgentArgs(input);
 	// Nothing to gate unless this call staffs a writer; the core decides that
@@ -443,7 +446,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			if (r === "lead") {
-				const leaseReason = await leadCreateAgentLeaseReason(event.input);
+				const leaseReason = await leadWriterLeaseReason(event.input);
 				if (leaseReason) {
 					return { block: true, reason: leaseReason };
 				}

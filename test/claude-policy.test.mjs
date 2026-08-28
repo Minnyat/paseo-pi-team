@@ -416,6 +416,40 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 	assert.match(String(createAgent(null, LEAD_A)), /LEASE_UNVERIFIABLE/);
 	assert.match(String(createAgent(undefined, LEAD_A)), /LEASE_UNVERIFIABLE/, "a caller that forgot to fetch is not a free pass");
 
+	// OCR-002: the brief arms a Peer whether it arrives at creation or in a later
+	// turn, so send_agent_prompt is gated exactly like create_agent. Otherwise the
+	// two-step — create something benign, then send the write brief — walks past
+	// the lease untouched.
+	assert.match(
+		String(
+			claudeToolBlockReason({
+				role: "lead",
+				toolName: "mcp__paseo__send_agent_prompt",
+				toolInput: { agentId: "x", prompt: writerBrief },
+				brief: null,
+				leases: resolveLeases([claim(LEAD_B, "src/auth")], { now }),
+				selfAgentId: LEAD_A,
+			}),
+			/SCOPE_LEASE_HELD/,
+		),
+		/SCOPE_LEASE_HELD/,
+	);
+
+	// OCR-007: the Supervisor may read the lease board but not move it, on this
+	// runtime as well — an authority that exists on one adapter only is the exact
+	// asymmetry the shared core exists to prevent.
+	const leaseTool = (role, action) =>
+		claudeToolBlockReason({
+			role,
+			toolName: "mcp__paseo-team__team_lease",
+			toolInput: { action, scope: "src/auth" },
+			brief: null,
+		});
+	assert.equal(leaseTool("supervisor", "status"), null, "reading the board is governance");
+	assert.match(String(leaseTool("supervisor", "claim")), /not claim, renew or release/);
+	assert.match(String(leaseTool("supervisor", "release")), /not claim, renew or release/);
+	assert.equal(leaseTool("lead", "claim"), null);
+
 	// A read-only peer shares the tree by design and is never gated.
 	assert.equal(
 		createAgent(resolveLeases([claim(LEAD_B, "src/auth")], { now }), LEAD_A, writerBrief.replace("MODE: write", "MODE: read-only")),

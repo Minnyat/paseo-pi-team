@@ -13,6 +13,7 @@
 
 import assert from "node:assert/strict";
 import {
+	LEASE_MAX_TTL_MS,
 	leaseBlockReason,
 	leaseHolderFor,
 	normalizeScope,
@@ -33,7 +34,14 @@ assert.equal(normalizeScope("./src/auth"), "src/auth");
 assert.equal(normalizeScope("src\\auth"), "src/auth", "a Windows Lead and a POSIX Lead claim the same thing");
 assert.equal(normalizeScope("src/auth/"), "src/auth");
 assert.equal(normalizeScope("  src//auth  "), "src/auth");
-assert.equal(normalizeScope("SRC/Auth"), "SRC/Auth", "case is preserved: paths are case-sensitive where it matters");
+assert.equal(normalizeScope("SRC/Auth"), "SRC/Auth", "the stored spelling is preserved");
+// Interior "." segments are the same directory on every filesystem. Leaving
+// them distinct would let two Leads hold identical files by spelling the path
+// two ways — the same class of hole as `..`, which is already rejected.
+assert.equal(normalizeScope("src/./auth"), "src/auth");
+assert.equal(normalizeScope("./src/./auth/."), "src/auth");
+assert.equal(normalizeScope("."), ".");
+assert.equal(normalizeScope("./"), ".");
 assert.equal(normalizeScope(""), null);
 assert.equal(normalizeScope("   "), null);
 assert.equal(normalizeScope(null), null);
@@ -50,6 +58,14 @@ assert.equal(scopeConflicts("src/auth", "src/authz"), false, "a shared prefix is
 assert.equal(scopeConflicts("src/auth", "src/billing"), false);
 assert.equal(scopeConflicts(".", "anything/at/all"), true, "the repo root covers everything");
 assert.equal(scopeConflicts("src/auth", null), false);
+assert.equal(scopeConflicts("src/auth", "src/./auth"), true, "the same directory spelled two ways is one scope");
+// Compared case-insensitively: `src/auth` and `SRC/Auth` are the same files on
+// Windows and default macOS, which is where this pack runs. On a case-sensitive
+// filesystem this can only produce a FALSE conflict, and "these two Leads
+// collide" is the safe direction to be wrong in.
+assert.equal(scopeConflicts("src/auth", "SRC/Auth"), true);
+assert.equal(scopeConflicts("src/auth", "SRC/Auth/Login"), true);
+assert.equal(scopeConflicts("src/auth", "SRC/Authz"), false, "case-folding must not turn distinct siblings into a conflict");
 
 // --- record parsing ----------------------------------------------------------
 {
@@ -179,6 +195,19 @@ function entry(author, action, scope, ts, ttlMs = HOUR) {
 	assert.equal(leaseHolderFor(leases, "src/auth")?.agentId, LEAD_A, "the narrower, earlier lease keeps the ground");
 }
 
+{
+	// The tool caps TTL, but arbitration reads whatever is in the room. One
+	// smuggled record on the repo root would otherwise hold every writer out
+	// until someone edited the room by hand.
+	const forever = entry(LEAD_B, "claim", ".", 1000, 999_999_999_999);
+	const leases = resolveLeases([forever], { now: 1000 + LEASE_MAX_TTL_MS + 1 });
+	assert.equal(leases.size, 0, "an absurd TTL is clamped at fold time, so the lock still lapses");
+
+	const stillLive = resolveLeases([forever], { now: 1000 + LEASE_MAX_TTL_MS - 1 });
+	assert.equal(stillLive.size, 1, "and it is honoured up to the ceiling");
+	assert.equal(parseLeaseRecord(forever.body)?.ttlMs, LEASE_MAX_TTL_MS);
+}
+
 // Junk in the room is not a lease and must not disturb the ones that are.
 {
 	const leases = resolveLeases(
@@ -205,6 +234,18 @@ const writeBrief = (scope: string) =>
 	].join("\n");
 
 assert.equal(writerScopeFromCreateAgent({ initialPrompt: writeBrief("src/auth") }), "src/auth");
+// The gate and the grant must be one question, not two readings of the same
+// fields. They diverged: the gate demanded a literal `EDIT_AUTHORITY: allowed`
+// while the grant defaults edit to true when the field is absent under
+// `MODE: write` — so this brief, which the parser accepts without complaint,
+// produced a writer that no lease ever covered.
+assert.equal(
+	writerScopeFromCreateAgent({
+		initialPrompt: writeBrief("src/auth").replace("EDIT_AUTHORITY: allowed\n", ""),
+	}),
+	"src/auth",
+	"a write brief with EDIT_AUTHORITY omitted still staffs a writer, so it still needs a lease",
+);
 assert.equal(
 	writerScopeFromCreateAgent({ initialPrompt: writeBrief("src/auth").replace("MODE: write", "MODE: read-only") }),
 	null,

@@ -170,6 +170,17 @@ export const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
 const SUPERVISOR_MCP_SCRIPT_TARGETS: string[] = SUPERVISOR_MONITORING_TARGETS;
 
 /**
+ * The Lead's mcp_script surface, for the same reason the Supervisor has one:
+ * a script's ARGUMENTS cannot be statically verified, and both create_agent and
+ * send_agent_prompt carry the brief that arms a writer. Allowing them here would
+ * leave a first-class path that the scope-lease gate — which inspects arguments
+ * — never sees.
+ */
+const LEAD_MCP_SCRIPT_TARGETS: string[] = LEAD_ALLOWED_MCP_TARGETS.filter(
+	(tool) => tool !== "create_agent" && tool !== "send_agent_prompt",
+);
+
+/**
  * Match a possibly-prefixed proxy tool name against known Paseo tool names.
  * Handles "paseo_list_providers" and "server:list_providers" forms without
  * mangling bare names like "list_providers" (whose first segment is part of
@@ -362,6 +373,14 @@ export function callsTeamSupportScript(command: string): boolean {
 
 export const LEASE_HEADER = "LEASE_V1";
 export const LEASE_ACTIONS = ["claim", "renew", "release"] as const;
+/**
+ * Hard ceiling on how long any single lease can hold ground, applied in the
+ * FOLD rather than only in the tool that posts. The tool's cap binds callers
+ * that go through it; arbitration reads whatever is in the room, and one
+ * smuggled `TTL_MS: 999999999999` on the repo root would otherwise lock every
+ * writer out until someone edited the room by hand.
+ */
+export const LEASE_MAX_TTL_MS = 12 * 3_600_000;
 export type LeaseAction = (typeof LEASE_ACTIONS)[number];
 
 /** Repo-relative path, or "." for the whole tree. No traversal, bounded. */
@@ -381,8 +400,15 @@ export function normalizeScope(scope: unknown): string | null {
 	if (!SCOPE_CHARS.test(trimmed)) return null;
 	// A scope names something inside the repo. `..` is either a mistake or an
 	// attempt to claim outside it; neither should become a lease.
-	if (trimmed.split("/").some((segment) => segment === "..")) return null;
-	return trimmed;
+	//
+	// Interior `.` segments are dropped for the same reason `..` is rejected:
+	// `src/./auth` and `src/auth` are the same directory on every filesystem, and
+	// leaving them distinct would let two Leads hold identical files by spelling
+	// the path two ways.
+	const segments = trimmed.split("/").filter((segment) => segment !== ".");
+	if (segments.some((segment) => segment === "..")) return null;
+	if (segments.length === 0) return ".";
+	return segments.join("/");
 }
 
 /**
@@ -398,9 +424,15 @@ export function scopeConflicts(a: unknown, b: unknown): boolean {
 	const right = normalizeScope(b);
 	if (!left || !right) return false;
 	if (left === "." || right === ".") return true;
-	if (left === right) return true;
-	const l = left.split("/");
-	const r = right.split("/");
+	// Compared case-insensitively even though the stored scope keeps its case.
+	// `src/auth` and `SRC/Auth` are the same files on Windows and on default
+	// macOS, which is where this pack runs; on a case-sensitive filesystem this
+	// can only produce a FALSE conflict, and erring toward "these two Leads
+	// collide" is the safe direction — the other way round puts two writers on
+	// one directory.
+	const l = left.toLowerCase().split("/");
+	const r = right.toLowerCase().split("/");
+	if (left.toLowerCase() === right.toLowerCase()) return true;
 	const shared = Math.min(l.length, r.length);
 	for (let i = 0; i < shared; i += 1) if (l[i] !== r[i]) return false;
 	return true;
@@ -442,7 +474,7 @@ export function parseLeaseRecord(text: unknown): LeaseRecord | null {
 	if (action === "release") return { action, scope, ttlMs: null };
 	const ttlMs = Number.parseInt(fields.TTL_MS ?? "", 10);
 	if (!Number.isInteger(ttlMs) || ttlMs <= 0) return null;
-	return { action, scope, ttlMs };
+	return { action, scope, ttlMs: Math.min(ttlMs, LEASE_MAX_TTL_MS) };
 }
 
 export interface LeaseHolder {
@@ -545,12 +577,26 @@ export function leaseHolderFor(
  */
 export function writerScopeFromCreateAgent(args: unknown): string | null {
 	if (!args || typeof args !== "object") return null;
-	const prompt = (args as Record<string, unknown>).initialPrompt;
+	const record = args as Record<string, unknown>;
+	// A brief arms a Peer whether it arrives at creation (`initialPrompt`) or in
+	// a later turn (`prompt` via send_agent_prompt) — authority is recomputed
+	// from whatever prompt starts the turn, never inherited. Gating only the
+	// first would leave the two-step open: create something benign, then send
+	// the write brief to the same agent.
+	const prompt = typeof record.initialPrompt === "string" ? record.initialPrompt : record.prompt;
 	if (typeof prompt !== "string") return null;
 	const brief = parseTaskBrief(prompt);
 	if (!brief || brief.version !== 3 || brief.malformed.length > 0) return null;
-	if (brief.mode !== "write") return null;
-	if (brief.fields.get("EDIT_AUTHORITY") !== "allowed") return null;
+	// Ask the SAME function that grants the authority, not a second reading of
+	// the same fields. They diverged once already: the gate required a literal
+	// `EDIT_AUTHORITY: allowed`, while the grant defaults edit to true when the
+	// field is absent under `MODE: write` — so a brief the parser happily
+	// accepts produced a writer the lease never saw.
+	// This mirrors policyWithAuthority exactly: write/edit tools are granted only
+	// when the mode is write AND the authority allows edit. Reading either half
+	// alone is how the gate and the grant drifted apart the first time.
+	if (resolvePeerMode(brief) !== "write") return null;
+	if (!peerAuthority(brief).edit) return null;
 	// A write brief with no OWNED_SCOPE is the dangerous one: it writes
 	// somewhere and says nothing about where. Treat it as the whole repo rather
 	// than as exempt.
@@ -1007,7 +1053,9 @@ export function mcpScriptBlockReason(
 	const allowed =
 		role === "supervisor"
 			? SUPERVISOR_MCP_SCRIPT_TARGETS
-			: mcpAllowedTargets(role);
+			: role === "lead"
+				? LEAD_MCP_SCRIPT_TARGETS
+				: mcpAllowedTargets(role);
 	for (const _match of code.matchAll(MCP_SCRIPT_DYNAMIC_CALL_RE)) {
 		return `mcp_script invokes an MCP tool through a non-literal target (variable, expression or computed key) — the ${role} allowlist cannot verify it, so the call is blocked fail-closed. Use a literal tool name: tools.call("<allowed_tool>", ...) or tools.<allowed_tool>().`;
 	}

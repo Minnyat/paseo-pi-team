@@ -30,6 +30,7 @@ import {
 	callsPaseoCli,
 	coordinationCliBlockReason,
 	leaseBlockReason,
+	teamLeaseToolBlockReason,
 	type LeaseHolder,
 	supportScriptBlockReason,
 	writerScopeFromCreateAgent,
@@ -215,7 +216,18 @@ export function claudeToolBlockReason(
 	const peerMode = resolvePeerMode(brief);
 
 	if (classified.kind === "team") {
-		return teamToolBlockReason(role, teamToolName(toolName), brief);
+		const named = teamToolName(toolName);
+		const coarse = teamToolBlockReason(role, named, brief);
+		if (coarse) return coarse;
+		// The per-action gate needs the arguments, which the coarse name-only
+		// check never sees. Without this a Claude Supervisor could claim and
+		// release scopes that a Pi Supervisor is refused — an authority
+		// asymmetry, which is the one thing the shared core exists to prevent.
+		return teamLeaseToolBlockReason(
+			role,
+			(input.toolInput as Record<string, unknown> | undefined)?.action,
+			named,
+		);
 	}
 
 	// Same scope-lease rule the Pi extension applies. The ledger cannot be read
@@ -225,7 +237,8 @@ export function claudeToolBlockReason(
 	if (
 		role === "lead" &&
 		classified.kind === "paseo-mcp" &&
-		matchesPaseoToolName(classified.target ?? "", ["create_agent"]) &&
+		// Both calls can deliver the brief that arms a writer.
+		matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"]) &&
 		writerScopeFromCreateAgent(input.toolInput)
 	) {
 		const leaseReason = leaseBlockReason({

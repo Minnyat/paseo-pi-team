@@ -218,6 +218,31 @@ function authorityBlock(describe, role, brief) {
  * "say nothing"), never throws for policy reasons — the caller turns an
  * unexpected throw into a fail-closed deny.
  */
+/**
+ * The live scope leases, but only when the decision actually needs them.
+ *
+ * Returns undefined when the call staffs no writer — the core then never looks
+ * at it — and null when the ledger could not be read, which the core treats as
+ * fatal. Those two must stay distinct: collapsing them would either block every
+ * tool call or, far worse, let an unreadable ledger read as an empty one.
+ */
+async function leasesForDecision({ core, claude }, role, toolName, toolInput, env, now) {
+	if (role !== "lead") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"])) {
+		return undefined;
+	}
+	if (!core.writerScopeFromCreateAgent(toolInput)) return undefined;
+	try {
+		const { leaseLedger } = await import("./team-lease.mjs");
+		const result = await leaseLedger({}, { role, selfAgentId: env.PASEO_AGENT_ID, now });
+		return result.ok ? core.resolveLeases(result.entries, { now }) : null;
+	} catch {
+		return null;
+	}
+}
+
 export async function handleEvent(event, payload, env = process.env, now = Date.now()) {
 	const { core, claude } = await loadPolicy(env);
 	const role = core.detectRole(env);
@@ -285,11 +310,18 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 
 	if (event === "pre-tool-use") {
 		const brief = await currentBrief(payload, env, now);
+		const toolName = String(payload?.tool_name ?? "");
 		const reason = claude.claudeToolBlockReason({
 			role,
-			toolName: String(payload?.tool_name ?? ""),
+			toolName,
 			toolInput: payload?.tool_input,
 			brief,
+			// Only fetched when the call would staff a writer: the ledger read is
+			// a round trip, and every other tool call must stay cheap. A fetch
+			// that fails hands over null, which the core treats as
+			// LEASE_UNVERIFIABLE rather than as an empty board.
+			leases: await leasesForDecision({ core, claude }, role, toolName, payload?.tool_input, env, now),
+			selfAgentId: env.PASEO_AGENT_ID?.trim() || null,
 		});
 		if (!reason) return null; // allow: say nothing, let normal permissions apply
 		return {
