@@ -40,11 +40,29 @@ const V3_WRITE = [
 
 const peerEnv = { ...baseEnv, PASEO_PI_ROLE: "peer" };
 
+/**
+ * The hook resolves its whole policy from the environment, so the child must
+ * see EXACTLY the variables a case declares — never the ones the developer
+ * happens to be running under.
+ *
+ * This matters more here than in most suites: the audience for this pack works
+ * inside Paseo agents, and every one of them carries PASEO_PI_ROLE. Inheriting
+ * it turned the "passive without a role" case below into a false failure for
+ * anyone running the suite from an agent session, which is exactly who runs it.
+ */
+function childEnv(env) {
+	const inherited = { ...process.env };
+	for (const key of Object.keys(inherited)) {
+		if (key.startsWith("PASEO_")) delete inherited[key];
+	}
+	return { ...inherited, ...env };
+}
+
 function runHook(event, payload, env = peerEnv) {
 	const stdout = execFileSync(process.execPath, [hookPath, event], {
 		encoding: "utf8",
 		input: JSON.stringify(payload),
-		env: { ...process.env, ...env },
+		env: childEnv(env),
 	});
 	return stdout.trim() ? JSON.parse(stdout) : null;
 }
@@ -57,6 +75,28 @@ assert.equal(
 	"no PASEO_PI_ROLE → no policy at all (safe to install globally)",
 );
 assert.equal(runHook("pre-tool-use", { session_id: "s0", tool_name: "Write" }, baseEnv), null);
+
+// The scrub is the thing under test here: an ambient role must not survive into
+// the child, while the case's own variables must.
+{
+	const ambient = "PASEO_PI_ROLE";
+	const previous = process.env[ambient];
+	process.env[ambient] = "lead";
+	try {
+		const built = childEnv(baseEnv);
+		assert.equal(built[ambient], undefined, "an ambient role never reaches the hook");
+		assert.equal(built.PASEO_TEAM_HOME, home, "the case's own variables do reach it");
+		assert.ok(built.PATH !== undefined || process.platform === "win32", "unrelated environment is preserved");
+		assert.equal(
+			runHook("pre-tool-use", { session_id: "s0b", tool_name: "Write" }, baseEnv),
+			null,
+			"and the passive case stays passive even when the suite runs inside a Paseo agent",
+		);
+	} finally {
+		if (previous === undefined) delete process.env[ambient];
+		else process.env[ambient] = previous;
+	}
+}
 
 // --- the brief is recomputed per prompt, never inherited -----------------------
 
