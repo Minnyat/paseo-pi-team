@@ -3,13 +3,19 @@
 [![ci](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml/badge.svg)](https://github.com/Minnyat/paseo-pi-team/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A role pack that runs directly on **Paseo + Pi**. Three components, three
-separate responsibilities: Paseo owns lifecycle/workspace/control-plane truth;
-the Pi extension owns role invariants (prompt + tool policy); the Lead skill
-owns the orchestration procedure.
+A role pack that runs directly on **Paseo**, with the same three roles served
+by two coding agents — **Pi** and **Claude Code** — in one mixed fleet. Three
+components, three separate responsibilities: Paseo owns
+lifecycle/workspace/control-plane truth; the role pack owns role invariants
+(prompt + tool policy); the Lead skill owns the orchestration procedure.
+
+The role invariants live in one runtime-neutral core
+(`extensions/paseo-team-core/`) with a thin adapter per runtime: a Pi
+extension, and Claude Code hooks. A rule denied on one runtime is denied on the other.
 
 Full design reference:
 [`docs/demonthorn-agent-orchestration-deep-dive.md`](docs/demonthorn-agent-orchestration-deep-dive.md).
+Claude runtime: [`docs/claude-runtime.md`](docs/claude-runtime.md).
 
 ## Quick start
 
@@ -46,7 +52,7 @@ paseo-pi-team/
 ├── .gitattributes                      # LF everywhere; CI compares the same bytes on all three OSes
 ├── .github/workflows/ci.yml            # tests on 3 OSes × node 22.18/24 + tsc
 ├── config/
-│   ├── paseo.providers.example.json   # 3 Pi profiles: supervisor / lead / peer
+│   ├── paseo.providers.example.json   # 6 role providers: pi-* and claude-* (supervisor/lead/peer)
 │   ├── model-routing.example.json     # MODEL_CLASS → model route template (copy per host)
 │   └── cluster-routing.example.json   # controller-local N-host contract template
 ├── templates/
@@ -57,7 +63,10 @@ paseo-pi-team/
 │   ├── lead.md                     # Project Lead (orchestration owner)
 │   └── peer.md                     # execution Peer (bounded worker)
 ├── extensions/
-│   └── paseo-team-policy.ts        # injects the prompt and applies the per-role tool policy
+│   ├── paseo-team-policy.ts        # Pi adapter: prompt injection + per-role tool policy
+│   └── paseo-team-core/            # shared, runtime-neutral (invisible to pi's extension scan)
+│       ├── policy-core.ts          # briefs, authority, allowlists, bash + git guards
+│       └── claude-policy.ts        # Claude adapter: tool dialect + per-turn decisions
 ├── skills/
 │   ├── paseo-team-lead/
 │   │   └── SKILL.md                # Lead orchestration workflow + routing cycle
@@ -90,6 +99,9 @@ paseo-pi-team/
 │   ├── ocr-review.mjs              # deterministic OCR exact-SHA preflight manifest
 │   ├── ocr-setup.mjs               # installs/verifies the OCR CLI (capability probe, never downgrades)
 │   ├── browser-setup.mjs           # installs agent-browser CLI + Chrome runtime + MCP entry
+│   ├── claude-hook.mjs             # Claude Code hook: role prompt + PreToolUse policy
+│   ├── claude-team-mcp.mjs         # stdio MCP server: peer_ask_lead + team_watchdog for Claude
+│   ├── claude-setup.mjs            # installs/verifies/removes the Claude side (hooks + MCP)
 │   ├── team-scripts-path.mjs       # durable support-script path resolver
 │   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
 ├── test/                           # `npm test` runs every test/*.test.{mjs,mts}
@@ -269,6 +281,7 @@ What the installers copy:
 | Source | Destination |
 |---|---|
 | `extensions/paseo-team-policy.ts` | `~/.pi/agent/extensions/` |
+| `extensions/paseo-team-core/` | `~/.pi/agent/extensions/paseo-team-core/` |
 | `prompts/*.md` | `~/.pi/agent/extensions/prompts/` |
 | `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` |
 | `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` |
@@ -280,9 +293,15 @@ merges an MCP entry — `agent-browser: { command: "agent-browser", args: ["mcp"
 — into `~/.pi/agent/mcp.json` when it is absent from the standard config
 locations.
 
+When the `claude` CLI is present, the installers also run
+`scripts/claude-setup.mjs --install`, which merges this pack's hooks into
+`~/.claude/settings.json` and the `paseo-team` MCP server into `~/.claude.json`
+— see [Mixed fleet](#mixed-fleet-pi--claude-code). A host without `claude`
+skips that step; it is not an error.
+
 The support scripts are `lib-common`, `reliability`, `watchdog`,
-`team-communication`, `ocr-review`, `remote-paseo`, `model-routing` and
-`team-scripts-path`. They are copied **flat**, so every import between them
+`team-communication`, `ocr-review`, `remote-paseo`, `model-routing`,
+`team-scripts-path`, `claude-hook` and `claude-team-mcp`. They are copied **flat**, so every import between them
 must stay `./<name>.mjs`. `installer-contract.test.mjs` guards that: every
 shipped file must exist, and every support script it imports must be shipped
 too.
@@ -396,14 +415,46 @@ The installers **do not merge** `~/.paseo/config.json` — do it by hand, so the
 change stays under your control:
 
 1. Merge `config/paseo.providers.example.json` into `~/.paseo/config.json`
-   (`agents.providers.pi-*` + `daemon.mcp.injectIntoAgents: true` — required for
-   agents to receive Paseo orchestration tools).
-2. Restart the Paseo daemon (this kills every running agent — do it when ready).
+   (`agents.providers.pi-*` and `claude-*` + `daemon.mcp.injectIntoAgents: true`
+   — required for agents to receive Paseo orchestration tools). Regenerate the
+   `claude-*` block from the code with
+   `pteam claude-setup --print-providers`, so the static tool policy in the
+   config can never drift from the policy the hook enforces.
+2. Restart the Paseo daemon (this kills every running agent — do it when
+   ready). Derived providers do NOT appear in `paseo provider ls` until then.
 3. Run `/reload` in pi to load the new extension.
 
-With no `PASEO_PI_ROLE`, the extension is passive: it injects nothing and
-restricts nothing, so it is safe to install globally on a machine that also
-runs plain pi.
+With no `PASEO_PI_ROLE`, both adapters are passive: they inject nothing and
+restrict nothing, so the pack is safe to install globally on a machine that
+also runs plain pi or plain Claude Code.
+
+### Mixed fleet (Pi + Claude Code)
+
+The same three roles run on either coding agent. The Paseo provider names the
+family and the role — `pi-peer`, `claude-lead`, … — and one rule set covers
+both: `extensions/paseo-team-core/` holds every decision, with a Pi extension
+and a set of Claude Code hooks as adapters.
+
+```bash
+pteam claude-setup --install           # hooks + paseo-team MCP server
+pteam claude-setup --print-providers   # the claude-* block for ~/.paseo/config.json
+pteam claude-setup --verify --json     # exit 1 when incomplete
+node scripts/preflight.mjs --runtime both
+```
+
+Practical differences to know when routing:
+
+| | pi | Claude |
+|---|---|---|
+| model reference | `<pi-provider>/<model-id>` | bare id, e.g. `claude-opus-5` |
+| thinking | `off\|minimal\|low\|medium\|high\|xhigh\|max` | `off\|low\|medium\|high\|xhigh\|max\|ultracode` |
+| team tools | `peer_ask_lead`, `team_watchdog` | `mcp__paseo-team__*` |
+| Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
+| subagents | n/a | `Task` denied for every role — fan-out belongs to the Lead |
+
+Mix Peers freely; keep one Lead per project on one family. Full architecture,
+fail-closed behaviour and the install contract:
+[`docs/claude-runtime.md`](docs/claude-runtime.md).
 
 ### Model routing (required for every create_agent)
 
@@ -472,12 +523,18 @@ node scripts/preflight.mjs --strict --host-id <host-id>
                                       # unverifiable thinking → FAIL (never warn-as-pass)
 ```
 
-Checks: node/git/paseo/pi + version pins, the daemon, the adapter (pin), the
-extension, role prompts, the 3 role providers, routing config (single-host +
-cluster contract), each route against the real inventory, provider status, empty
-model segments, pi's per-model `thinkingLevelMap` (a `null` level means the
-level gets clamped), endpoint env vars, and repository state (a writer host must
-be clean in strict mode). No secret is ever printed.
+Checks: node/git/paseo + version pins, the daemon, the adapter (pin), the
+extension, the shared policy modules, role prompts, the role providers of every
+runtime in scope, routing config (single-host + cluster contract), each route
+against the real inventory, provider status, empty model segments, pi's
+per-model `thinkingLevelMap` (a `null` level means the level gets clamped),
+endpoint env vars, and repository state (a writer host must be clean in strict
+mode). No secret is ever printed.
+
+`--runtime pi|claude|both` selects which families the host is expected to
+serve; with no flag it detects them from the installed CLIs, so a Claude-only
+host is not reported as a broken pi host. In Claude scope it also verifies the
+three hooks and the `paseo-team` MCP registration.
 
 ## CLI and WebUI
 

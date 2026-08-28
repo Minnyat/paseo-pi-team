@@ -507,6 +507,14 @@ function roleClass(role) {
 	return ["supervisor", "lead", "peer"].includes(role) ? role : "unknown";
 }
 
+/**
+ * Runtime family badge. The same role runs on pi and on Claude in one fleet,
+ * so "Lead" alone is ambiguous while a task is being routed.
+ */
+function familyLabel(family) {
+	return family === "claude" ? "Claude" : family === "pi" ? "Pi" : "";
+}
+
 function renderDiagram(graph) {
 	const svg = clear($("graph"));
 	const nodes = graph.nodes ?? [];
@@ -571,7 +579,12 @@ function renderDiagram(graph) {
 		);
 		group.appendChild(svgEl("text", { class: "node-label", x: 12, y: 23, text: (node.name || "(không tên)").slice(0, 24) }));
 		group.appendChild(
-			svgEl("text", { class: "node-sub", x: 12, y: 41, text: `${roleLabel(node.role)} · ${statusLabel(node.status)}` }),
+			svgEl("text", {
+				class: "node-sub",
+				x: 12,
+				y: 41,
+				text: `${roleLabel(node.role)}${node.family ? ` (${familyLabel(node.family)})` : ""} · ${statusLabel(node.status)}`,
+			}),
 		);
 		if (node.pendingPermissions > 0) {
 			group.appendChild(svgEl("circle", { class: "badge-permit", cx: NODE_W - 16, cy: 16, r: 10 }));
@@ -613,7 +626,10 @@ function renderList(graph) {
 					el("span", { text: node.name || "(không tên)" }),
 					node.pendingPermissions > 0 ? el("span", { class: "pill", text: `${node.pendingPermissions} chờ duyệt` }) : null,
 				]),
-				el("td", { text: roleLabel(node.role) }),
+				el("td", {}, [
+					el("span", { text: roleLabel(node.role) }),
+					node.family ? el("span", { class: "pill", text: familyLabel(node.family) }) : null,
+				]),
 				el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
 				el("td", { text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
 				el("td", {}, [el("button", { text: "Chi tiết", onclick: () => openDrawer(node) })]),
@@ -652,7 +668,10 @@ function openDrawer(node) {
 	const body = clear($("drawer-body"));
 	drawer.classList.remove("hidden");
 	body.appendChild(el("h3", { text: node.name || "(không tên)" }));
-	body.appendChild(el("p", { class: "drawer-sub", text: `${roleLabel(node.role)} · ${statusLabel(node.status)}` }));
+	const familyPart = node.family ? ` · ${familyLabel(node.family)}` : "";
+	body.appendChild(
+		el("p", { class: "drawer-sub", text: `${roleLabel(node.role)}${familyPart} · ${statusLabel(node.status)}` }),
+	);
 	if (ROLE_HINT[node.role]) body.appendChild(el("p", { class: "hint", text: ROLE_HINT[node.role] }));
 
 	const facts = [

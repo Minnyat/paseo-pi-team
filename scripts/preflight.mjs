@@ -21,6 +21,8 @@ import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { verify as verifyClaudeSetup } from "./claude-setup.mjs";
 import {
 	describeCdpTarget,
 	inspectAgentBrowser,
@@ -54,6 +56,16 @@ const PINNED = Object.freeze({
 const wantJson = process.argv.includes("--json");
 const skipModels = process.argv.includes("--skip-models");
 const wantStrict = process.argv.includes("--strict");
+/**
+ * Which runtime families this host is expected to serve. A mixed fleet runs
+ * both; a Claude-only host must not fail on missing pi bits, and vice versa.
+ * Explicit --runtime wins; otherwise the installed CLIs decide, so an
+ * unconfigured host still reports the truth instead of a false failure.
+ */
+const runtimeOpt = (() => {
+	const i = process.argv.indexOf("--runtime");
+	return i >= 0 && process.argv[i + 1] ? process.argv[i + 1].toLowerCase() : null;
+})();
 const opt = (name, fallback) => {
 	const i = process.argv.indexOf(name);
 	return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
@@ -173,11 +185,30 @@ function summarizeMessages() {
 			);
 	}
 }
-{
-	const v = tryExec("pi", ["--version"]);
-	if (!v.ok) fail("pi-cli", "pi CLI not found");
+const piCli = tryExec("pi", ["--version"]);
+const claudeCli = tryExec("claude", ["--version"]);
+const runtimes = (() => {
+	if (runtimeOpt === "pi" || runtimeOpt === "claude") return [runtimeOpt];
+	if (runtimeOpt === "both") return ["pi", "claude"];
+	if (runtimeOpt) {
+		fail("runtime", `unknown --runtime "${runtimeOpt}" (pi|claude|both)`);
+		return ["pi"];
+	}
+	const detected = [
+		...(piCli.ok ? ["pi"] : []),
+		...(claudeCli.ok ? ["claude"] : []),
+	];
+	// Nothing detected: keep the historical behaviour and report the pi gaps.
+	return detected.length > 0 ? detected : ["pi"];
+})();
+const wantPi = runtimes.includes("pi");
+const wantClaude = runtimes.includes("claude");
+pass("runtime", runtimes.join(" + "));
+
+if (wantPi) {
+	if (!piCli.ok) fail("pi-cli", "pi CLI not found");
 	else {
-		const version = v.stdout.trim();
+		const version = piCli.stdout.trim();
 		if (version === PINNED.pi) pass("pi-cli", version);
 		else
 			warn(
@@ -185,6 +216,10 @@ function summarizeMessages() {
 				`detected ${version}, role pack was verified against ${PINNED.pi}`,
 			);
 	}
+}
+if (wantClaude) {
+	if (!claudeCli.ok) fail("claude-cli", "claude CLI not found");
+	else pass("claude-cli", claudeCli.stdout.trim());
 }
 
 // --- daemon -------------------------------------------------------------------
@@ -211,7 +246,7 @@ let daemonUp = false;
 
 // --- pi-mcp-adapter -----------------------------------------------------------
 
-{
+if (wantPi) {
 	const list = tryExec("pi", ["list"]);
 	const hasAdapter = list.ok && list.stdout.includes("pi-mcp-adapter");
 	if (!hasAdapter) {
@@ -327,7 +362,7 @@ let daemonUp = false;
 
 // --- role-pack installation ---------------------------------------------------
 
-{
+if (wantPi) {
 	const extPath = join(
 		homedir(),
 		".pi",
@@ -337,6 +372,61 @@ let daemonUp = false;
 	);
 	if (existsSync(extPath)) pass("extension", extPath);
 	else fail("extension", `${extPath} missing → run scripts/install.{sh,ps1}`);
+}
+{
+	// Both runtimes read the SAME policy core and the SAME role prompts, so
+	// these are checked regardless of family.
+	const coreDir = join(homedir(), ".pi", "agent", "extensions", "paseo-team-core");
+	const missingModules = ["policy-core.ts", "claude-policy.ts"].filter(
+		(name) => !existsSync(join(coreDir, name)),
+	);
+	if (missingModules.length > 0) {
+		fail(
+			"policy-core",
+			`missing ${missingModules.join(", ")} in ${coreDir} → run scripts/install.{sh,ps1}`,
+		);
+	} else {
+		// Presence is not enough. Pi's extension loader SWALLOWS an import
+		// failure and starts with no policy at all, so a core that is present
+		// but unparseable — or an adapter left pointing at an old filename —
+		// looks identical to a healthy install until a Peer runs unrestricted.
+		// Importing it here is the only check that actually proves it loads.
+		try {
+			const core = await import(pathToFileURL(join(coreDir, "policy-core.ts")).href);
+			const claudeDialect = await import(
+				pathToFileURL(join(coreDir, "claude-policy.ts")).href
+			);
+			if (
+				typeof core.parseTaskBrief !== "function" ||
+				typeof claudeDialect.claudeToolBlockReason !== "function"
+			) {
+				fail("policy-core", `${coreDir} loaded but does not export the policy API`);
+			} else {
+				pass("policy-core", coreDir);
+			}
+		} catch (error) {
+			fail(
+				"policy-core",
+				`${coreDir} failed to load (pi would start with NO policy): ${String(error?.message ?? error).slice(0, 200)}`,
+			);
+		}
+	}
+}
+if (wantClaude) {
+	// In-process rather than a subprocess: the verifier is a sibling module and
+	// spawning it would re-enter the same quoting path that breaks on Windows
+	// paths containing spaces ("C:\Program Files\nodejs\node.exe").
+	try {
+		const state = await verifyClaudeSetup();
+		if (state.ok) pass("claude-hooks", state.settingsPath);
+		else
+			fail(
+				"claude-hooks",
+				`missing ${state.missing.join(", ")} → run: node scripts/claude-setup.mjs --install`,
+			);
+	} catch (error) {
+		fail("claude-hooks", `claude setup unreadable: ${String(error?.message ?? error).slice(0, 160)}`);
+	}
 }
 {
 	const promptsDir = join(homedir(), ".pi", "agent", "extensions", "prompts");
@@ -361,7 +451,10 @@ if (daemonUp) {
 		} catch {
 			fail("role-providers", "paseo provider ls --json did not return JSON");
 		}
-		for (const role of ["pi-supervisor", "pi-lead", "pi-peer"]) {
+		const expectedRoleProviders = runtimes.flatMap((family) =>
+			["supervisor", "lead", "peer"].map((role) => `${family}-${role}`),
+		);
+		for (const role of expectedRoleProviders) {
 			const entry = providersById.get(role);
 			if (!entry)
 				fail(`role-provider:${role}`, "not registered in ~/.paseo/config.json");

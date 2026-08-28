@@ -95,10 +95,17 @@ assert.match(remotePaseo, /REVIEW_ISOLATION_INVALID/);
 assert.match(remotePaseo, /independent-reviewer/);
 assert.match(remotePaseo, /REVIEW_WORKTREE_UNAVAILABLE/);
 
-// Layer-1 local guard: the policy extension gates MCP create_workspace args.
+// Layer-1 local guard: the runtime-neutral policy core gates MCP
+// create_workspace args, and BOTH runtime adapters route through that core —
+// a gate that lived in only one adapter would leave the other runtime open.
+const policyCore = read("extensions/paseo-team-core/policy-core.ts");
+assert.match(policyCore, /leadCreateWorkspaceBlockReason/);
+assert.match(policyCore, /REVIEW_WORKTREE_UNAVAILABLE/);
 const policyExtension = read("extensions/paseo-team-policy.ts");
-assert.match(policyExtension, /leadCreateWorkspaceBlockReason/);
-assert.match(policyExtension, /REVIEW_WORKTREE_UNAVAILABLE/);
+assert.match(policyExtension, /from "\.\/paseo-team-core\/policy-core\.ts"/);
+const claudePolicy = read("extensions/paseo-team-core/claude-policy.ts");
+assert.match(claudePolicy, /from "\.\/policy-core\.ts"/);
+assert.match(claudePolicy, /leadCreateWorkspaceArgsBlockReason/);
 assert.match(leadSkill, /review:<TASK_ID>/);
 
 // OCR metadata stays outside the V3 authority marker block.

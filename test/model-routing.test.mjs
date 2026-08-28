@@ -7,6 +7,7 @@ import {
 	MODEL_CLASSES,
 	ROLE_PROVIDERS,
 	THINKING_LEVELS,
+	THINKING_LEVELS_BY_FAMILY,
 	RoutingError,
 	buildProviderInventory,
 	cmdPercentExpansionRisk,
@@ -15,6 +16,7 @@ import {
 	loadRoutingConfig,
 	missingHostCapabilities,
 	modelsCacheKey,
+	providerFamily,
 	resolveClusterRoute,
 	resolveRoute,
 	splitProviderModel,
@@ -198,11 +200,38 @@ expectRoutingError("CONFIG_INVALID", () =>
 expectRoutingError("CONFIG_INVALID", () => composeProviderModel("pi-peer", ""));
 
 // Roundtrip: split(compose(x)) must recover x exactly (verifies Paseo-side parsing).
+// The model reference shape is family-specific — pi ids carry a provider
+// segment, Claude ids are bare — so each family is roundtripped with its own.
 for (const roleProvider of ROLE_PROVIDERS) {
-	const composed = composeProviderModel(roleProvider, "a/b/c");
+	const model = providerFamily(roleProvider) === "claude" ? "claude-opus-5" : "a/b/c";
+	const composed = composeProviderModel(roleProvider, model);
 	const split = splitProviderModel(composed);
 	assert.equal(split.provider, roleProvider);
-	assert.equal(split.model, "a/b/c");
+	assert.equal(split.model, model);
+}
+
+// A pi-shaped model on a Claude route (and vice versa) is a config error, not
+// something to normalise away: the daemon would create the agent on a model id
+// that does not exist.
+expectRoutingError("CONFIG_INVALID", () =>
+	composeProviderModel("claude-peer", "openrouter/vendor/model"),
+);
+expectRoutingError("CONFIG_INVALID", () =>
+	composeProviderModel("pi-peer", "claude-opus-5"),
+);
+assert.equal(
+	composeProviderModel("claude-lead", "claude-opus-5"),
+	"claude-lead/claude-opus-5",
+);
+assert.equal(providerFamily("claude-supervisor"), "claude");
+assert.equal(providerFamily("pi-peer"), "pi");
+assert.equal(providerFamily("codex-peer"), null);
+
+// The role-provider list is duplicated in the policy core (which must not
+// depend on the routing script). Assert the two never drift.
+{
+	const core = await import("../extensions/paseo-team-core/policy-core.ts");
+	assert.deepEqual([...ROLE_PROVIDERS].sort(), [...core.ROLE_PROVIDERS].sort());
 }
 
 // --- resolveRoute --------------------------------------------------------------
@@ -486,8 +515,34 @@ assert.deepEqual(MODEL_CLASSES, [
 	"REASONING_HIGH",
 	"REVIEW_HIGH",
 ]);
-assert.deepEqual(ROLE_PROVIDERS, ["pi-supervisor", "pi-lead", "pi-peer"]);
+assert.deepEqual(ROLE_PROVIDERS, [
+	"pi-supervisor",
+	"pi-lead",
+	"pi-peer",
+	"claude-supervisor",
+	"claude-lead",
+	"claude-peer",
+]);
 assert.ok(THINKING_LEVELS.includes("max") && THINKING_LEVELS.includes("off"));
+// Family-specific thinking vocabularies: neither is a superset of the other,
+// so a shared list would accept a level the target runtime silently clamps.
+assert.ok(THINKING_LEVELS_BY_FAMILY.pi.includes("minimal"));
+assert.ok(!THINKING_LEVELS_BY_FAMILY.claude.includes("minimal"));
+assert.ok(THINKING_LEVELS_BY_FAMILY.claude.includes("ultracode"));
+assert.ok(!THINKING_LEVELS_BY_FAMILY.pi.includes("ultracode"));
+{
+	const claudeRoute = structuredClone(validConfigData);
+	claudeRoute.routes.REVIEW_HIGH = {
+		paseoProvider: "claude-peer",
+		model: "claude-opus-5",
+		thinking: "ultracode",
+	};
+	const mixed = validateRoutingConfig(claudeRoute);
+	assert.equal(mixed.routes.REVIEW_HIGH.paseoProvider, "claude-peer");
+	// ...and the pi vocabulary is rejected on a Claude route.
+	claudeRoute.routes.REVIEW_HIGH.thinking = "minimal";
+	expectRoutingError("CONFIG_INVALID", () => validateRoutingConfig(claudeRoute));
+}
 assert.ok(ERROR_CODES.includes("MODEL_UNAVAILABLE"));
 // The example config file must itself validate.
 {

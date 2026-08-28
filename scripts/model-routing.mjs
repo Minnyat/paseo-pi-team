@@ -25,22 +25,91 @@ export const MODEL_CLASSES = Object.freeze([
 	"REVIEW_HIGH",
 ]);
 
-export const THINKING_LEVELS = Object.freeze([
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-]);
+/**
+ * Thinking levels are per RUNTIME FAMILY, not global: `minimal` exists only on
+ * pi and `ultracode` only on Claude, so a single union would silently accept a
+ * level the target runtime clamps away. Verify against the real inventory with
+ * `paseo provider models <role-provider> --json`.
+ */
+export const THINKING_LEVELS_BY_FAMILY = Object.freeze({
+	pi: Object.freeze(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+	claude: Object.freeze([
+		"off",
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+		"max",
+		"ultracode",
+	]),
+});
 
-/** The three durable Paseo role profiles. Model-per-role profiles are not created. */
-export const ROLE_PROVIDERS = Object.freeze([
-	"pi-supervisor",
-	"pi-lead",
-	"pi-peer",
-]);
+/** Kept for compatibility: the pi levels, which predate the Claude family. */
+export const THINKING_LEVELS = THINKING_LEVELS_BY_FAMILY.pi;
+
+export const RUNTIME_FAMILIES = Object.freeze(["pi", "claude"]);
+export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
+
+/**
+ * The durable Paseo role profiles — one per (family, role). Model-per-role
+ * profiles are not created; the model is chosen per route instead.
+ *
+ * MUST stay in sync with ROLE_PROVIDERS in extensions/paseo-team-core/policy-core.ts
+ * (test/model-routing.test.mjs asserts the two agree).
+ */
+export const ROLE_PROVIDERS = Object.freeze(
+	RUNTIME_FAMILIES.flatMap((family) =>
+		TEAM_ROLES.map((role) => `${family}-${role}`),
+	),
+);
+
+/** "claude-peer" → "claude"; null when the name is not a role provider. */
+export function providerFamily(paseoProvider) {
+	const name = String(paseoProvider ?? "").trim();
+	const family = RUNTIME_FAMILIES.find((candidate) =>
+		TEAM_ROLES.some((role) => name === `${candidate}-${role}`),
+	);
+	return family ?? null;
+}
+
+/**
+ * Model reference shape per family.
+ *
+ * pi model ids carry their own provider segment ("<pi-provider>/<model-id>",
+ * and the model id may itself contain slashes — Paseo splits at the FIRST
+ * slash only). Claude model ids are a single segment ("claude-opus-5"), so a
+ * slash there means the author pasted a pi-shaped value by mistake.
+ */
+export function validateModelForFamily(family, model, fail, context = {}) {
+	const trimmed = String(model).trim();
+	if (family === "claude") {
+		if (trimmed.includes("/")) {
+			throw fail(
+				`model "${trimmed}" must be a bare Claude model id (no "/"), e.g. claude-opus-5`,
+				{ ...context, model: trimmed },
+			);
+		}
+		if (/\s/.test(trimmed)) {
+			throw fail(`model "${trimmed}" must not contain whitespace`, {
+				...context,
+				model: trimmed,
+			});
+		}
+		return trimmed;
+	}
+	if (!trimmed.includes("/")) {
+		throw fail(`model "${trimmed}" must be in <pi-provider>/<model-id> form`, {
+			...context,
+			model: trimmed,
+		});
+	}
+	// Split the model value DIRECTLY (not prefixed by paseoProvider):
+	// splitProviderModel rejects an empty provider segment ("/model-id") and an
+	// empty model segment ("provider/") at the position where the config author
+	// made the mistake, not later at route composition.
+	splitProviderModel(trimmed);
+	return trimmed;
+}
 
 export const ERROR_CODES = Object.freeze([
 	"CONFIG_INVALID",
@@ -136,22 +205,18 @@ export function validateRoutingConfig(data) {
 		if (typeof model !== "string" || model.trim() === "") {
 			throw fail(`route ${modelClass}: model must be a non-empty string`);
 		}
-		const trimmedModel = model.trim();
-		if (!trimmedModel.includes("/")) {
+		const family = providerFamily(paseoProvider);
+		const trimmedModel = validateModelForFamily(
+			family,
+			model,
+			(message, details) => fail(`route ${modelClass}: ${message}`, details),
+			{ modelClass },
+		);
+		const levels = THINKING_LEVELS_BY_FAMILY[family];
+		if (!levels.includes(thinking)) {
 			throw fail(
-				`route ${modelClass}: model "${trimmedModel}" must be in <pi-provider>/<model-id> form`,
-				{ modelClass, model: trimmedModel },
-			);
-		}
-		// Split the model value DIRECTLY (not prefixed by paseoProvider):
-		// splitProviderModel rejects an empty provider segment ("/model-id")
-		// and an empty model segment ("provider/") at the position where the
-		// config author made the mistake, not later at route composition.
-		splitProviderModel(trimmedModel);
-		if (!THINKING_LEVELS.includes(thinking)) {
-			throw fail(
-				`route ${modelClass}: thinking "${thinking}" is not a pi thinking level (${THINKING_LEVELS.join(", ")})`,
-				{ modelClass, thinking },
+				`route ${modelClass}: thinking "${thinking}" is not a ${family} thinking level (${levels.join(", ")})`,
+				{ modelClass, thinking, family },
 			);
 		}
 		validated[modelClass] = {
@@ -462,7 +527,12 @@ export function composeProviderModel(paseoProvider, model) {
 	const trimmed = String(model).trim();
 	// Model segments must be non-empty on BOTH sides of every slash chain;
 	// splitProviderModel rejects "<pi-provider>/" and "/<model-id>" forms.
-	splitProviderModel(trimmed);
+	// Claude ids carry no provider segment, so they are checked by shape instead.
+	validateModelForFamily(
+		providerFamily(paseoProvider),
+		trimmed,
+		(message, details) => new RoutingError("CONFIG_INVALID", message, details),
+	);
 	if (trimmed.endsWith("/")) {
 		throw new RoutingError(
 			"CONFIG_INVALID",
