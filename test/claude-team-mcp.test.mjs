@@ -104,4 +104,22 @@ assert.deepEqual(
 	assert.equal(messages[3].result.tools.length, TEAM_TOOLS.length);
 }
 
+// The Pi extension takes this text from policy-core's teamChatToolDescription();
+// this file is plain .mjs and cannot import the .ts core, so the string is
+// mirrored — and drift between the two runtimes is exactly what this pack's
+// parity tests exist to catch.
+{
+	const { teamChatToolDescription } = await import("../extensions/paseo-team-core/policy-core.ts");
+	const chat = TEAM_TOOLS.find((tool) => tool.name === "team_chat");
+	assert.equal(
+		chat.description,
+		teamChatToolDescription(),
+		"the Claude tool description must not drift from the shared one",
+	);
+	assert.ok(
+		!/only sanctioned/i.test(chat.description),
+		"and must not overstate closure: the bash rules are heuristics, not a boundary",
+	);
+}
+
 console.log("claude team mcp tests passed");

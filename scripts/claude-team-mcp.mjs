@@ -72,8 +72,13 @@ export const TEAM_TOOLS = [
 	},
 	{
 		name: "team_chat",
+		// Mirrors policy-core's teamChatToolDescription(). This file is plain .mjs
+		// and cannot import the TypeScript core, so the text is duplicated and
+		// claude-team-mcp.test.mjs asserts the two never drift. Deliberately does
+		// NOT claim the chat surface is sealed: the bash rules are heuristics and
+		// rooms are unrestricted unless PASEO_TEAM_ROOMS is set.
 		description:
-			"Coordinate with other Leads and Supervisors through a Paseo chat room. `post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; `read` returns the room with envelopes parsed; `rooms` lists rooms. Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. This is the only sanctioned chat path — the Paseo chat CLI is blocked on both runtimes.",
+			"Coordinate with other Leads and Supervisors through a Paseo chat room. `post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; `read` returns the room with envelopes parsed; `rooms` lists rooms. Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. Use this instead of the Paseo chat CLI, which the bash guard redirects here. Rooms are unrestricted unless PASEO_TEAM_ROOMS is set.",
 		roles: ["lead", "supervisor"],
 		script: "team-chat.mjs",
 		timeoutMs: 30_000,

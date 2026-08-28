@@ -1513,4 +1513,34 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 	else process.env.PASEO_PI_ROLE = prevRole;
 }
 
+// The peer branch is a SEPARATE leg of the same handler, and
+// supportScriptBlockReason returns null for a Lead by construction — so the
+// block above cannot reach it. Without this, deleting the peer wiring in the
+// extension leaves the whole suite green.
+{
+	const { piStub, handlers } = makePiStub(["read", "bash"]);
+	const prevRole = process.env.PASEO_PI_ROLE;
+	process.env.PASEO_PI_ROLE = "peer";
+	const createExtension = await loadFreshExtension("lifecycle=support-script");
+	createExtension(piStub);
+
+	const toolCall = requireHandler(handlers, "tool_call");
+	const bash = async (command: string) =>
+		(await toolCall({ toolName: "bash", input: { command } })) as
+			| { block?: boolean; reason?: string }
+			| undefined;
+
+	const blocked = await bash("node /x/paseo-team-scripts/team-chat.mjs post {}");
+	assert.equal(blocked?.block, true, "the peer support-script guard is wired into the Pi extension");
+	assert.match(String(blocked?.reason), /support script/i);
+	assert.equal(
+		(await bash("node /x/paseo-team-scripts/ocr-review.mjs --repo r"))?.block,
+		undefined,
+		"the Reviewer skill's own wrapper stays runnable",
+	);
+
+	if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+	else process.env.PASEO_PI_ROLE = prevRole;
+}
+
 console.log("[paseo-team] policy tests passed");
