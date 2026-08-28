@@ -368,7 +368,7 @@ state file của Paseo (§1.4) đã có đủ, nên module chỉ đọc. Phần 
 kiến: label `paseo.parent-agent-id` cho luôn cây spawn (177/259 agent có), nên
 `inspect` gần như không còn cần.
 
-### PR-C — Scope lease (bắt buộc trước khi bật multi-lead)
+### PR-C — Scope lease (bắt buộc trước khi bật multi-lead) — ✅ ĐÃ LÀM
 
 **Vấn đề.** Invariant "một writer cho một moving scope" hiện được giữ *tình cờ*
 vì chỉ có 1 Lead. N Lead + fork phá thẳng nó.
@@ -395,6 +395,32 @@ mọi guard khác của pack, và một Lead không tạo được writer là s�
 **DoD.** 2 Lead cùng claim 1 scope → chỉ 1 tạo được writer, cái kia nhận
 `BLOCKED: SCOPE_LEASE_HELD`; lease hết hạn thì giải phóng; `chat read` lỗi →
 `BLOCKED: LEASE_UNVERIFIABLE`; test bằng fixture, không cần daemon.
+
+#### Đã giao
+
+| Thành phần | Nơi |
+|---|---|
+| Logic thuần: normalize, conflict-by-containment, fold ledger, guard | `extensions/paseo-team-core/policy-core.ts` |
+| I/O: claim / renew / release / status / ledger trên room `leases` | `scripts/team-lease.mjs` |
+| Enforcement `create_agent` (Pi) | `extensions/paseo-team-policy.ts` |
+| Enforcement `create_agent` (Claude) | `extensions/paseo-team-core/claude-policy.ts` + `scripts/claude-hook.mjs` |
+| Tool `team_lease` cho cả hai runtime | Pi extension + `scripts/claude-team-mcp.mjs` |
+| `notify: false` — bản ghi không đánh thức ai | `scripts/team-chat.mjs` |
+| Hướng dẫn cho Lead | `prompts/lead.md` §5, `skills/paseo-team-lead/SKILL.md` bước 0 |
+
+Test: `test/scope-lease.test.mts` (logic thuần), `test/team-lease.test.mjs`
+(I/O), cộng wiring test trong `policy.test.mts` và `claude-policy.test.mjs` —
+bài học OCR-007: luật mà adapter không gọi thì là luật không tồn tại.
+
+**Lỗi do chạy thật mới lộ ra.** Fold khoá lease theo **chuỗi scope chính xác**,
+nên một claim THUA (`src/auth/login` dưới `src/auth` đang sống) vẫn được ghi
+dưới key riêng, chỉ bị che lúc đọc — rồi nổi lên thành lease thật ngay khi
+`src/auth` được release, trao cho Lead đó phần đất nó chưa từng giành được.
+Unit test trượt vì case "sau release thì claim tiếp theo thắng" dùng cùng một
+chuỗi scope. Conflict phải được xét lúc **ghi**, không chỉ lúc **đọc**.
+
+**Còn thiếu:** watchdog báo lease quá hạn của Lead đã chết (báo cáo, không tự
+thu hồi).
 
 ---
 

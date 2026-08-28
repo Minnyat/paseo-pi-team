@@ -286,6 +286,35 @@ export function parseTeamMessage(text) {
 	};
 }
 
+/**
+ * Turn a failed CLI invocation into something a Lead can act on.
+ *
+ * Taking "the first non-empty line" seemed reasonable until Paseo answered with
+ * a pretty-printed JSON error and the Lead was told the operation failed with
+ * the message `{`. Prefer the structured message when the output is JSON, and
+ * otherwise fall back to the first line that carries actual words.
+ */
+export function cliErrorMessage(text) {
+	const raw = String(text ?? "").trim();
+	if (raw === "") return "paseo chat failed";
+	const start = raw.indexOf("{");
+	if (start >= 0) {
+		try {
+			const parsed = JSON.parse(raw.slice(start));
+			const message =
+				parsed?.error?.message ?? parsed?.message ?? parsed?.error ?? null;
+			if (typeof message === "string" && message.trim() !== "") return message.trim();
+		} catch {
+			// Not JSON after all — fall through to the line scan.
+		}
+	}
+	const informative = raw
+		.split("\n")
+		.map((line) => line.trim())
+		.find((line) => /[A-Za-z0-9]/.test(line));
+	return informative ?? raw.slice(0, 400);
+}
+
 export function runPaseo(args, timeoutMs = 20_000) {
 	const [bin, ...prefix] = resolvePaseoExec((reason) => {
 		throw bad("PASEO_EXEC_INVALID", `PASEO_TEAM_PASEO_EXEC ${reason}`);
@@ -302,7 +331,7 @@ export function runPaseo(args, timeoutMs = 20_000) {
 		);
 	} catch (error) {
 		const text = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}\n${error?.message ?? error}`;
-		throw bad("CLI_ERROR", text.split("\n").find((line) => line.trim()) ?? "paseo chat failed");
+		throw bad("CLI_ERROR", cliErrorMessage(text));
 	}
 }
 

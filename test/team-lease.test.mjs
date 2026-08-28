@@ -169,4 +169,49 @@ const opts = (room, extra = {}) => ({
 	await assert.rejects(claimScope({ scope: "src" }, opts(room, { role: "peer" })), /ROLE_NOT_ALLOWED/);
 }
 
+// --- the ledger room does not exist yet -------------------------------------
+// First run on a fresh machine: nobody has created the room. Making that the
+// operator's problem would mean the very first claim fails with a CLI error and
+// the Lead has no idea it was supposed to run a setup step.
+{
+	let created = 0;
+	let postAttempts = 0;
+	const messages = [];
+	const run = async (args) => {
+		if (args[0] === "chat" && args[1] === "create") {
+			created += 1;
+			return { id: "room-1", name: args[2] };
+		}
+		if (args[0] === "chat" && args[1] === "post") {
+			postAttempts += 1;
+			if (created === 0) throw Object.assign(new Error("chat room not found"), { code: "CLI_ERROR" });
+			const posted = { id: "m1", author: SELF, createdAt: new Date(NOW - 1).toISOString(), body: args[3] };
+			messages.push(posted);
+			return posted;
+		}
+		if (args[0] === "chat" && args[1] === "read") return messages;
+		throw new Error(`unexpected argv: ${args.join(" ")}`);
+	};
+
+	const result = await claimScope({ scope: "src/auth" }, { runPaseo: run, selfAgentId: SELF, role: "lead", now: NOW });
+	assert.equal(result.granted, true, "the first claim on a fresh machine succeeds");
+	assert.equal(created, 1, "the ledger room is created on demand");
+	assert.equal(postAttempts, 2, "created only after the post showed it was missing — the happy path stays one call");
+}
+
+{
+	// A create that fails for any other reason must not be retried forever, and
+	// the original post error is what the caller needs to see.
+	const run = async (args) => {
+		if (args[0] === "chat" && args[1] === "create") throw Object.assign(new Error("permission denied"), { code: "CLI_ERROR" });
+		if (args[0] === "chat" && args[1] === "post") throw Object.assign(new Error("chat room not found"), { code: "CLI_ERROR" });
+		return [];
+	};
+	await assert.rejects(
+		claimScope({ scope: "src/auth" }, { runPaseo: run, selfAgentId: SELF, role: "lead", now: NOW }),
+		/room not found/,
+		"the caller is told what actually failed, not what the recovery attempt failed at",
+	);
+}
+
 console.log("team-lease tests passed");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { classifyStaleAgents, DEFAULT_GLOBAL_DEADLINE_MS, DEFAULT_INSPECT_CONCURRENCY } from "../scripts/watchdog.mjs";
+import { classifyLeases, classifyStaleAgents, DEFAULT_GLOBAL_DEADLINE_MS, DEFAULT_INSPECT_CONCURRENCY } from "../scripts/watchdog.mjs";
 
 const now = Date.parse("2026-08-08T12:00:00.000Z");
 const result = classifyStaleAgents(
@@ -58,6 +58,39 @@ assert.equal(DEFAULT_GLOBAL_DEADLINE_MS, 30_000);
   });
   assert.equal(capped.agents.length, 2);
   assert.equal(capped.partial, true, "maxAgents cap is reported as partial");
+}
+
+// --- lease board: the second way a scope gets stuck --------------------------
+// A held scope blocks every other Lead, so the two ways it goes wrong deserve an
+// operator's attention: the holder disappeared, or the lease lapsed under a
+// holder that is still running. Neither is something the watchdog may fix —
+// reclaiming ground from a Lead that might be mid-write is exactly how a second
+// writer appears.
+{
+	const now = 10_000_000;
+	const ALIVE = "aaaaaaaa-1111-4111-8111-111111111111";
+	const GONE = "bbbbbbbb-2222-4222-8222-222222222222";
+	const leases = new Map([
+		["src/ok", { agentId: ALIVE, scope: "src/ok", claimedAt: now - 1000, expiresAt: now + 1000 }],
+		["src/orphan", { agentId: GONE, scope: "src/orphan", claimedAt: now - 1000, expiresAt: now + 1000 }],
+		["src/lapsed", { agentId: ALIVE, scope: "src/lapsed", claimedAt: now - 5000, expiresAt: now - 1 }],
+	]);
+	const rows = classifyLeases(leases, [{ id: ALIVE }], { now });
+
+	assert.equal(rows.length, 2, "a healthy lease is not reported — noise would train the operator to skim");
+	const orphan = rows.find((row) => row.scope === "src/orphan");
+	assert.equal(orphan.holderListed, false);
+	assert.equal(orphan.expired, false);
+	assert.match(orphan.suspicion, /not in the agent listing/);
+
+	const lapsed = rows.find((row) => row.scope === "src/lapsed");
+	assert.equal(lapsed.holderListed, true);
+	assert.equal(lapsed.expired, true);
+	assert.match(lapsed.suspicion, /refused/, "the Lead is told what will happen, not merely that it is late");
+
+	// Nothing to report, and nothing to throw, when the board is empty or absent.
+	assert.deepEqual(classifyLeases(new Map(), [{ id: ALIVE }], { now }), []);
+	assert.deepEqual(classifyLeases(null, null, { now }), []);
 }
 
 console.log("watchdog tests passed");

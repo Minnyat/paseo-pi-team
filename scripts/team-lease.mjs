@@ -113,7 +113,8 @@ async function postLease(action, input, options = {}) {
 	const room = input?.room ?? LEASE_ROOM;
 	const run = options.runPaseo ?? runPaseo;
 
-	const posted = await postTeamMessage(
+	const post = () =>
+		postTeamMessage(
 		{
 			room,
 			kind: action === "release" ? "release" : "claim",
@@ -124,8 +125,27 @@ async function postLease(action, input, options = {}) {
 			notify: false,
 			hop: 0,
 		},
-		{ ...options, runPaseo: run },
-	);
+			{ ...options, runPaseo: run },
+		);
+
+	let posted;
+	try {
+		posted = await post();
+	} catch (error) {
+		// First run on a fresh machine: nobody has created the ledger room yet.
+		// Making that the operator's problem means the very first claim fails
+		// with a CLI error and the Lead has no idea a setup step existed. Create
+		// it and retry once — but surface the ORIGINAL failure if that does not
+		// help, because "could not create the room" is rarely the real cause.
+		try {
+			await run(["chat", "create", room, "--purpose", "paseo-pi-team scope lease ledger"]);
+		} catch {
+			throw error;
+		}
+		posted = await post().catch(() => {
+			throw error;
+		});
+	}
 
 	const after = await fetchLeases({ ...options, room, runPaseo: run });
 	const holder = after.ok ? leaseHolderFor(after.leases, scope) : null;

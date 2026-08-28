@@ -18,6 +18,7 @@ import {
 	parseTeamMessage,
 	postTeamMessage,
 	roomAllowed,
+	cliErrorMessage,
 	validateTeamMessage,
 } from "../scripts/team-chat.mjs";
 
@@ -268,6 +269,20 @@ await assert.rejects(
 	const posted = calls.find((c) => c[0] === "chat" && c[1] === "post");
 	assert.ok(!posted[3].startsWith("@"), "and the body carries no mention head");
 	assert.ok(posted[3].startsWith("TEAM_MESSAGE_V1"));
+}
+
+// --- a CLI failure has to say something usable ------------------------------
+// Paseo prints structured errors, so taking "the first non-empty line" of the
+// output yielded exactly `{` — a message that tells the Lead nothing and sends
+// it looking in the wrong place. Observed on a missing chat room.
+{
+	assert.match(cliErrorMessage('{\n  "error": { "message": "chat room not found" }\n}'), /chat room not found/);
+	assert.match(cliErrorMessage('{"message":"boom"}'), /boom/);
+	assert.match(cliErrorMessage("plain failure text"), /plain failure text/);
+	assert.match(cliErrorMessage("\n\n  spaced failure  \n"), /spaced failure/);
+	// Unparseable JSON still beats a lone brace: return something a human can act on.
+	assert.ok(cliErrorMessage("{\n  not json at all").length > 1);
+	assert.ok(cliErrorMessage("").length > 0, "even an empty failure gets a name");
 }
 
 console.log("team-chat tests passed");

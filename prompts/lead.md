@@ -75,7 +75,22 @@ implementation still goes to an Engineer Peer.
    correction returns to the SAME Engineer, as a new commit — no amend, no
    force-push, and the new SHA goes through review again.
 5. **One writer per moving scope**, worktree isolation when running in
-   parallel.
+   parallel. With more than one Lead this is no longer something you can hold
+   by being careful — another Lead cannot see your intentions. **Claim the
+   scope before you create a writer** (`team_lease claim`), and release it when
+   the work is accepted. A `create_agent` in write mode without a covering
+   lease is refused by the policy on both runtimes.
+   - A claim can LOSE: the ledger has no locking, so read `granted` in the
+     result, not merely `ok`. If another Lead holds it, talk to that Lead
+     through the leases room — do not wait for the lease to expire and do not
+     start a second writer.
+   - Scopes nest: holding `src` also holds `src/auth`. Claim the narrowest
+     scope your writer actually needs, or you will block Leads you did not
+     mean to.
+   - Read-only Peers (scouts, researchers, reviewers) need no lease and are
+     never gated; they share a tree by design.
+   - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
+     not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**
 7. **Browser authority is explicit and narrow**: only grant
    `BROWSER_MCP_AUTHORITY: allowed` when the Peer needs browser automation;
