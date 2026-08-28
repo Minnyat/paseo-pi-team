@@ -82,7 +82,8 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 
    - `granted: true` → continue the cycle.
    - `granted: false` → another Lead owns ground that covers your scope; the
-     result names it. Coordinate through the leases room. Do NOT create the
+     result names it. Coordinate through the `leases` room — see
+     "Coordinating with the other seats" below. Do NOT create the
      writer, do NOT narrow the scope to sneak under the holder, and do NOT wait
      out the TTL as a strategy.
    - Ledger unreadable → `BLOCKED: LEASE_UNVERIFIABLE`. This is a real blocker,
@@ -159,7 +160,19 @@ This is the exact failure mode the cluster config exists to prevent.
    `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
-8. Create the workspace when needed. Worktree isolation is required for
+8. Decide the workspace by DISPOSITION — this choice also decides how the
+   agent renders in Paseo, not only where it works.
+   - A read-only Peer that is not the independent reviewer (scout, researcher,
+     advisor, committee member) takes **no workspace at all**: omit
+     `workspaceId` entirely. It then stays in your workspace and Paseo draws it
+     nested under you, the way a native subagent looks. Creating a workspace for
+     such a Peer buys nothing — read-only Peers share a tree by design — and
+     costs you that nesting, because the Paseo tree is grouped by workspace: a
+     Peer in its own workspace renders detached from you even though its
+     `ParentAgentId` still points at you.
+   - A WRITER or the INDEPENDENT REVIEWER always gets its own workspace, and the
+     detached rendering is the price of isolation, not a defect.
+   Worktree isolation is required for
    writers AND is a hard invariant for the independent reviewer: a reviewer
    workspace is ALWAYS a git worktree created from the source repository at
    the exact candidate SHA — never `local` isolation, a standalone clone, or
@@ -208,7 +221,10 @@ local one. In the commands below, `<id>` is the HOST_ID from
    `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules;
    unverifiable is not a pass).
 6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
-   ID has no meaning on the Mac:
+   ID has no meaning on the Mac. The disposition rule of the local cycle applies
+   unchanged: a read-only Peer that is not the independent reviewer gets NO
+   workspace (omit `--workspace`) so it stays nested under you in the Paseo
+   tree; only writers and reviewers get one:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
    For an independent-reviewer workspace, pass
@@ -334,6 +350,78 @@ Use `send_agent_prompt` only for:
 - answering a `peer_ask_lead` question/blocker/dependency message.
 
 Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the current Peer’s `paseo.parent-agent-id` and sends a structured `PEER_MESSAGE_V1`. It cannot target an arbitrary agent. Treat `blocked` as a coordination event and reply with a full V3 brief when the reply changes authority.
+
+## Coordinating with the other seats (`team_chat`)
+
+`peer_ask_lead` is how a Peer reaches YOU. It is one-way and parent-scoped, so
+it cannot reach another Lead. The channel between coordinating seats —
+Lead ↔ Lead, Supervisor ↔ Lead — is `team_chat`, a many-to-many bus built on
+Paseo chat rooms:
+
+```text
+team_chat { action: "post", room: "<room>", recipients: ["<agent-id|short-id|domain:<name>>"], body: "<text>" }
+team_chat { action: "read", room: "<room>" }     # envelopes parsed
+team_chat { action: "rooms" }                    # what rooms exist
+```
+
+Why a room and not `send_agent_prompt`: a post is **queryable** (so
+`pteam graph` can draw a `message` edge as confirmed rather than suspected)
+and a mention **wakes** an idle recipient, so the room is both the ledger and
+the doorbell. Use it for:
+
+- lease arbitration — the `leases` room is the ledger `team_lease` reads and
+  writes; when a claim comes back `granted: false`, the holder is named there
+  and you talk to that Lead in that room;
+- anything you would have sent to another Lead's Peer — that call is refused
+  (`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and the room reaches the Lead who owns it;
+- a domain broadcast: `domain:<name>` is expanded here into one mention per
+  agent carrying that label, because Paseo's `mentionLabels` does not fan out.
+
+Bounds the transport forces, not preferences:
+
+| Bound | Value | Why |
+|---|---|---|
+| payload | `8192` bytes | `paseo chat post` takes the body as ARGV; Windows caps a command line near 32K, and the protocol budgets for the lowest platform |
+| hop / TTL | cooperative | Lead ↔ Lead is symmetric, so a relay without a bound ping-pongs. A relaying agent supplies its own `hop`: this stops a well-behaved loop and makes a bad one VISIBLE, it does not prevent one |
+| rooms | unrestricted unless `PASEO_TEAM_ROOMS` is set | chat rooms have no ACL of their own, so confinement has to come from this side |
+
+Never type `paseo chat` in bash: the guard redirects it here, because the CLI
+carries none of the envelope, allowlist, ceiling or loop protection above.
+Peers are refused `team_chat` by design — a Peer coordinates through you.
+
+## Multi-supervisor topology (`PASEO_TEAM_TOPOLOGY`)
+
+Everything above is unchanged on a single-Supervisor cluster. The flag decides
+whether the governance rules apply at all:
+
+- `single` (default, and the value when the variable is unset) — the
+  jurisdiction guard, the `recovery_for` guard and the `send_agent_prompt`
+  ownership guard all return immediately. Behaviour is line-for-line what it
+  was before governance existed.
+- `multi` — the guards are live. **Any unrecognised value also reads as
+  `multi`**: every rule the flag adds only ever REFUSES, so misreading toward
+  strict costs one blocked call with a stated reason, while misreading toward
+  loose turns governance off silently on a cluster the operator believes is
+  governed.
+
+Under `multi`, your seat carries a domain (`team.domain` label /
+`PASEO_TEAM_DOMAIN`), and every `SUPERVISOR_OBSERVATION` /
+`SUPERVISOR_DECISION` reaching you carries `DOMAIN:`. You do not compute the
+verdict — the runtime puts it in your turn context. Act on it as invariant 6b
+of the Lead prompt requires: `JURISDICTION_OK` is a valid delegated decision;
+`JURISDICTION_MISMATCH`, `JURISDICTION_UNDECLARED` and
+`SUPERVISOR_BLOCK_MALFORMED` are refused with `BLOCKED: <code>`;
+`JURISDICTION_UNVERIFIABLE` (your own seat unlabelled) is refused and goes to
+the Human; `JURISDICTION_OVERLAP` refuses BOTH Supervisors and escalates.
+A misrouted **observation** is only a warning — noise costs nothing. A
+misrouted **decision** is refused, because that is the one you would act on.
+
+Two more guards are live under `multi`, and both are ownership rules:
+`send_agent_prompt` may target an agent you created, or another
+Lead/Supervisor — never another Lead's Peer; and a Supervisor's
+`recovery_for` must fall inside its own `team.domain`. Parentage is a
+declared label rather than an authenticated fact, so these catch mistakes, not
+forgery.
 
 ## Review
 
@@ -554,7 +642,7 @@ HANDOFF:
 
 The peer ECHOES its `ASSIGNED_*` fields back when useful for traceability,
 but reports NO `OBSERVED_*` values: observed runtime identity
-(host/provider/model/thinking) belongs to YOU (routing cycle, step 14). A
+(host/provider/model/thinking) belongs to YOU (the runtime-identity check that closes the routing cycle: LOCAL_CREATE_CYCLE step 10, REMOTE_CREATE_CYCLE step 8). A
 peer that invents observed values is a protocol violation, the same class
 as a claim without file/command/test evidence.
 

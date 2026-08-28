@@ -229,7 +229,8 @@ differs is only the tool vocabulary and where the policy is enforced:
 | files | `read` / `write` / `edit` | `Read`, `Glob`, `Grep` / `Write` / `Edit`, `NotebookEdit` |
 | shell | `bash` | `Bash` |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
-| team tools | `peer_ask_lead`, `team_watchdog` | `mcp__paseo-team__peer_ask_lead`, `mcp__paseo-team__team_watchdog` |
+| team tools | `peer_ask_lead` — your only team tool | `mcp__paseo-team__peer_ask_lead` |
+| not yours | `team_chat`, `team_lease`, `team_fork`, `team_watchdog` are refused for a Peer: coordination runs through your Lead |  |
 
 Both runtimes share ONE rule set, so a call denied on one is denied on the
 other. On Claude, spawning subagents (`Task`) is denied for every role: work

@@ -88,7 +88,11 @@ implementation still goes to an Engineer Peer.
      scope your writer actually needs, or you will block Leads you did not
      mean to.
    - Read-only Peers (scouts, researchers, reviewers) need no lease and are
-     never gated; they share a tree by design.
+     never gated; they share a tree by design. Give them no workspace either —
+     omit `workspaceId` and they stay in your workspace, rendered nested under
+     you in Paseo instead of detached in a workspace of their own. The
+     independent reviewer is the one exception: it always gets its exact-SHA
+     worktree.
    - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
      not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**
@@ -189,7 +193,8 @@ differs is only the tool vocabulary and where the policy is enforced:
 | files | `read` / `write` / `edit` | `Read`, `Glob`, `Grep` / `Write` / `Edit`, `NotebookEdit` |
 | shell | `bash` | `Bash` |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
-| team tools | `peer_ask_lead`, `team_watchdog` | `mcp__paseo-team__peer_ask_lead`, `mcp__paseo-team__team_watchdog` |
+| team tools | `team_watchdog`, `team_chat`, `team_lease`, `team_fork` | the same four under `mcp__paseo-team__<tool>` |
+| not yours | `peer_ask_lead` is the PEER's tool — you receive those messages, you never call it |  |
 
 Both runtimes share ONE rule set, so a call denied on one is denied on the
 other. On Claude, spawning subagents (`Task`) is denied for every role: work

@@ -135,9 +135,14 @@ paseo-pi-team/
 
 | Profile | `PASEO_PI_ROLE` | Default tools |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog` |
-| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog` |
+| `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog`, `team_chat`, `team_lease` (status), `team_fork` |
+| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog`, `team_chat`, `team_lease`, `team_fork` |
 | `pi-peer` | `peer` | `read`, `bash`, `peer_ask_lead` (+ `write`/`edit` under `MODE: write`) |
+
+The `claude-*` profiles carry the same three roles and the same team tools,
+reached as `mcp__paseo-team__<tool>`. A Peer gets `peer_ask_lead` and nothing
+else: `team_chat`, `team_lease`, `team_fork` and `team_watchdog` are all
+refused for it, because a Peer coordinates through its Lead.
 
 Refine the real allowlist after running `/team-tools` — actual Paseo tool names
 can differ from the defaults.
@@ -224,6 +229,102 @@ delay). The WebUI's **Pi — cấu hình chính** editor tunes that policy witho
 reading Pi's docs — including a one-click preset for unstable providers — via
 `pteam config read/write pi-settings` (`~/.pi/agent/settings.json`). Changes
 take effect for agent sessions started after the save.
+
+## Coordination between seats (more than one Lead, more than one Supervisor)
+
+One Lead and one Supervisor need none of this. It exists because a second Lead
+cannot see the first one's intentions, so what used to be held by being careful
+has to be held by the policy instead.
+
+### Scope leases — one writer per moving scope, enforced
+
+`create_agent` in write mode is **refused** unless the Lead holds a lease
+covering the scope that writer will own:
+
+```text
+team_lease { action: "claim", scope: "src/auth", ttlMs: <work window> }
+team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
+```
+
+- The ledger is a Paseo chat room (`leases`) and has **no locking**, so a claim
+  is written even when it loses. Read `granted`, not merely `ok`.
+- Scopes nest: holding `src` holds `src/auth`. Claim the narrowest scope the
+  writer needs, or you block Leads you did not mean to.
+- Read-only dispositions (scout, researcher, architect, reviewer) take no lease
+  and are never gated — they share a tree by design.
+- An unreadable ledger is `BLOCKED: LEASE_UNVERIFIABLE`, never "proceed".
+- TTL is capped at 12h, so a smuggled `TTL_MS` cannot lock the repo root
+  indefinitely.
+
+### `team_chat` — the Lead ↔ Lead / Supervisor ↔ Lead bus
+
+`peer_ask_lead` is one-way and parent-scoped; it cannot reach another Lead.
+`team_chat` is the many-to-many channel, built on Paseo chat rooms because a
+post is queryable (so the graph draws a **confirmed** `message` edge) and a
+mention **wakes** an idle recipient — the room is both ledger and doorbell.
+
+```text
+team_chat { action: "post", room, recipients: ["<agent-id|short-id|domain:<name>>"], body }
+team_chat { action: "read", room }
+team_chat { action: "rooms" }
+```
+
+Bounds are transport-imposed: an 8192-byte payload ceiling (`paseo chat post`
+takes the body as ARGV and Windows caps a command line near 32K), a
+**cooperative** hop/TTL bound (it stops a well-behaved relay loop and makes a
+bad one visible — it cannot prevent one), and a room allowlist via
+`PASEO_TEAM_ROOMS` (chat rooms have no ACL of their own). Typing `paseo chat`
+in bash is redirected to the tool, the only path that enforces any of this.
+
+### Multi-supervisor governance — `PASEO_TEAM_TOPOLOGY`
+
+| Value | Effect |
+|---|---|
+| unset / `single` | default; the jurisdiction, `recovery_for` and `send_agent_prompt` guards return immediately — behaviour is line-for-line what it was before governance existed |
+| `multi` | the guards are live |
+| anything else | **read as `multi`** |
+
+An unrecognised value reads as the strict side on purpose: every rule the flag
+adds only ever refuses, so misreading toward strict costs one blocked call with
+a stated reason, while misreading toward loose turns governance off silently on
+a cluster the operator believes is governed.
+
+Under `multi`, seats carry a domain (`team.domain` label / `PASEO_TEAM_DOMAIN`,
+hierarchical: `backend` contains `backend.auth`, `*` is the root) and every
+`SUPERVISOR_OBSERVATION` / `SUPERVISOR_DECISION` carries `DOMAIN:`. The runtime
+computes the verdict and injects it into the Lead's turn context — a misrouted
+**observation** is a warning (noise costs nothing), a misrouted **decision** is
+refused (that is the one the Lead would act on), and an overlap refuses both
+Supervisors and escalates to the Human. Two ownership guards come with it:
+`send_agent_prompt` may not target another Lead's Peer
+(`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and a Supervisor's `recovery_for` must
+fall inside its own domain. Parentage is a declared label, not an authenticated
+fact — these catch mistakes, not forgery.
+
+### Handing a seat over — briefing handoff vs `team_fork`
+
+| Situation | Mechanism |
+|---|---|
+| The receiver must be **independent** (reviewer, challenger, supervisor) | **Briefing handoff** — a fork is refused, because it inherits the framing the role exists to question |
+| The context summarizes cleanly | Briefing handoff (the default) |
+| The reasoning history itself must travel (split load, change host/model, take over mid-flight) | **Session fork** |
+| Running out of context | **Neither** — `/compact`. Auto-compaction fires on the fork too, so a fork buys a compacted agent *and* a second seat |
+
+A fork copies the transcript file — no LLM turn, near-instant — then imports it:
+
+```text
+team_fork { action: "fork", agentId, reason: "takeover", disposition: "lead", scope, provider, model, thinkingOptionId }
+team_fork { action: "verify", agentId, model, thinkingOptionId }
+```
+
+`fork` stops before the model is routed (the CLI has no `--model`; only MCP
+`update_agent` moves it) and hands back both that call and a `FORK_SEED_V1`
+seed prompt, which is **built in code** so it cannot be softened: the fork
+inherits belief, not authority — no lease, no Peers, and it must not act as the
+source agent. `verify` reads `runtimeInfo` (never the stale creation-time
+`persistence.metadata`) and **deletes** a fork that came up on the wrong model.
+Peers stay with the source: there is no reparent API, and `detach` is a Human
+action that leaves a Peer unable to escalate.
 
 ## OpenCodeReview delegation (Phase 1)
 
