@@ -68,12 +68,20 @@ import {
 	PEER_COMMUNICATION_TOOL,
 	TEAM_WATCHDOG_TOOL,
 	TEAM_CHAT_TOOL,
+	TEAM_LEASE_TOOL,
+	teamLeaseToolBlockReason,
+	teamLeaseToolDescription,
 	TEAM_CHAT_MAX_BODY_BYTES,
 	TEAM_MESSAGE_KIND_NAMES,
+	classifyMcpInput,
 	coordinationCliBlockReason,
+	leaseBlockReason,
+	matchesPaseoToolName,
+	resolveLeases,
 	supportScriptBlockReason,
 	teamChatToolBlockReason,
 	teamChatToolDescription,
+	writerScopeFromCreateAgent,
 	type ParsedTaskBrief,
 	type PeerMode,
 	type Policy,
@@ -111,6 +119,63 @@ function runSupportScript(name: string, args: string[], signal?: AbortSignal, ti
 			},
 		);
 	});
+}
+
+/**
+ * The scope-lease gate for a Lead's create_agent.
+ *
+ * It lives OUTSIDE mcpBlockReason on purpose: that function is pure and both
+ * runtimes depend on it staying that way, while this needs to read the ledger
+ * room — a ~3s round trip. create_agent is rare enough to afford it, and the
+ * alternative is a rule that only the Leads who feel like claiming obey.
+ *
+ * Everything about the decision is still pure: the ledger is fetched here and
+ * arbitrated by policy-core, so the Pi and Claude adapters cannot disagree
+ * about who holds a scope.
+ */
+async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
+	const classified = classifyMcpInput(input);
+	if (classified.kind !== "target") return null;
+	// Both calls can deliver the brief that arms a writer.
+	if (!matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"])) {
+		return null;
+	}
+
+	const args = extractCreateAgentArgs(input);
+	// Nothing to gate unless this call staffs a writer; the core decides that
+	// from the same V3 brief the Peer will be held to.
+	if (!writerScopeFromCreateAgent(args)) return null;
+
+	let entries: unknown = null;
+	try {
+		const result = await runSupportScript("team-lease.mjs", ["ledger", "{}"]);
+		const parsed = JSON.parse(result.stdout || "{}");
+		entries = parsed?.ok ? parsed.entries : null;
+	} catch {
+		// Leave entries null — the guard is fail-closed by design, and the reason
+		// it returns says so in words the Lead can act on.
+		entries = null;
+	}
+
+	return leaseBlockReason({
+		role: "lead",
+		args,
+		leases: entries ? resolveLeases(entries, { now: Date.now() }) : null,
+		selfAgentId: process.env.PASEO_AGENT_ID?.trim() || null,
+	});
+}
+
+function extractCreateAgentArgs(input: unknown): unknown {
+	if (!input || typeof input !== "object") return null;
+	const args = (input as Record<string, unknown>).args;
+	if (typeof args === "string") {
+		try {
+			return JSON.parse(args);
+		} catch {
+			return null;
+		}
+	}
+	return args ?? null;
 }
 
 function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
@@ -177,6 +242,30 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 			const command = action === "post" ? "post" : action === "read" ? "read" : "rooms";
 			const args = command === "rooms" ? [command] : [command, JSON.stringify(rest)];
 			const result = await runSupportScript("team-chat.mjs", args, signal);
+			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
+		},
+	});
+	pi.registerTool({
+		name: TEAM_LEASE_TOOL,
+		label: "team_lease",
+		description: teamLeaseToolDescription(),
+		parameters: {
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["claim", "renew", "release", "status"] },
+				scope: { type: "string", maxLength: 256 },
+				ttlMs: { type: "integer", minimum: 1, maximum: 43_200_000 },
+				taskId: { type: "string", maxLength: 128 },
+			},
+			required: ["action"],
+			additionalProperties: false,
+		} as any,
+		async execute(_id, params, signal, _onUpdate, _ctx) {
+			const { action, ...rest } = (params ?? {}) as Record<string, unknown>;
+			const blocked = teamLeaseToolBlockReason(r, action);
+			if (blocked) return { content: [{ type: "text", text: blocked }], details: undefined, isError: true };
+			const command = typeof action === "string" ? action : "status";
+			const result = await runSupportScript("team-lease.mjs", [command, JSON.stringify(rest)], signal);
 			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
 		},
 	});
@@ -354,6 +443,12 @@ export default function (pi: ExtensionAPI) {
 				const blockReason = mcpBlockReason(r, event.input);
 				if (blockReason) {
 					return { block: true, reason: blockReason };
+				}
+			}
+			if (r === "lead") {
+				const leaseReason = await leadWriterLeaseReason(event.input);
+				if (leaseReason) {
+					return { block: true, reason: leaseReason };
 				}
 			}
 		}

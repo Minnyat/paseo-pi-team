@@ -78,7 +78,7 @@ const TOKEN = /^[A-Za-z0-9._:-]{1,128}$/;
 const MENTION_TOKEN = /^[A-Za-z0-9-]{4,64}$/;
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const DOMAIN_PREFIX = "domain:";
-const ALLOWED_FIELDS = new Set(["room", "kind", "topic", "message", "to", "correlationId", "hop", "ttl", "replyTo"]);
+const ALLOWED_FIELDS = new Set(["room", "kind", "topic", "message", "to", "correlationId", "hop", "ttl", "replyTo", "notify"]);
 
 function bad(code, message) {
 	return Object.assign(new Error(message), { code });
@@ -133,8 +133,18 @@ export function validateTeamMessage(input) {
 	}
 	token("room", room);
 	token("topic", topic);
-	if (!Array.isArray(to) || to.length === 0) {
-		throw bad("RECIPIENTS_MISSING", "to must be a non-empty array of agent refs or 'domain:<name>' entries");
+	// `notify: false` marks a RECORD rather than a request — a ledger entry that
+	// belongs in the room's history but that nobody has to wake up for. Mentions
+	// are what wake an agent, so a record simply has none. Default is true: a
+	// message with no audience must be a deliberate choice, never an omission.
+	const notify = input.notify === undefined ? true : input.notify;
+	if (typeof notify !== "boolean") throw bad("FIELD_INVALID", "notify must be a boolean");
+	if (notify) {
+		if (!Array.isArray(to) || to.length === 0) {
+			throw bad("RECIPIENTS_MISSING", "to must be a non-empty array of agent refs or 'domain:<name>' entries");
+		}
+	} else if (Array.isArray(to) && to.length > 0) {
+		throw bad("FIELD_INVALID", "notify: false posts a record, so it cannot also carry recipients");
 	}
 	const hop = input.hop === undefined ? 0 : input.hop;
 	if (!Number.isInteger(hop) || hop < 0 || hop >= MAX_HOP) {
@@ -149,7 +159,8 @@ export function validateTeamMessage(input) {
 		kind,
 		topic,
 		message: message.trim(),
-		to: [...to],
+		to: notify ? [...to] : [],
+		notify,
 		hop,
 		ttl,
 		replyTo: input.replyTo === undefined ? null : token("replyTo", input.replyTo),
@@ -275,6 +286,35 @@ export function parseTeamMessage(text) {
 	};
 }
 
+/**
+ * Turn a failed CLI invocation into something a Lead can act on.
+ *
+ * Taking "the first non-empty line" seemed reasonable until Paseo answered with
+ * a pretty-printed JSON error and the Lead was told the operation failed with
+ * the message `{`. Prefer the structured message when the output is JSON, and
+ * otherwise fall back to the first line that carries actual words.
+ */
+export function cliErrorMessage(text) {
+	const raw = String(text ?? "").trim();
+	if (raw === "") return "paseo chat failed";
+	const start = raw.indexOf("{");
+	if (start >= 0) {
+		try {
+			const parsed = JSON.parse(raw.slice(start));
+			const message =
+				parsed?.error?.message ?? parsed?.message ?? parsed?.error ?? null;
+			if (typeof message === "string" && message.trim() !== "") return message.trim();
+		} catch {
+			// Not JSON after all — fall through to the line scan.
+		}
+	}
+	const informative = raw
+		.split("\n")
+		.map((line) => line.trim())
+		.find((line) => /[A-Za-z0-9]/.test(line));
+	return informative ?? raw.slice(0, 400);
+}
+
 export function runPaseo(args, timeoutMs = 20_000) {
 	const [bin, ...prefix] = resolvePaseoExec((reason) => {
 		throw bad("PASEO_EXEC_INVALID", `PASEO_TEAM_PASEO_EXEC ${reason}`);
@@ -291,7 +331,7 @@ export function runPaseo(args, timeoutMs = 20_000) {
 		);
 	} catch (error) {
 		const text = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}\n${error?.message ?? error}`;
-		throw bad("CLI_ERROR", text.split("\n").find((line) => line.trim()) ?? "paseo chat failed");
+		throw bad("CLI_ERROR", cliErrorMessage(text));
 	}
 }
 
@@ -317,7 +357,10 @@ export async function postTeamMessage(input, options = {}) {
 		throw bad("ROOM_NOT_ALLOWED", `ROOM_NOT_ALLOWED: '${message.room}' is outside this agent's room allowlist`);
 	}
 	const run = options.runPaseo ?? runPaseo;
-	const { mentions, agentIds } = await expandRecipients(message.to, { runPaseo: run, selfAgentId: ctx.selfAgentId });
+	// A record resolves no recipients, so it also costs no `paseo ls` round trip.
+	const { mentions, agentIds } = message.notify
+		? await expandRecipients(message.to, { runPaseo: run, selfAgentId: ctx.selfAgentId })
+		: { mentions: [], agentIds: [] };
 	const body = buildEnvelope(message, {
 		fromAgentId: ctx.selfAgentId,
 		fromRole: ctx.role,
@@ -359,8 +402,12 @@ export async function readRoom(input, options = {}) {
 	const args = ["chat", "read", room];
 	if (input?.since !== undefined) args.push("--since", token("since", String(input.since)));
 	if (input?.limit !== undefined) {
-		if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 500) {
-			throw bad("FIELD_INVALID", "limit must be an integer in [1, 500]");
+		// The ceiling is high because the scope-lease ledger reads a whole time
+		// window rather than a page: a live lease that falls outside the read is
+		// invisible, and invisible reads as free. A human reading a room still
+		// wants a small limit, so the DEFAULT stays whatever the caller asks for.
+		if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 5000) {
+			throw bad("FIELD_INVALID", "limit must be an integer in [1, 5000]");
 		}
 		args.push("--limit", String(input.limit));
 	}

@@ -69,6 +69,38 @@ from the project's current working directory.
 
 For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 
+0. **Scope lease — writers only.** Before creating any Peer whose brief carries
+   `MODE: write` + `EDIT_AUTHORITY: allowed`, take the lease for the scope that
+   Peer will own:
+
+   ```text
+   team_lease { action: "claim", scope: "<OWNED_SCOPE>", ttlMs: <work window> }
+   ```
+
+   Check `granted` in the result — a claim is written even when it loses,
+   because the ledger room has no locking and arbitration happens on read.
+
+   - `granted: true` → continue the cycle.
+   - `granted: false` → another Lead owns ground that covers your scope; the
+     result names it. Coordinate through the leases room. Do NOT create the
+     writer, do NOT narrow the scope to sneak under the holder, and do NOT wait
+     out the TTL as a strategy.
+   - Ledger unreadable → `BLOCKED: LEASE_UNVERIFIABLE`. This is a real blocker,
+     not a warning.
+
+   Renew with `action: "renew"` when work outlives the TTL, and
+   `action: "release"` once the candidate is accepted or abandoned — a scope
+   you forget to release blocks other Leads until it expires.
+
+   Read-only dispositions (repository-scout, documentation-researcher,
+   solution-architect, independent-reviewer) take no lease: they share the tree
+   by design, and gating them would turn the lease into a bottleneck rather
+   than a safety rule.
+
+   The policy enforces this on both runtimes, so a skipped claim surfaces as a
+   refused `create_agent` rather than as two engineers quietly editing the same
+   files.
+
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
 2. Pick `HOST_ID` from the controller-local cluster routing file
    `~/.paseo-pi-team/cluster-routing.local.json` (capability filter: writers

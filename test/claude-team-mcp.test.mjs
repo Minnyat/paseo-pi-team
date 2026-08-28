@@ -36,7 +36,7 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 	// runtime and not the other is a capability the other runtime silently lacks.
 	assert.deepEqual(
 		listed.result.tools.map((tool) => tool.name).sort(),
-		["peer_ask_lead", "team_chat", "team_watchdog"],
+		["peer_ask_lead", "team_chat", "team_lease", "team_watchdog"],
 	);
 	for (const tool of listed.result.tools) {
 		assert.equal(tool.inputSchema.type, "object");
@@ -79,6 +79,7 @@ assert.deepEqual(
 	[
 		["peer_ask_lead", ["peer"]],
 		["team_chat", ["lead", "supervisor"]],
+		["team_lease", ["lead", "supervisor"]],
 		["team_watchdog", ["lead", "supervisor"]],
 	],
 );
@@ -125,6 +126,11 @@ assert.deepEqual(
 	// description does: this file cannot import the .ts core, and team-chat.mjs is
 	// a separate process. Only team-chat.mjs ENFORCES it — the other two advertise
 	// it — so drift would leave a schema promising more than the tool accepts.
+	// Same parity rule for the lease tool: one description, two runtimes.
+	const lease = TEAM_TOOLS.find((tool) => tool.name === "team_lease");
+	const { teamLeaseToolDescription } = await import("../extensions/paseo-team-core/policy-core.ts");
+	assert.equal(lease.description, teamLeaseToolDescription(), "the lease description must not drift either");
+
 	const { TEAM_CHAT_MAX_BODY_BYTES: coreCeiling } = await import("../extensions/paseo-team-core/policy-core.ts");
 	const { MAX_BODY_BYTES: enforcedCeiling } = await import("../scripts/team-chat.mjs");
 	assert.equal(chat.inputSchema.properties.message.maxLength, enforcedCeiling, "the Claude schema advertises what team-chat.mjs enforces");

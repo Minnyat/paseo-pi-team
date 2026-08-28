@@ -29,7 +29,11 @@ import {
 	callsAgentBrowserCli,
 	callsPaseoCli,
 	coordinationCliBlockReason,
+	leaseBlockReason,
+	teamLeaseToolBlockReason,
+	type LeaseHolder,
 	supportScriptBlockReason,
+	writerScopeFromCreateAgent,
 	extraTools,
 	gitAuthorityBlockReason,
 	isAgentBrowserMcpTarget,
@@ -184,6 +188,11 @@ export interface ClaudeToolDecisionInput {
 	toolName: string;
 	toolInput?: unknown;
 	brief: ParsedTaskBrief | null;
+	/** Live scope leases, resolved by policy-core. Required only when the call
+	 *  staffs a writer; null means the ledger could not be read (fail-closed). */
+	leases?: Map<string, LeaseHolder> | null;
+	/** This agent's own Paseo id, to match against the lease holder. */
+	selfAgentId?: string | null;
 }
 
 function bashCommand(toolInput: unknown): string {
@@ -207,7 +216,38 @@ export function claudeToolBlockReason(
 	const peerMode = resolvePeerMode(brief);
 
 	if (classified.kind === "team") {
-		return teamToolBlockReason(role, teamToolName(toolName), brief);
+		const named = teamToolName(toolName);
+		const coarse = teamToolBlockReason(role, named, brief);
+		if (coarse) return coarse;
+		// The per-action gate needs the arguments, which the coarse name-only
+		// check never sees. Without this a Claude Supervisor could claim and
+		// release scopes that a Pi Supervisor is refused — an authority
+		// asymmetry, which is the one thing the shared core exists to prevent.
+		return teamLeaseToolBlockReason(
+			role,
+			(input.toolInput as Record<string, unknown> | undefined)?.action,
+			named,
+		);
+	}
+
+	// Same scope-lease rule the Pi extension applies. The ledger cannot be read
+	// from a synchronous guard, so the hook fetches it and hands it in; an
+	// absent `leases` when one is actually needed is treated as unreadable,
+	// which is fail-closed rather than a silent allow.
+	if (
+		role === "lead" &&
+		classified.kind === "paseo-mcp" &&
+		// Both calls can deliver the brief that arms a writer.
+		matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"]) &&
+		writerScopeFromCreateAgent(input.toolInput)
+	) {
+		const leaseReason = leaseBlockReason({
+			role,
+			args: input.toolInput,
+			leases: input.leases ?? null,
+			selfAgentId: input.selfAgentId ?? null,
+		});
+		if (leaseReason) return leaseReason;
 	}
 
 	if (classified.kind === "paseo-mcp") {

@@ -339,4 +339,54 @@ assert.equal(runHook("pre-tool-use", { session_id: "s0", tool_name: "Write" }, b
 }
 
 rmSync(home, { recursive: true, force: true });
+// --- scope lease: the hook has to fetch the ledger, not just forward a deny --
+// A decision function that is never handed a ledger denies every writer. That
+// fails closed, so no test of the DECISION would notice — only a test of the
+// HOOK does.
+{
+	const LEAD = "aaaaaaaa-1111-4111-8111-111111111111";
+	const leadEnv = { ...baseEnv, PASEO_PI_ROLE: "lead", PASEO_AGENT_ID: LEAD };
+	const writerBrief = [
+		"PASEO_TEAM_TASK_V3_BEGIN",
+		"TASK_ID: T-1",
+		"DISPOSITION: engineer",
+		"MODE: write",
+		"OWNED_SCOPE: src/auth",
+		"EDIT_AUTHORITY: allowed",
+		"PASEO_TEAM_TASK_V3_END",
+	].join("\n");
+	const createWriter = {
+		session_id: "lease-1",
+		tool_name: "mcp__paseo__create_agent",
+		tool_input: { initialPrompt: writerBrief },
+	};
+
+	// No daemon here, so the ledger read fails — and the hook must turn that into
+	// LEASE_UNVERIFIABLE rather than into silence.
+	const blocked = await handleEvent("pre-tool-use", createWriter, leadEnv);
+	assert.match(
+		String(blocked?.hookSpecificOutput?.permissionDecisionReason),
+		/LEASE_UNVERIFIABLE|SCOPE_LEASE/,
+		"a Lead staffing a writer is lease-checked on the Claude runtime",
+	);
+
+	// A read-only Peer is not gated, so it must pass even with no ledger at all —
+	// this is what proves the gate is scoped to writers rather than to every call.
+	assert.equal(
+		await handleEvent(
+			"pre-tool-use",
+			{ ...createWriter, tool_input: { initialPrompt: writerBrief.replace("MODE: write", "MODE: read-only") } },
+			leadEnv,
+		),
+		null,
+		"read-only creation is never lease-gated",
+	);
+
+	// And an ordinary call is untouched: no ledger read, no denial.
+	assert.equal(
+		await handleEvent("pre-tool-use", { session_id: "lease-2", tool_name: "Read", tool_input: { file_path: "a" } }, leadEnv),
+		null,
+	);
+}
+
 console.log("claude hook tests passed");

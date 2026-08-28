@@ -93,6 +93,7 @@ export const MCP_TOOLS = ["mcp", "mcp_script"];
 export const PEER_COMMUNICATION_TOOL = "peer_ask_lead";
 export const TEAM_WATCHDOG_TOOL = "team_watchdog";
 export const TEAM_CHAT_TOOL = "team_chat";
+export const TEAM_LEASE_TOOL = "team_lease";
 /** Payload ceiling, kept in sync with scripts/team-chat.mjs MAX_BODY_BYTES. */
 export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
 /** Mirror of TEAM_MESSAGE_KINDS in scripts/team-chat.mjs (shapes tool schemas). */
@@ -169,6 +170,17 @@ export const SUPERVISOR_ALLOWED_MCP_TARGETS: string[] = [
 const SUPERVISOR_MCP_SCRIPT_TARGETS: string[] = SUPERVISOR_MONITORING_TARGETS;
 
 /**
+ * The Lead's mcp_script surface, for the same reason the Supervisor has one:
+ * a script's ARGUMENTS cannot be statically verified, and both create_agent and
+ * send_agent_prompt carry the brief that arms a writer. Allowing them here would
+ * leave a first-class path that the scope-lease gate — which inspects arguments
+ * — never sees.
+ */
+const LEAD_MCP_SCRIPT_TARGETS: string[] = LEAD_ALLOWED_MCP_TARGETS.filter(
+	(tool) => tool !== "create_agent" && tool !== "send_agent_prompt",
+);
+
+/**
  * Match a possibly-prefixed proxy tool name against known Paseo tool names.
  * Handles "paseo_list_providers" and "server:list_providers" forms without
  * mangling bare names like "list_providers" (whose first segment is part of
@@ -203,6 +215,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 					),
 					TEAM_WATCHDOG_TOOL,
 					TEAM_CHAT_TOOL,
+					TEAM_LEASE_TOOL,
 					...LEAD_ALLOWED_MCP_TARGETS,
 					...MCP_TOOLS,
 				],
@@ -210,7 +223,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 			};
 		case "supervisor":
 			return {
-				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
+				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, TEAM_LEASE_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
 				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
@@ -342,6 +355,292 @@ export function callsTeamSupportScript(command: string): boolean {
 	return SUPPORT_SCRIPT_RE.test(command);
 }
 
+// ---------------------------------------------------------------------------
+// Scope leases
+//
+// "One writer per moving scope" used to hold by accident: there was exactly one
+// Lead, so nobody could contend. With several Leads nothing structural stops two
+// of them staffing writers on the same files, and that failure shows up as a
+// corrupted working tree rather than an error.
+//
+// The ledger is a chat room. That buys a total order by server timestamp
+// (measured: four concurrent posts, four distinct timestamps, none lost) but no
+// compare-and-swap — every CLAIM succeeds. Arbitration therefore happens on
+// READ, here, and this module stays pure: it is handed the ledger as data so a
+// lease decision never depends on a daemon being reachable, and so the same
+// rules run identically on both runtimes.
+// ---------------------------------------------------------------------------
+
+export const LEASE_HEADER = "LEASE_V1";
+export const LEASE_ACTIONS = ["claim", "renew", "release"] as const;
+/**
+ * Hard ceiling on how long any single lease can hold ground, applied in the
+ * FOLD rather than only in the tool that posts. The tool's cap binds callers
+ * that go through it; arbitration reads whatever is in the room, and one
+ * smuggled `TTL_MS: 999999999999` on the repo root would otherwise lock every
+ * writer out until someone edited the room by hand.
+ */
+export const LEASE_MAX_TTL_MS = 12 * 3_600_000;
+export type LeaseAction = (typeof LEASE_ACTIONS)[number];
+
+/** Repo-relative path, or "." for the whole tree. No traversal, bounded. */
+const SCOPE_CHARS = /^[A-Za-z0-9._\-/]{1,256}$/;
+
+/**
+ * Canonical spelling of a scope, so who wins never depends on how it was typed.
+ * A Windows Lead writing `src\auth` and a POSIX Lead writing `./src/auth/` are
+ * claiming the same thing and must collide.
+ */
+export function normalizeScope(scope: unknown): string | null {
+	if (typeof scope !== "string") return null;
+	const collapsed = scope.trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+	if (collapsed === "" || collapsed === "/") return null;
+	const trimmed = collapsed.replace(/^\.\//, "").replace(/\/$/, "");
+	if (trimmed === "" || trimmed === ".") return ".";
+	if (!SCOPE_CHARS.test(trimmed)) return null;
+	// A scope names something inside the repo. `..` is either a mistake or an
+	// attempt to claim outside it; neither should become a lease.
+	//
+	// Interior `.` segments are dropped for the same reason `..` is rejected:
+	// `src/./auth` and `src/auth` are the same directory on every filesystem, and
+	// leaving them distinct would let two Leads hold identical files by spelling
+	// the path two ways.
+	const segments = trimmed.split("/").filter((segment) => segment !== ".");
+	if (segments.some((segment) => segment === "..")) return null;
+	if (segments.length === 0) return ".";
+	return segments.join("/");
+}
+
+/**
+ * Whether two scopes cannot both have a writer.
+ *
+ * Containment, not equality: a claim on `src/auth` has to exclude a writer on
+ * `src/auth/login`, or the invariant is only enforced for Leads that happen to
+ * spell the scope the same way. Segment-wise so `src/auth` does not swallow
+ * `src/authz`.
+ */
+export function scopeConflicts(a: unknown, b: unknown): boolean {
+	const left = normalizeScope(a);
+	const right = normalizeScope(b);
+	if (!left || !right) return false;
+	if (left === "." || right === ".") return true;
+	// Compared case-insensitively even though the stored scope keeps its case.
+	// `src/auth` and `SRC/Auth` are the same files on Windows and on default
+	// macOS, which is where this pack runs; on a case-sensitive filesystem this
+	// can only produce a FALSE conflict, and erring toward "these two Leads
+	// collide" is the safe direction — the other way round puts two writers on
+	// one directory.
+	const l = left.toLowerCase().split("/");
+	const r = right.toLowerCase().split("/");
+	if (left.toLowerCase() === right.toLowerCase()) return true;
+	const shared = Math.min(l.length, r.length);
+	for (let i = 0; i < shared; i += 1) if (l[i] !== r[i]) return false;
+	return true;
+}
+
+export interface LeaseRecord {
+	action: LeaseAction;
+	scope: string;
+	ttlMs: number | null;
+}
+
+const LEASE_LINE = /^([A-Z_]+):\s*(.+)$/;
+
+/**
+ * Parse a LEASE_V1 block out of a room message body.
+ *
+ * Fail-closed both ways, and the two directions fail for different reasons: a
+ * half-record read as a CLAIM would hold a scope hostage, and one read as a
+ * RELEASE would hand the scope to a second writer. Neither is acceptable, so an
+ * unparseable record is simply not a lease event at all.
+ */
+export function parseLeaseRecord(text: unknown): LeaseRecord | null {
+	if (typeof text !== "string") return null;
+	const start = text.indexOf(LEASE_HEADER);
+	if (start < 0) return null;
+	const fields: Record<string, string> = {};
+	for (const line of text.slice(start).split(/\r?\n/).slice(1)) {
+		if (line.trim() === "") break;
+		const match = LEASE_LINE.exec(line.trim());
+		const key = match?.[1];
+		const value = match?.[2];
+		if (key === undefined || value === undefined) break;
+		fields[key] = value.trim();
+	}
+	const action = fields.ACTION as LeaseAction;
+	if (!LEASE_ACTIONS.includes(action)) return null;
+	const scope = normalizeScope(fields.SCOPE);
+	if (!scope) return null;
+	if (action === "release") return { action, scope, ttlMs: null };
+	const ttlMs = Number.parseInt(fields.TTL_MS ?? "", 10);
+	if (!Number.isInteger(ttlMs) || ttlMs <= 0) return null;
+	return { action, scope, ttlMs: Math.min(ttlMs, LEASE_MAX_TTL_MS) };
+}
+
+export interface LeaseHolder {
+	agentId: string;
+	scope: string;
+	claimedAt: number;
+	expiresAt: number;
+}
+
+/**
+ * Fold a room's messages into the set of live leases.
+ *
+ * The holder is the message AUTHOR — stamped by the daemon — never a field in
+ * the body, which the sender writes. That is the same rule the message graph
+ * follows, and for the same reason: an id the claimant supplies proves nothing.
+ *
+ * @param entries rows from `paseo chat read --json` (author, createdAt, body)
+ */
+export function resolveLeases(
+	entries: unknown,
+	{ now }: { now: number },
+): Map<string, LeaseHolder> {
+	const rows = Array.isArray(entries) ? entries : [];
+	const ordered = rows
+		.map((row: any) => ({
+			author: typeof row?.author === "string" ? row.author : null,
+			at: Date.parse(row?.createdAt ?? ""),
+			record: parseLeaseRecord(row?.body),
+		}))
+		.filter((row) => row.author && row.record && Number.isFinite(row.at))
+		.sort((a, b) => a.at - b.at);
+
+	const live = new Map<string, LeaseHolder>();
+	/** Any live lease that would collide with `scope` as of `at`. */
+	const conflictAt = (scope: string, at: number): LeaseHolder | null => {
+		for (const holder of live.values()) {
+			if (holder.expiresAt <= at) continue;
+			if (scopeConflicts(holder.scope, scope)) return holder;
+		}
+		return null;
+	};
+
+	for (const row of ordered) {
+		const record = row.record as LeaseRecord;
+		const own = live.get(record.scope);
+		const holdsOwn = own && own.expiresAt > row.at && own.agentId === row.author;
+
+		if (record.action === "release") {
+			// Only the holder may release its OWN lease. Otherwise any Lead could
+			// evict another and the lease would be advice rather than a rule.
+			if (holdsOwn) live.delete(record.scope);
+			continue;
+		}
+		if (record.action === "renew") {
+			if (holdsOwn) {
+				live.set(record.scope, { ...own!, expiresAt: row.at + (record.ttlMs as number) });
+			}
+			continue;
+		}
+		// claim — rejected if ANY live lease collides, not merely one filed under
+		// the same spelling. Recording a losing claim under its own key would let
+		// it surface later as a lease nobody ever granted: exactly what happened
+		// when a Lead claimed `src/auth/login` under a live `src/auth` and then
+		// inherited the ground the moment `src/auth` was released.
+		if (conflictAt(record.scope, row.at)) continue;
+		live.set(record.scope, {
+			agentId: row.author as string,
+			scope: record.scope,
+			claimedAt: row.at,
+			expiresAt: row.at + (record.ttlMs as number),
+		});
+	}
+
+	for (const [scope, holder] of [...live]) {
+		if (holder.expiresAt <= now) live.delete(scope);
+	}
+	return live;
+}
+
+/** The live lease that would conflict with `scope`, if any. */
+export function leaseHolderFor(
+	leases: Map<string, LeaseHolder> | null | undefined,
+	scope: unknown,
+): LeaseHolder | null {
+	if (!leases) return null;
+	for (const holder of leases.values()) {
+		if (scopeConflicts(holder.scope, scope)) return holder;
+	}
+	return null;
+}
+
+/**
+ * The scope a `create_agent` call is about to put a WRITER on, or null when the
+ * call staffs nobody who writes.
+ *
+ * Read-only researchers, scouts and reviewers share a tree by design; gating
+ * them would turn the lease into a bottleneck instead of a safety rule. The
+ * authority comes from the same V3 brief the Peer will be held to, so the gate
+ * and the grant cannot disagree.
+ */
+export function writerScopeFromCreateAgent(args: unknown): string | null {
+	if (!args || typeof args !== "object") return null;
+	const record = args as Record<string, unknown>;
+	// A brief arms a Peer whether it arrives at creation (`initialPrompt`) or in
+	// a later turn (`prompt` via send_agent_prompt) — authority is recomputed
+	// from whatever prompt starts the turn, never inherited. Gating only the
+	// first would leave the two-step open: create something benign, then send
+	// the write brief to the same agent.
+	const prompt = typeof record.initialPrompt === "string" ? record.initialPrompt : record.prompt;
+	if (typeof prompt !== "string") return null;
+	const brief = parseTaskBrief(prompt);
+	if (!brief || brief.version !== 3 || brief.malformed.length > 0) return null;
+	// Ask the SAME function that grants the authority, not a second reading of
+	// the same fields. They diverged once already: the gate required a literal
+	// `EDIT_AUTHORITY: allowed`, while the grant defaults edit to true when the
+	// field is absent under `MODE: write` — so a brief the parser happily
+	// accepts produced a writer the lease never saw.
+	// This mirrors policyWithAuthority exactly: write/edit tools are granted only
+	// when the mode is write AND the authority allows edit. Reading either half
+	// alone is how the gate and the grant drifted apart the first time.
+	if (resolvePeerMode(brief) !== "write") return null;
+	if (!peerAuthority(brief).edit) return null;
+	// A write brief with no OWNED_SCOPE is the dangerous one: it writes
+	// somewhere and says nothing about where. Treat it as the whole repo rather
+	// than as exempt.
+	return normalizeScope(brief.fields.get("OWNED_SCOPE")) ?? ".";
+}
+
+/**
+ * Whether this `create_agent` may proceed under the lease rule.
+ *
+ * Pure: the caller fetches the ledger and passes it in. `leases: null` means the
+ * ledger could not be read, and that is deliberately fatal — a Lead that cannot
+ * staff a writer is a visible incident with an error message, while two writers
+ * on one scope is a silent one discovered later in the git history.
+ */
+export function leaseBlockReason({
+	role,
+	args,
+	leases,
+	selfAgentId,
+}: {
+	role: TeamRole;
+	args: unknown;
+	leases: Map<string, LeaseHolder> | null;
+	selfAgentId: string | null | undefined;
+}): string | null {
+	if (role !== "lead") return null;
+	const scope = writerScopeFromCreateAgent(args);
+	if (!scope) return null;
+	if (!leases) {
+		return "BLOCKED: LEASE_UNVERIFIABLE — the scope-lease ledger could not be read, so this writer cannot be shown to be the only one on its scope. Fix the ledger read and retry; do not create the writer meanwhile.";
+	}
+	if (!selfAgentId) {
+		return "BLOCKED: LEASE_UNVERIFIABLE — this agent's own id is unknown, so it cannot be matched against the lease holder.";
+	}
+	const holder = leaseHolderFor(leases, scope);
+	if (!holder) {
+		return `BLOCKED: SCOPE_LEASE_MISSING — no live lease covers "${scope}". Claim it first (team_lease claim), then create the writer.`;
+	}
+	if (holder.agentId !== selfAgentId) {
+		return `BLOCKED: SCOPE_LEASE_HELD — "${holder.scope}" is held by ${holder.agentId} until ${new Date(holder.expiresAt).toISOString()}, and it covers "${scope}". Coordinate with that Lead through the leases room instead of starting a second writer.`;
+	}
+	return null;
+}
+
 /** Reason a Peer may not run a pack support script from bash. */
 export function supportScriptBlockReason(
 	role: TeamRole,
@@ -378,6 +677,16 @@ export function coordinationCliBlockReason(
  * heuristics, rooms are unrestricted unless PASEO_TEAM_ROOMS is set, and chat
  * rooms have no ACL of their own.
  */
+export function teamLeaseToolDescription(): string {
+	return (
+		"Take, extend, release or inspect a scope lease — the record of which Lead may put a WRITER on which files. " +
+		"`claim` before creating an engineer; `release` when the work is done; `renew` for long work; `status` to see the board. " +
+		"Scopes are repo-relative paths and nest: holding `src` also holds `src/auth`. " +
+		"A claim can lose — read `granted` in the result, not merely `ok`. " +
+		"Creating a write-mode Peer without a covering lease is refused."
+	);
+}
+
 export function teamChatToolDescription(): string {
 	return (
 		"Coordinate with other Leads and Supervisors through a Paseo chat room. " +
@@ -744,7 +1053,9 @@ export function mcpScriptBlockReason(
 	const allowed =
 		role === "supervisor"
 			? SUPERVISOR_MCP_SCRIPT_TARGETS
-			: mcpAllowedTargets(role);
+			: role === "lead"
+				? LEAD_MCP_SCRIPT_TARGETS
+				: mcpAllowedTargets(role);
 	for (const _match of code.matchAll(MCP_SCRIPT_DYNAMIC_CALL_RE)) {
 		return `mcp_script invokes an MCP tool through a non-literal target (variable, expression or computed key) — the ${role} allowlist cannot verify it, so the call is blocked fail-closed. Use a literal tool name: tools.call("<allowed_tool>", ...) or tools.<allowed_tool>().`;
 	}
@@ -1277,7 +1588,37 @@ export function teamToolBlockReason(
 	}
 	const chatReason = teamChatToolBlockReason(role, toolName);
 	if (chatReason) return chatReason;
+	// The lease tool's action is not visible here (teamToolBlockReason takes a
+	// name, not arguments), so this is the coarse gate; the adapters apply the
+	// per-action one with the arguments in hand.
+	if (toolName === TEAM_LEASE_TOOL && role !== "lead" && role !== "supervisor") {
+		return "team_lease is restricted to Lead agents (Supervisor may read status).";
+	}
 	return null;
+}
+
+/**
+ * Who may work the scope-lease ledger.
+ *
+ * Claiming is a Lead act: it decides who staffs a writer, which is the Lead's
+ * job and nobody else's. The Supervisor may READ the board, because "two Leads
+ * are contending for one scope" is exactly the workflow observation it exists
+ * to make — but it does not get to take or free a scope, the same way it does
+ * not get to accept a candidate.
+ */
+export function teamLeaseToolBlockReason(
+	role: TeamRole,
+	action: unknown,
+	toolName: string = TEAM_LEASE_TOOL,
+): string | null {
+	if (toolName !== TEAM_LEASE_TOOL) return null;
+	if (role === "lead") return null;
+	if (role === "supervisor") {
+		return action === "status"
+			? null
+			: "Supervisor may read the lease board but not claim, renew or release a scope — staffing a writer is the Lead's decision. Send an observation instead.";
+	}
+	return "team_lease is restricted to Lead agents (Supervisor may read status).";
 }
 
 /**

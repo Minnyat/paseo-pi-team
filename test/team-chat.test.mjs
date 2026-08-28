@@ -18,6 +18,7 @@ import {
 	parseTeamMessage,
 	postTeamMessage,
 	roomAllowed,
+	cliErrorMessage,
 	validateTeamMessage,
 } from "../scripts/team-chat.mjs";
 
@@ -235,6 +236,53 @@ await assert.rejects(
 		/too large/i,
 		"the envelope, not just the message, has to fit the platform budget",
 	);
+}
+
+// --- a record is not a request ---------------------------------------------
+// The scope-lease ledger posts into a room, but nobody has to wake up for a
+// bookkeeping entry. Without this, a lease event would have to mention someone
+// — either pulling a Lead out of its work for nothing, or mentioning itself and
+// being woken by its own record.
+{
+	const v = validateTeamMessage({ room: "leases", kind: "claim", topic: "T-1", message: "LEASE", notify: false });
+	assert.equal(v.notify, false);
+	assert.deepEqual(v.to, [], "a record needs no recipients");
+
+	// The default is unchanged: a message without `notify` still requires an
+	// audience, so nothing becomes silently undeliverable by omission.
+	assert.throws(() => validateTeamMessage({ room: "leases", kind: "claim", topic: "T-1", message: "x" }), /to must be/i);
+	assert.throws(
+		() => validateTeamMessage({ ...base, notify: false, to: [OTHER] }),
+		/notify/i,
+		"a record with recipients is a contradiction, not a convenience",
+	);
+}
+{
+	const calls = [];
+	const result = await postTeamMessage(
+		{ room: "leases", kind: "claim", topic: "T-1", message: "LEASE_V1", notify: false },
+		{ selfAgentId: SELF, role: "lead", runPaseo: async (args) => { calls.push(args); return { id: "m", author: SELF }; } },
+	);
+	assert.equal(result.ok, true);
+	assert.deepEqual(result.mentions, []);
+	assert.ok(!calls.some((c) => c[0] === "ls"), "a record resolves no recipients, so it costs no lookup");
+	const posted = calls.find((c) => c[0] === "chat" && c[1] === "post");
+	assert.ok(!posted[3].startsWith("@"), "and the body carries no mention head");
+	assert.ok(posted[3].startsWith("TEAM_MESSAGE_V1"));
+}
+
+// --- a CLI failure has to say something usable ------------------------------
+// Paseo prints structured errors, so taking "the first non-empty line" of the
+// output yielded exactly `{` — a message that tells the Lead nothing and sends
+// it looking in the wrong place. Observed on a missing chat room.
+{
+	assert.match(cliErrorMessage('{\n  "error": { "message": "chat room not found" }\n}'), /chat room not found/);
+	assert.match(cliErrorMessage('{"message":"boom"}'), /boom/);
+	assert.match(cliErrorMessage("plain failure text"), /plain failure text/);
+	assert.match(cliErrorMessage("\n\n  spaced failure  \n"), /spaced failure/);
+	// Unparseable JSON still beats a lone brace: return something a human can act on.
+	assert.ok(cliErrorMessage("{\n  not json at all").length > 1);
+	assert.ok(cliErrorMessage("").length > 0, "even an empty failure gets a name");
 }
 
 console.log("team-chat tests passed");

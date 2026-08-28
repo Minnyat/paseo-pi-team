@@ -95,6 +95,44 @@ async function inspectOne(agent, deadline, options) {
   }
 }
 
+/**
+ * Cross the lease board with the agent list.
+ *
+ * Two situations deserve an operator's attention, and neither is something the
+ * watchdog may fix: a scope held by an agent that is no longer listed (a Lead
+ * died holding it, and it will block other Leads until the TTL runs out), and a
+ * scope whose lease has already lapsed while its holder is still alive (the
+ * Lead believes it owns ground the policy will no longer grant it).
+ *
+ * Observation only, like everything else here. Reclaiming a scope from a Lead
+ * that might still be mid-write is exactly the move that produces the second
+ * writer this whole mechanism exists to prevent.
+ */
+export function classifyLeases(leases, agents, { now }) {
+  const alive = new Set(
+    (Array.isArray(agents) ? agents : [])
+      .map((agent) => agent?.id ?? agent?.Id)
+      .filter((id) => typeof id === "string"),
+  );
+  const rows = [];
+  for (const holder of leases?.values?.() ?? []) {
+    const holderListed = alive.has(holder.agentId);
+    const expired = holder.expiresAt <= now;
+    if (holderListed && !expired) continue;
+    rows.push({
+      scope: holder.scope,
+      agentId: holder.agentId,
+      expiresAt: new Date(holder.expiresAt).toISOString(),
+      holderListed,
+      expired,
+      suspicion: !holderListed
+        ? "holder is not in the agent listing — the scope stays blocked until the lease expires"
+        : "lease has lapsed while the holder is still running — its next create_agent will be refused",
+    });
+  }
+  return rows;
+}
+
 export async function collectWatchdogSnapshot(options = {}) {
   const globalDeadlineMs = Math.max(1000, options.globalDeadlineMs ?? DEFAULT_GLOBAL_DEADLINE_MS);
   const deadline = Date.now() + globalDeadlineMs;
@@ -146,11 +184,30 @@ export async function collectWatchdogSnapshot(options = {}) {
   });
   const classified = classifyStaleAgents(complete, options);
   const partial = allRunning.length > running.length || complete.some((agent) => agent.inspectOk !== true);
+  const now = options.now ?? Date.now();
+  // The lease board is a second, cheaper source of "something is stuck": one
+  // room read, no per-agent fan-out. Its absence degrades the report rather
+  // than failing it — an unreadable ledger is already fatal where it matters,
+  // at the create_agent gate.
+  let leaseRows = [];
+  let leaseError = null;
+  if (options.leases !== false) {
+    try {
+      const { fetchLeases } = options.leaseModule ?? (await import("./team-lease.mjs"));
+      const fetched = await fetchLeases({ ...options, now });
+      if (fetched.ok) leaseRows = classifyLeases(fetched.leases, allRunning, { now });
+      else leaseError = fetched.code ?? "LEASE_LEDGER_UNREADABLE";
+    } catch (error) {
+      leaseError = String(error?.message ?? error);
+    }
+  }
   return {
-    generatedAt: new Date(options.now ?? Date.now()).toISOString(),
+    generatedAt: new Date(now).toISOString(),
     staleAfterMs: Math.max(1000, options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS),
     agents: classified,
     stale: classified.filter((agent) => agent.stale),
+    leases: leaseRows,
+    ...(leaseError ? { leaseError } : {}),
     partial,
     action: "observation-only: do not cancel/archive/spawn until status, activity and workspace state are reconciled",
   };
