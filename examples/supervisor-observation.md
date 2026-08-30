@@ -112,12 +112,16 @@ CONFIDENCE: high
 |---|---|
 | the `SUPERVISOR_OBSERVATION` header line | the message is not parsed at all — no verdict reaches the Lead |
 | `DOMAIN:` | `JURISDICTION_UNDECLARED`; a domain that does not cover the Lead is `JURISDICTION_MISMATCH` |
-| `FROM_AGENT_ID:` | a DECISION without it is refused (`JURISDICTION_UNATTRIBUTED`) — an unsigned decision cannot be checked for overlap; an observation is only flagged |
+| `FROM_AGENT_ID:` | **on every topology**, the id is resolved against Paseo's agent state; missing, unresolvable, or resolving to something that is not a Supervisor seat is `SUPERVISOR_SENDER_UNVERIFIED` and the Lead will not treat it as a decision. Under `multi` a missing id on a DECISION is refused earlier still (`JURISDICTION_UNATTRIBUTED`) — an unsigned decision cannot be checked for overlap |
 | any duplicated field | `SUPERVISOR_BLOCK_MALFORMED` |
 | `REVERSIBILITY: irreversible` inside a decision | `SUPERVISOR_BLOCK_MALFORMED` — an irreversible matter is the Human's |
 
-The DOMAIN rules apply under `PASEO_TEAM_TOPOLOGY=multi`. Under `single` the
-verdict is not computed at all, so the contract above rests on you alone.
+The DOMAIN rules apply only under `PASEO_TEAM_TOPOLOGY=multi`. Everything else
+in the table is checked on both topologies: the Lead's turn context gets a
+verdict either way, and on the accepting path it tells the Lead to carry the
+decision out **without** asking the Human again. That is why `FROM_AGENT_ID`
+matters even on a one-Supervisor cluster — it is the only thing separating your
+decision from any other text that happens to contain the header.
 
 Note: if the same symptom appears a third time, raise the root-mechanism
 question instead of asking for yet another local patch.

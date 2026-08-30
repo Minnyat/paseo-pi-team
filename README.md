@@ -289,10 +289,23 @@ adds only ever refuses, so misreading toward strict costs one blocked call with
 a stated reason, while misreading toward loose turns governance off silently on
 a cluster the operator believes is governed.
 
+One thing the flag does **not** gate is the verdict on a supervisor message.
+On every topology, a Lead turn that opens with a `SUPERVISOR_OBSERVATION` /
+`SUPERVISOR_DECISION` gets a notice in its turn context saying what the message
+is, whether its `FROM_AGENT_ID` resolves to a real Supervisor seat in Paseo, and
+**what the Lead is to do about it** — `ACT ON IT … needs NO Human round-trip` on
+the binding path, `BLOCKED: <code>` on the refusing one. It used to be computed
+only under `multi`, so on the default pack a delegated decision reached the Lead
+as bare prose and the Lead, quite reasonably, asked the Human to approve what
+its own contract had already delegated to it. A block whose sender does not
+resolve to a Supervisor seat is `SUPERVISOR_SENDER_UNVERIFIED` and never binds:
+anything can type the header, so the directive is reachable only through a seat
+the runtime can point at.
+
 Under `multi`, seats carry a domain (`team.domain` label / `PASEO_TEAM_DOMAIN`,
 hierarchical: `backend` contains `backend.auth`, `*` is the root) and every
 `SUPERVISOR_OBSERVATION` / `SUPERVISOR_DECISION` carries `DOMAIN:`. The runtime
-computes the verdict and injects it into the Lead's turn context — a misrouted
+computes the jurisdiction verdict too — a misrouted
 **observation** is a warning (noise costs nothing), a misrouted **decision** is
 refused (that is the one the Lead would act on), and an overlap refuses both
 Supervisors and escalates to the Human, and a DECISION with no `FROM_AGENT_ID`

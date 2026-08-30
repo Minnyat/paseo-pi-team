@@ -296,9 +296,15 @@ Conventions:
   `PASEO_TEAM_TOPOLOGY=multi` a block without it carries no authority
   (`JURISDICTION_UNDECLARED`), and one whose domain does not cover the Lead is
   refused (`JURISDICTION_MISMATCH`).
-- `FROM_AGENT_ID` is what makes the overlap check possible: without it the Lead
-  cannot tell your message from a second Supervisor's. A DECISION that omits it
-  is refused (`JURISDICTION_UNATTRIBUTED`); an observation is only flagged.
+- `FROM_AGENT_ID` is your signature, and it is required on **every** topology —
+  not just `multi`. The Lead's runtime resolves it against Paseo's own agent
+  state; a block whose sender does not come back as a Supervisor seat is
+  `SUPERVISOR_SENDER_UNVERIFIED` and carries no delegated authority, because a
+  Lead that is told to act without a Human round-trip must be able to see that
+  the instruction came from you rather than from any text containing the header.
+  Under `multi` it is also what makes the overlap check possible: without it the
+  Lead cannot tell your message from a second Supervisor's, so a DECISION that
+  omits it is refused (`JURISDICTION_UNATTRIBUTED`) and an observation flagged.
 - Do not write "the Lead did wrong" without describing the causal mechanism
   and evidence.
 - Do not record a `SUPERVISOR_DECISION` when `REVERSIBILITY: irreversible` or

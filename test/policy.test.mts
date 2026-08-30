@@ -1729,12 +1729,30 @@ function restoreEnv(name: string, previous: string | undefined): void {
 			systemPrompt: "BASE",
 		})) as { systemPrompt?: string } | undefined;
 		assert.match(String(inJurisdiction?.systemPrompt), /JURISDICTION_OK/);
+		// The accepting verdict states the CONSEQUENCE, not only the fact. A Lead
+		// that reads "jurisdiction covers you" and stops there falls back to
+		// asking the Human for a decision already delegated to it.
+		assert.match(String(inJurisdiction?.systemPrompt), /ACT ON IT/);
 
 		// An ordinary prompt carries no supervisor block and gains no notice.
 		const plain = (await beforeStart({ prompt: "please review PR 12", systemPrompt: "BASE" })) as
 			| { systemPrompt?: string }
 			| undefined;
-		assert.ok(!String(plain?.systemPrompt).includes("Jurisdiction"));
+		assert.ok(!String(plain?.systemPrompt).includes("supervisor message (this turn)"));
+
+		// The DEFAULT pack is `single`, and that is where the notice used to be
+		// skipped entirely — the Lead got the decision as bare prose. Same core,
+		// same directive, so the two runtimes cannot drift on this.
+		process.env.PASEO_TEAM_TOPOLOGY = "single";
+		const { piStub: singleStub, handlers: singleHandlers } = makePiStub(["read", "mcp"]);
+		(await loadFreshExtension("lifecycle=governance-single-notice"))(singleStub);
+		const onSingle = (await requireHandler(singleHandlers, "before_agent_start")({
+			prompt: decision,
+			systemPrompt: "BASE",
+		})) as { systemPrompt?: string } | undefined;
+		assert.match(String(onSingle?.systemPrompt), /SUPERVISOR_DECISION_BINDING/);
+		assert.match(String(onSingle?.systemPrompt), /ACT ON IT/);
+		process.env.PASEO_TEAM_TOPOLOGY = "multi";
 
 		// A Supervisor does not task a Peer, and that rule is NOT gated on the
 		// topology flag: on `single` — the default pack — it must still bite, or

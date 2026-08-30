@@ -456,7 +456,7 @@ có thể đang ghi dở chính là nước cờ sinh ra writer thứ hai).
 | Supervisor **không** prompt thẳng Peer — `PROMPT_TARGET_IS_PEER`, áp dụng ở **mọi** topology (fail-open khi không resolve được target dưới `single`, fail-closed dưới `multi`) | `policy-core.ts` `sendAgentPromptBlockReason` |
 | `recovery_for ⊆ team.domain` của supervisor | `supervisorCreateAgentArgsBlockReason(args, { topology, selfDomain })` |
 | Nhóm tool `heartbeat` (`create_heartbeat` / `delete_heartbeat`) cho lead + supervisor | `PASEO_TOOLS.heartbeat` + hai allowlist |
-| Bind vào Pi (governanceContext + jurisdiction notice trong `before_agent_start`) | `extensions/paseo-team-policy.ts` |
+| Bind vào Pi (governanceContext + supervisor notice trong `before_agent_start`) | `extensions/paseo-team-policy.ts` |
 | Bind vào Claude (input `topology`/`selfDomain`/`promptTarget`; notice trong `user-prompt-submit`) | `claude-policy.ts` + `scripts/claude-hook.mjs` |
 | Đọc state file dùng chung cho CẢ policy lẫn CLI (một nguồn sự thật) | `extensions/paseo-team-core/agent-directory.ts`; `cli/lib/agent-state.mjs` chỉ re-export |
 | `graph.jurisdiction` = `{ supervisors, unlabeled, conflicts }` | `cli/lib/graph.mjs` `describeJurisdiction` |
@@ -484,6 +484,62 @@ chạy `paseo run`, nên một agent có thể khai bất kỳ parent nào. Cả
 `peer_ask_lead` lẫn guard `send_agent_prompt` đều dựa vào đúng trường đó, và
 `team.domain` cũng chỉ là một nhãn. Hai guard này chặn **nhầm lẫn và trôi dạt**,
 không chặn giả mạo. Đã ghi vào `prompts/supervisor.md` và `prompts/lead.md`.
+
+#### PR-D.1 — Lead (Claude) không chịu nhận điều hướng của Supervisor — ✅ ĐÃ SỬA
+
+**Triệu chứng đo được.** Lead chạy trên Claude nhận `SUPERVISOR_DECISION` hợp lệ,
+loại nhỏ + đảo ngược được, rồi vẫn dừng lại hỏi Human duyệt — đúng việc mà
+`lead.md` §Authority đã uỷ quyền cho nó. Lead trên pi không như vậy.
+
+**Ba nguyên nhân, không phải một.**
+
+1. **Verdict chỉ tính dưới `multi`.** Cả `jurisdictionNotice` (pi) lẫn
+   `jurisdictionBlock` (Claude) đều `return null` ngay khi topology khác `multi`.
+   Gói mặc định là `single`, nên trên gói mặc định decision tới Lead dưới dạng
+   **văn xuôi trần**: không verdict, không quy kết nguồn, không chỉ thị.
+2. **Verdict chấp nhận chỉ nêu SỰ KIỆN, không nêu HỆ QUẢ.** Nhánh từ chối luôn
+   kết bằng một mệnh lệnh ("Do NOT act on it, reply BLOCKED"); nhánh
+   `JURISDICTION_OK` kết bằng "jurisdiction phủ Lead này" — một sự kiện không
+   thắng nổi tư thế mặc định của agent lập trình là hỏi người dùng trước khi làm
+   việc hệ trọng. Lead đọc `JURISDICTION_OK` xong vẫn hỏi.
+3. **Hợp đồng vai bị tiêm sai tầng, sai tần suất trên Claude.** pi dựng lại
+   system prompt mỗi `before_agent_start`; Claude tiêm **một lần** mỗi phiên, và
+   tiêm vào `additionalContext` (nội dung lượt user, không phải system prompt).
+   Đến lượt thứ 50, hợp đồng authority ở rất xa.
+
+**Sửa.** Cả ba đều nằm ở core dùng chung, không ở adapter:
+
+| Thành phần | Nơi |
+|---|---|
+| `supervisorAttribution(fromAgentId, env)` — resolve `FROM_AGENT_ID` qua state file, chỉ ghế provider supervisor mới `verified` | `policy-core.ts` |
+| `supervisorTurnVerdict(...)` — verdict trên **mọi** topology; giữ nguyên luật `multi`, thêm kiểm tra nguồn cho cả hai | `policy-core.ts` |
+| `supervisorTurnNotice(...)` — một văn bản duy nhất cho hai runtime, kết bằng CHỈ THỊ (`ACT ON IT … needs NO Human round-trip` / `BLOCKED: <code>`) | `policy-core.ts` |
+| Mã mới: `SUPERVISOR_DECISION_BINDING`, `SUPERVISOR_OBSERVATION_ADVISORY`, `SUPERVISOR_SENDER_UNVERIFIED` | `policy-core.ts` |
+| Bind lại: `supervisorNotice` (pi) / `supervisorBlockNotice` (Claude), cùng gọi core | `paseo-team-policy.ts`, `scripts/claude-hook.mjs` |
+| Bù chênh lệch tiêm prompt trên Claude: dòng authority ngắn **mỗi lượt** Lead, tiêm lại **toàn bộ** role prompt ở lượt mở đầu bằng supervisor block | `scripts/claude-hook.mjs` |
+
+**Vì sao phải quy kết nguồn.** Chỉ thị mới bảo Lead hành động KHÔNG hỏi Human.
+Nếu bất kỳ văn bản nào chứa dòng header cũng kích hoạt được chỉ thị đó thì ta vừa
+chế ra một đòn bẩy lên Lead. Nên `FROM_AGENT_ID` giờ phải resolve về một ghế
+Supervisor thật trong state file của Paseo mới `verified`; không thì
+`SUPERVISOR_SENDER_UNVERIFIED` và **không bao giờ** binding. Vẫn theo §1.10: đây
+là nhãn khai báo, chặn nhầm lẫn/trôi dạt/văn bản lạc, **không** chặn giả mạo.
+
+**Lệch có chủ đích giữa hai topology.** Nguồn không xác minh được: `multi` từ
+chối thẳng một DECISION (đồng bộ với `JURISDICTION_UNATTRIBUTED`), `single` chỉ
+cảnh báo. Gói mặc định xưa nay không từ chối gì; biến một thư mục state không đọc
+được thành bức tường `BLOCKED` sẽ làm hỏng cụm đang chạy. Cả hai đường đều dừng
+trước mức binding — đó mới là tính chất cần giữ.
+
+**Một khả năng thứ tư, không phải bug của pack.** Nếu ghế Lead được `paseo run`
+với `--mode default`, mọi tool call của chính Lead nằm chờ trong hàng đợi
+permission cho tới khi Human bấm — nhìn từ ngoài giống hệt Lead từ chối điều
+hướng. `pi-lead` không lộ ra chuyện này vì pi không khai mode nào cả. Đã ghi
+`--mode auto` cho ghế Lead vào `docs/claude-runtime.md`.
+
+Test: 7 case mới trong `governance.test.mts` (quy kết nguồn, binding/advisory,
+thứ tự jurisdiction-trước-nguồn, parser vẫn sống dưới `single`), wiring test hai
+adapter trong `claude-hook.test.mjs` và `policy.test.mts`.
 
 ---
 
