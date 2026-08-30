@@ -303,65 +303,74 @@ if (wantPi) {
 			"agent-browser-runtime",
 			"Chrome/runtime missing or doctor failed → run agent-browser install",
 		);
-	if (browser.skill) pass("agent-browser-skill", browser.skillPath);
-	else
-		fail(
-			"agent-browser-skill",
-			`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
-		);
-	if (browser.configReadable && browser.browserMcpEnabled)
-		pass("agent-browser-mcp", browser.configPath);
-	else if (!browser.configReadable)
-		fail(
-			"agent-browser-mcp",
-			`${browser.configPath} is missing or invalid JSON`,
-		);
-	else if (browser.browserMcp)
-		fail(
-			"agent-browser-mcp",
-			`${browser.configPath} contains a disabled agent-browser server`,
-		);
-	else
-		fail(
-			"agent-browser-mcp",
-			`${browser.configPath} has no agent-browser server entry`,
-		);
-
-	// How the entry reaches a browser. A config only names a port; without the
-	// probe below, an unreachable CDP target first shows up as a failed browser
-	// call in the middle of a Peer turn instead of as host unreadiness.
-	if (browser.browserMcpEnabled && browser.cdpTarget) {
-		const target = browser.cdpTarget;
-		if (target.mode === "launch") {
-			pass("agent-browser-cdp", describeCdpTarget(target));
-		} else if (target.mode === "ambiguous") {
+	// Everything from here to the Claude sub-check reads PI's own tree: the
+	// skill under ~/.pi/agent/skills and the MCP config at ~/.pi/agent/mcp.json.
+	// A host running `--runtime claude` has no reason to own either, so failing
+	// those checks there invents work — and under --strict it fails the WHOLE
+	// preflight over a file that host is correct not to have. The CLI and Chrome
+	// checks above stay unconditional: those are host-level, and both runtimes
+	// need them.
+	if (wantPi) {
+		if (browser.skill) pass("agent-browser-skill", browser.skillPath);
+		else
 			fail(
-				"agent-browser-cdp",
-				`the agent-browser entry in ${browser.configPath} has ambiguous --cdp flags (duplicated with different ports, or one is missing its port) — leave exactly one "--cdp <port>"`,
+				"agent-browser-skill",
+				`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
 			);
-		} else {
-			const probe = await probeCdpEndpoint({ port: target.port });
-			if (probe.ok) {
-				pass(
-					"agent-browser-cdp",
-					`attached to 127.0.0.1:${target.port} (${probe.browser}) — a Peer granted BROWSER_MCP_AUTHORITY inherits every session in that profile`,
-				);
-				// Loopback reachability says nothing about the bind address. A
-				// browser started with --remote-debugging-address=0.0.0.0 hands
-				// full, unauthenticated control to the whole network. Only
-				// meaningful once something is actually listening.
-				const exposed = await probeCdpExposure({ port: target.port });
-				if (exposed.length > 0)
-					warn(
-						"agent-browser-cdp-exposure",
-						`CDP port ${target.port} also answers on ${exposed.join(", ")} — unauthenticated browser control is reachable off-host; bind the browser to 127.0.0.1`,
-					);
-				else pass("agent-browser-cdp-exposure", "CDP port is loopback-only");
-			} else {
+		if (browser.configReadable && browser.browserMcpEnabled)
+			pass("agent-browser-mcp", browser.configPath);
+		else if (!browser.configReadable)
+			fail(
+				"agent-browser-mcp",
+				`${browser.configPath} is missing or invalid JSON`,
+			);
+		else if (browser.browserMcp)
+			fail(
+				"agent-browser-mcp",
+				`${browser.configPath} contains a disabled agent-browser server`,
+			);
+		else
+			fail(
+				"agent-browser-mcp",
+				`${browser.configPath} has no agent-browser server entry`,
+			);
+
+		// How the entry reaches a browser. A config only names a port; without the
+		// probe below, an unreachable CDP target first shows up as a failed browser
+		// call in the middle of a Peer turn instead of as host unreadiness.
+		if (browser.browserMcpEnabled && browser.cdpTarget) {
+			const target = browser.cdpTarget;
+			if (target.mode === "launch") {
+				pass("agent-browser-cdp", describeCdpTarget(target));
+			} else if (target.mode === "ambiguous") {
 				fail(
 					"agent-browser-cdp",
-					`nothing answers CDP on 127.0.0.1:${target.port} (${probe.error}) — start the browser with --remote-debugging-port=${target.port}, or reinstall without --attach-cdp-port to use launch mode`,
+					`the agent-browser entry in ${browser.configPath} has ambiguous --cdp flags (duplicated with different ports, or one is missing its port) — leave exactly one "--cdp <port>"`,
 				);
+			} else {
+				const probe = await probeCdpEndpoint({ port: target.port });
+				if (probe.ok) {
+					pass(
+						"agent-browser-cdp",
+						`attached to 127.0.0.1:${target.port} (${probe.browser}) — a Peer granted BROWSER_MCP_AUTHORITY inherits every session in that profile`,
+					);
+					// Loopback reachability says nothing about the bind address. A
+					// browser started with --remote-debugging-address=0.0.0.0 hands
+					// full, unauthenticated control to the whole network. Only
+					// meaningful once something is actually listening.
+					const exposed = await probeCdpExposure({ port: target.port });
+					if (exposed.length > 0)
+						warn(
+							"agent-browser-cdp-exposure",
+							`CDP port ${target.port} also answers on ${exposed.join(", ")} — unauthenticated browser control is reachable off-host; bind the browser to 127.0.0.1`,
+						);
+					else pass("agent-browser-cdp-exposure", "CDP port is loopback-only");
+				} else {
+					fail(
+						"agent-browser-cdp",
+						`nothing answers CDP on 127.0.0.1:${target.port} (${probe.error}) — start the browser with --remote-debugging-port=${target.port}, or reinstall without --attach-cdp-port to use launch mode`,
+					);
+				}
 			}
 		}
 	}
