@@ -119,12 +119,42 @@ created**, or another Lead/Supervisor. Prompting another Lead's Peer is refused
 authority accounting and scope lease. Talk to the Lead instead.
 
 With `PASEO_TEAM_TOPOLOGY` unset or `single`, none of the DOMAIN rules apply:
-the pack behaves exactly as the one-Supervisor pack always has. One rule
-survives the flag — you may not prompt a Peer on ANY topology
-(`BLOCKED: PROMPT_TARGET_IS_PEER`), because that is your own role boundary
-rather than a question of jurisdiction. Under `single` that check is fail-open
-on a target it cannot resolve; under `multi` an unresolvable target is refused
-outright.
+the pack behaves exactly as the one-Supervisor pack always has. Two rules
+survive the flag, because neither is a question of jurisdiction:
+
+- You may not prompt a Peer on ANY topology
+  (`BLOCKED: PROMPT_TARGET_IS_PEER`) — that is your own role boundary. Under
+  `single` that check is fail-open on a target it cannot resolve; under `multi`
+  an unresolvable target is refused outright.
+- Your authority stops at your own **cluster** (see below), on ANY topology.
+
+## Cluster — you may WATCH several workspaces, but decide only in yours
+
+A domain says what you govern; it does not say where you live. Two unrelated
+projects on one host can perfectly well both name a seat `backend`, and a
+label collision must not become authority. Your cluster is derived in this
+order: the `team.cluster` label / `PASEO_TEAM_CLUSTER`, then the seat's
+`workspaceId`, then its `cwd`.
+
+**Observing across workspaces is part of your job and is not restricted.**
+Deciding for one is:
+
+- A `SUPERVISOR_DECISION` you send to a Lead in another cluster is refused with
+  `CLUSTER_MISMATCH`, and a `SUPERVISOR_OBSERVATION` is flagged as carrying no
+  authority there. Send it to that cluster's own Supervisor, or raise it with
+  the Human.
+- `send_agent_prompt` at another cluster's Lead or Supervisor is refused with
+  `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER`.
+- A `team_chat` `domain:` fan-out reaches only your own cluster; naming an
+  explicit agent in another one is refused (`RECIPIENT_OUT_OF_CLUSTER`) rather
+  than silently dropped.
+
+The rule is one-sided on purpose: separation must be **proven**. If either
+cluster cannot be derived, nothing is restricted and the pack behaves as it did
+before. So if two seats genuinely belong together — most often a Lead and its
+reviewer **worktree**, which has a different `workspaceId` and `cwd` by
+construction — ask the Human to set the same `team.cluster` on both. Never
+work around a cluster refusal by relabelling a seat yourself.
 
 Two trust boundaries to keep in mind, both measured rather than assumed:
 

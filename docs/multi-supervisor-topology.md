@@ -640,6 +640,91 @@ toàn bộ theo quyết định của user. Hai điều giữ lại cho lần sa
   giải phải là opt-in (một daemon điều phối được khai tường minh), không phải
   fail-closed trên cấu hình có sẵn.
 
+### PR-G — Trục cluster: governance dừng ở ranh giới workspace — ✅ ĐÃ LÀM
+
+**Triệu chứng.** `team.domain` trả lời "ghế này quản cái gì", chưa bao giờ trả
+lời "ghế này SỐNG ở đâu". Mọi phép đọc governance đều host-global một cách có
+chủ ý: `buildStateIndex` quét MỌI cwd-slug dưới `$PASEO_HOME/agents` (đúng —
+tra agent theo id phải tìm được bất kể cwd, `agent-state.test.mjs:90` assert
+điều đó), và fan-out `domain:` của `team_chat` chạy `paseo ls -g`, đúng cái cờ
+sinh ra để thoát scope cwd. Một project một host thì không lộ. Hai project thì
+lộ, ba đường:
+
+1. Hai repo không liên quan cùng đặt nhãn `backend` → mỗi Supervisor thành
+   contender của Lead bên kia → `JURISDICTION_OVERLAP` fail-closed trên một cụm
+   chỉ có MỘT Supervisor.
+2. `sendAgentPromptBlockReason` cho qua nhánh `target.role === "lead" ||
+   "supervisor"` — chỉ hỏi "target có phải coordinator", không hỏi "coordinator
+   CỦA AI" → Lead project A prompt được Lead project B.
+3. `normalizeScope` trả path **tương đối repo** (`src/index.ts` có ở mọi repo)
+   trong khi sổ lease là **một room toàn cục**. Claim `src` của project này
+   khoá `src` của mọi project; claim `.` khoá cả máy.
+
+Đường nguy hiểm nhất là (1)+(2) cộng `supervisorAttribution`, vốn chỉ xác minh
+"id này là ghế Supervisor" ở **bất cứ đâu trên host**: chỉ cần trùng tên domain
+là một Supervisor lạ nhận verdict `SUPERVISOR_DECISION_BINDING`, mà chỉ thị của
+verdict đó là *ACT ON IT … needs NO Human round-trip*.
+
+**Tiền đề đã chốt** (dung hoà hai câu mâu thuẫn trong deep-dive §0: "Supervisor
+quan sát nhiều session/workspace" vs "Lead là god trong project/workspace của
+nó"): **QUAN SÁT được phép xuyên workspace; THẨM QUYỀN thì không.**
+
+**Suy ra cluster, nguồn tường minh trước:** `team.cluster` /
+`PASEO_TEAM_CLUSTER` → `workspaceId` → `cwd` → null. Nhãn phải thắng vì
+workspace reviewer là **linked worktree** (chính
+`leadCreateWorkspaceBlockReason` bắt buộc thế), nên nó khác cả `workspaceId`
+lẫn `cwd` so với Lead sở hữu nó — chỉ nhãn khai tường minh mới giữ được hai ghế
+đó trong một cụm.
+
+**Luật nền: tách biệt phải được CHỨNG MINH.** `clustersSeparate` trả false khi
+một trong hai phía không xác định. Mọi luật cluster chỉ BỎ BỚT ràng buộc (loại
+contender, cho phép prompt, giải phóng scope), nên một câu trả lời chưa chắc
+chắn không được phép bỏ bớt. Cùng bản năng với luật typo của
+`PASEO_TEAM_TOPOLOGY`, chĩa ngược lại: đọc nhầm phải tốn một lời gọi bị chặn
+kèm lý do, không bao giờ được là governance tự tắt trong im lặng.
+
+#### Đã giao
+
+| Thành phần | Nơi |
+|---|---|
+| `TEAM_CLUSTER_LABEL`, `normalizeCluster`, `agentCluster`, `clustersSeparate`, `selfCluster`, `agentClustersById` | `policy-core.ts` |
+| `supervisorSeats(env, { cluster })` lọc contender theo cụm | `policy-core.ts` |
+| `CLUSTER_MISMATCH` trong `supervisorTurnVerdict` — **mọi topology** (decision → refuse, observation → warn) | `policy-core.ts` |
+| `PROMPT_TARGET_OUT_OF_CLUSTER` ở nhánh coordinator, **mọi topology**; parentage kiểm TRƯỚC nên subagent của chính mình trong worktree vẫn tới được | `policy-core.ts` `sendAgentPromptBlockReason` |
+| `LEASE_V1` thêm `CLUSTER:`; `leaseConflicts` chỉ va trong cùng cụm; `leaseHolderFor(leases, scope, cluster)` | `policy-core.ts`, `scripts/team-lease.mjs` |
+| Fan-out `domain:` lọc theo cụm; agent ref tường minh khác cụm ném `RECIPIENT_OUT_OF_CLUSTER` | `scripts/team-chat.mjs` |
+| Nối dây hai runtime (`cluster` trong `GovernanceContext` / `ClaudeToolDecisionInput`) | `paseo-team-policy.ts`, `claude-hook.mjs`, `claude-policy.ts` |
+
+Test: `test/cluster.test.mts` (22 case thuần) + case cluster trong
+`team-chat.test.mjs`.
+
+**Quyết định có chủ đích.**
+
+- **Không gate trên `PASEO_TEAM_TOPOLOGY`.** Cùng lý do với
+  `PROMPT_TARGET_IS_PEER`: đây không phải câu hỏi jurisdiction mà là câu hỏi
+  đứng trước nó — *thông điệp này có gửi cho project của tôi không*. Và `single`
+  mới là gói cần nhất, vì nó không chạy luật jurisdiction nào cả.
+- **Không bóp `buildStateIndex`.** Tầng reader phải thấy mọi cwd-slug; thu hẹp
+  nằm ở TẦNG POLICY. Bóp reader sẽ phá `agent-state.test.mjs` và làm hỏng chính
+  việc tra agent theo id.
+- **`CLUSTER:` là field THÊM VÀO, không gộp vào `SCOPE:`.** `SCOPE` giữ nguyên
+  nghĩa cũ nên gói chưa nâng cấp vẫn đọc được mọi bản ghi, và bản ghi cũ parse
+  ra cluster null — va chạm với tất cả, đúng hành vi tiền-cluster. Gộp vào
+  `SCOPE` sẽ làm mọi lease đang sống thành không đọc được với phía kia của một
+  rolling upgrade, mà lease không đọc được thì đọc ra "scope trống" = hai
+  writer.
+- **release/renew khớp theo tách-biệt-đã-chứng-minh, KHÔNG theo khoá.** Bản
+  nháp đầu key hoá `cluster+scope` rồi tra `live.get(key)`; hệ quả là lease
+  claim bởi gói cũ (cluster null) không thể release bằng gói mới (có cluster),
+  scope kẹt tới hết TTL. `test/team-lease.test.mjs:114` bắt được.
+
+**Chưa làm (có chủ đích).** `recovery_for` của Supervisor vẫn chỉ gate theo
+domain: `create_agent` tạo successor Lead làm subagent của chính nó, nên nó nằm
+trong cụm theo cấu tạo. Nếu sau này Supervisor được tạo agent ở workspace khác
+thì phải gate thêm ở đây.
+
+---
+
 ---
 
 ## 4. Việc phải làm xuyên suốt mọi PR
@@ -715,6 +800,7 @@ toàn bộ theo quyết định của user. Hai điều giữ lại cho lần sa
 | Chat retention / hiệu năng room hàng nghìn message | PR-B (nhẹ) | Dùng cursor `--since`, đo lúc làm |
 | Ngưỡng số agent làm wake/chat chậm | PR-B (nhẹ) | Đo lúc làm |
 | Chat cross-host: room per-daemon hay đồng bộ | PR-F | Đã khoanh ra ngoài. Nếu per-daemon thì cụm nhiều host có hai sổ lease — phải giải trước khi bật multi-lead cross-host |
+| Worktree reviewer phải khai `team.cluster` thủ công | PR-G (nhẹ) | Suy ra tự động không được: worktree khác cả `workspaceId` lẫn `cwd`. Nếu Paseo lộ ra repo gốc của worktree thì tự suy được |
 | Mention có đánh thức agent ở daemon khác không | PR-F | Chưa đo; khả năng cao là **không** (mention là chuyện của daemon giữ room) |
 | Fork một session **rất lớn** (vài MB) — thời gian copy + hành vi compaction thực tế | PR-E (nhẹ) | Cơ chế đã rõ (§1.2, §1.12); đã fork thật 486 entry ~tức thời, chưa đo mốc vài MB |
 

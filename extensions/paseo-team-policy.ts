@@ -84,6 +84,7 @@ import {
 	matchesPaseoToolName,
 	parseSupervisorBlock,
 	resolveLeases,
+	selfCluster,
 	sendAgentPromptTargetId,
 	supervisorAttribution,
 	supervisorSeats,
@@ -176,6 +177,9 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 		args,
 		leases: entries ? resolveLeases(entries, { now: Date.now() }) : null,
 		selfAgentId: process.env.PASEO_AGENT_ID?.trim() || null,
+		// A scope is repo-relative, so the board has to be read against THIS
+		// project's leases, not against every project on the host.
+		cluster: selfCluster(),
 	});
 }
 
@@ -194,6 +198,7 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 		topology,
 		selfAgentId: process.env.PASEO_AGENT_ID?.trim() || null,
 		selfDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
+		cluster: selfCluster(),
 	};
 	// Under `single` the ownership guard is off for a Lead, so it needs no
 	// lookup at all. The Supervisor still does: "a Supervisor does not task a
@@ -227,13 +232,17 @@ function supervisorNotice(prompt: string): string | null {
 	const block = parseSupervisorBlock(prompt);
 	if (!block) return null;
 	const topology = teamTopology();
+	const cluster = selfCluster();
 	let seats: SupervisorSeat[] = [];
 	// Only the overlap rule needs the full seat list, and only under `multi`.
 	// Reading every agent state on a `single` cluster would be a per-turn cost
 	// for an answer nothing consults.
 	if (topology === "multi") {
 		try {
-			seats = supervisorSeats();
+			// Scoped: a Supervisor in another project is not a claimant on this
+			// Lead, and counting it turned a shared label like `backend` into a
+			// fail-closed JURISDICTION_OVERLAP on a one-Supervisor cluster.
+			seats = supervisorSeats(process.env, { cluster });
 		} catch {
 			seats = [];
 		}
@@ -247,6 +256,7 @@ function supervisorNotice(prompt: string): string | null {
 		supervisors: seats,
 		attribution,
 		topology,
+		leadCluster: cluster,
 	});
 	return supervisorTurnNotice({ block, verdict, attribution });
 }

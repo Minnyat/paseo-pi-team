@@ -204,6 +204,10 @@ export interface ClaudeToolDecisionInput {
 	/** Ownership of a send_agent_prompt target, resolved by the hook. Undefined
 	 *  means "not needed"; null means "could not be resolved" (fail-closed). */
 	promptTarget?: AgentOwnership | null;
+	/** This seat's own cluster, resolved by the hook; see selfCluster. Scopes the
+	 *  lease board and the coordinator-to-coordinator prompt rule to one
+	 *  workspace. Undefined leaves both exactly as they were. */
+	cluster?: string | null;
 }
 
 function bashCommand(toolInput: unknown): string {
@@ -257,6 +261,7 @@ export function claudeToolBlockReason(
 			args: input.toolInput,
 			leases: input.leases ?? null,
 			selfAgentId: input.selfAgentId ?? null,
+			cluster: input.cluster,
 		});
 		if (leaseReason) return leaseReason;
 	}
@@ -290,6 +295,7 @@ export function claudeToolBlockReason(
 				targetId: sendAgentPromptTargetId(input.toolInput),
 				target: input.promptTarget ?? null,
 				topology: input.topology ?? "single",
+				cluster: input.cluster,
 			});
 		}
 		return null;

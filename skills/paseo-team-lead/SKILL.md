@@ -411,6 +411,7 @@ Bounds the transport forces, not preferences:
 | payload | `8192` bytes | `paseo chat post` takes the body as ARGV; Windows caps a command line near 32K, and the protocol budgets for the lowest platform |
 | hop / TTL | cooperative | Lead ↔ Lead is symmetric, so a relay without a bound ping-pongs. A relaying agent supplies its own `hop`: this stops a well-behaved loop and makes a bad one VISIBLE, it does not prevent one |
 | rooms | unrestricted unless `PASEO_TEAM_ROOMS` is set | chat rooms have no ACL of their own, so confinement has to come from this side |
+| audience | your own **cluster** | the fan-out runs `paseo ls -g`, the flag that escapes cwd scoping, so `domain:backend` used to mention every `backend` seat on the HOST — and a mention wakes an idle agent. Foreign seats drop out of a `domain:` broadcast; an explicit agent ref outside your cluster is refused (`RECIPIENT_OUT_OF_CLUSTER`) rather than dropped, because a deliberate address must fail loudly |
 
 Never type `paseo chat` in bash: the guard redirects it here, because the CLI
 carries none of the envelope, allowlist, ceiling or loop protection above.
@@ -430,6 +431,28 @@ whether the governance rules apply at all:
   strict costs one blocked call with a stated reason, while misreading toward
   loose turns governance off silently on a cluster the operator believes is
   governed.
+
+### Cluster — the second axis, and it is never topology-gated
+
+A domain says what a seat governs; a **cluster** says which workspace it lives
+in. Derived in order: the `team.cluster` label / `PASEO_TEAM_CLUSTER`, then
+`workspaceId`, then `cwd`. It exists because every governance read is
+host-global by design, so two projects on one machine used to reach into each
+other — a shared `backend` label made their Supervisors contenders, a Lead
+could prompt another project's Lead, and `src/index.ts` was one lease scope for
+the whole host.
+
+Authority stops at the cluster boundary; observation does not. A supervisor
+message from another workspace is `CLUSTER_MISMATCH` (a decision refused, an
+observation flagged), a coordinator prompt across it is
+`PROMPT_TARGET_OUT_OF_CLUSTER`, and scope leases are cluster-qualified. None of
+this is gated on `PASEO_TEAM_TOPOLOGY`, for the same reason
+`PROMPT_TARGET_IS_PEER` is not — it asks a question prior to jurisdiction.
+
+Separation must be **proven**: if either cluster cannot be derived, nothing is
+restricted. Your own subagents are always reachable, so a reviewer worktree —
+which derives a different cluster by construction — still works. If two seats
+genuinely belong together, the Human sets the same `team.cluster` on both.
 
 One thing is NOT topology-gated: the verdict on a supervisor message. Whenever
 your turn opens with a `SUPERVISOR_OBSERVATION` / `SUPERVISOR_DECISION`, the

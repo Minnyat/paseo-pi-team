@@ -224,11 +224,15 @@ function roleContextBlock(rolePrompt, role) {
 export function supervisorBlockNotice(core, role, block, env = process.env) {
 	if (role !== "lead" || !block) return null;
 	const topology = core.teamTopology(env);
+	const cluster = core.selfCluster(env);
 	let seats = [];
 	// Only the overlap rule needs the seat list, and only under `multi`.
 	if (topology === "multi") {
 		try {
-			seats = core.supervisorSeats(env);
+			// Cluster-scoped, exactly as the Pi adapter does it: a Supervisor in
+			// another workspace is not a contender for this Lead, and counting
+			// one turned a shared domain label into a fail-closed overlap.
+			seats = core.supervisorSeats(env, { cluster });
 		} catch {
 			seats = [];
 		}
@@ -243,6 +247,7 @@ export function supervisorBlockNotice(core, role, block, env = process.env) {
 		supervisors: seats,
 		attribution,
 		topology,
+		leadCluster: cluster,
 	});
 	return core.supervisorTurnNotice({ block, verdict, attribution });
 }
@@ -434,6 +439,7 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			selfAgentId: env.PASEO_AGENT_ID?.trim() || null,
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
+			cluster: core.selfCluster(env),
 			promptTarget: promptTargetForDecision(
 				{ core, claude },
 				role,
