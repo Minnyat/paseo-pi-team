@@ -212,13 +212,65 @@ export function mergeBrowserMcpServer(config, { cdpPort = null } = {}) {
 	return next;
 }
 
+/**
+ * Remove ONLY an entry this installer wrote.
+ *
+ * `mergeBrowserMcpServer` deliberately never rewrites a pre-existing entry, on
+ * the grounds that agent-browser is a general-purpose tool a user may already
+ * run with their own flags. Remove has to honour the same ownership rule or the
+ * pair is asymmetric in the destructive direction: install would respectfully
+ * leave a user's config alone and uninstall would delete it, recoverable only
+ * from the .bak-* sibling by someone who thought to look. We never took
+ * ownership of that entry, so we do not get to take it away.
+ */
 export function removeBrowserMcpServer(config) {
 	const next = { ...(config ?? {}) };
-	if (!next.mcpServers?.[AGENT_BROWSER_MCP_SERVER]) return next;
+	const existing = next.mcpServers?.[AGENT_BROWSER_MCP_SERVER];
+	if (!existing) return next;
+	if (!isOwnBrowserMcpServer(existing)) return next;
 	const servers = { ...next.mcpServers };
 	delete servers[AGENT_BROWSER_MCP_SERVER];
 	next.mcpServers = servers;
 	return next;
+}
+
+/**
+ * Ours iff it is EXACTLY what `browserMcpConfig({dialect:"claude"})` writes for
+ * the port the entry itself names. The port is the one field the installer
+ * varies (`--attach-cdp-port`), so it is read back off the entry rather than
+ * guessed; everything else — the `type`, the command, the arg order, the
+ * absence of any key we never write — has to match a freshly rendered config.
+ * Comparing against the real renderer, instead of a hand-listed set of fields,
+ * means this cannot drift the next time that shape changes.
+ */
+export function isOwnBrowserMcpServer(server) {
+	if (!server || typeof server !== "object" || Array.isArray(server)) return false;
+	const args = Array.isArray(server.args) ? server.args : null;
+	if (!args) return false;
+	const at = args.indexOf("--cdp");
+	let ours;
+	try {
+		ours = browserMcpConfig({
+			cdpPort: at === -1 ? null : args[at + 1],
+			dialect: "claude",
+		});
+	} catch {
+		// An unusable port is not something this installer ever wrote.
+		return false;
+	}
+	return stableJson(server) === stableJson(ours);
+}
+
+/** Key-order-independent structural compare, so a re-serialized file matches. */
+function stableJson(value) {
+	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+	if (value && typeof value === "object") {
+		return `{${Object.keys(value)
+			.sort()
+			.map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "null";
 }
 
 /**
@@ -345,14 +397,28 @@ export async function install(env = process.env, { cdpPort = null } = {}) {
 		}),
 		// Both servers go through ONE transform: two passes over the same file
 		// would mean two backups and two writes for a single install.
-		mcp: conflict
-			? { path: userConfigPath, status: "failed", error: conflict }
-			: applyToFile(
-					userConfigPath,
-					(current) =>
-						mergeBrowserMcpServer(mergeMcpServer(current, env), { cdpPort: port }),
-					{ label: "~/.claude.json" },
-				),
+		//
+		// A browser conflict must NOT take the team server down with it. The two
+		// entries are independent — `agent-browser` is a general-purpose tool the
+		// user may already run on their own port, `paseo-team` is ours and is the
+		// only way a Lead or Peer reaches team_chat, team_lease or peer_ask_lead.
+		// Skipping both left hooks ALREADY written (mergeHooks runs first) beside
+		// a fleet with no team tools at all: the seats come up governed and
+		// mute. So the conflict skips exactly the entry it is about.
+		mcp: applyToFile(
+			userConfigPath,
+			(current) => {
+				const withTeam = mergeMcpServer(current, env);
+				return conflict ? withTeam : mergeBrowserMcpServer(withTeam, { cdpPort: port });
+			},
+			{ label: "~/.claude.json" },
+		),
+		// Reported separately so the conflict is still visible and still fails
+		// the install — the user has to resolve the port before the browser
+		// surface works — without pretending the team server failed too.
+		browserMcp: conflict
+			? { path: userConfigPath, status: "skipped", error: conflict }
+			: { path: userConfigPath, status: "ok" },
 	};
 	return {
 		action: "install",
@@ -360,7 +426,10 @@ export async function install(env = process.env, { cdpPort = null } = {}) {
 		mcpScript: mcpScriptPath(env),
 		...results,
 		providers: await buildProviderSnippet(env),
-		ok: results.hooks.status !== "failed" && results.mcp.status !== "failed",
+		ok:
+			results.hooks.status !== "failed" &&
+			results.mcp.status !== "failed" &&
+			results.browserMcp.status !== "skipped",
 	};
 }
 

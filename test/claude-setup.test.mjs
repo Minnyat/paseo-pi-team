@@ -26,12 +26,13 @@ import {
 	uninstall,
 	verify,
 	mergeBrowserMcpServer,
+	isOwnBrowserMcpServer,
 	removeBrowserMcpServer,
 	HOOK_EVENTS,
 	PASEO_TEAM_HOOK_TAG,
 	TEAM_MCP_SERVER_NAME,
 } from "../scripts/claude-setup.mjs";
-import { AGENT_BROWSER_MCP_SERVER } from "../scripts/browser-setup.mjs";
+import { AGENT_BROWSER_MCP_SERVER, browserMcpConfig } from "../scripts/browser-setup.mjs";
 
 const home = mkdtempSync(join(tmpdir(), "paseo-claude-setup-"));
 const claudeDir = join(home, ".claude");
@@ -359,15 +360,78 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		PASEO_TEAM_CLAUDE_USER_CONFIG: conflictConfig,
 	};
 	const result = await install(conflictEnv, { cdpPort: 9222 });
+	// The conflict still fails the install — the user has to resolve the port
+	// before the browser surface works — but it is reported against the entry it
+	// is ABOUT, and it no longer takes the team server down with it.
 	assert.equal(result.ok, false);
-	assert.equal(result.mcp.status, "failed");
-	assert.match(result.mcp.error, /9222/);
+	assert.equal(result.browserMcp.status, "skipped");
+	assert.match(result.browserMcp.error, /9222/);
+	assert.notEqual(
+		result.mcp.status,
+		"failed",
+		"a browser-port conflict must not fail the paseo-team registration",
+	);
+	const written = JSON.parse(readFileSync(conflictConfig, "utf8"));
 	assert.deepEqual(
-		JSON.parse(readFileSync(conflictConfig, "utf8")).mcpServers[AGENT_BROWSER_MCP_SERVER].args,
+		written.mcpServers[AGENT_BROWSER_MCP_SERVER].args,
 		["mcp"],
 		"the user's entry is left exactly as it was",
 	);
+	// The regression this guards: mergeHooks runs FIRST and has already written
+	// settings.json by now, so skipping the whole mcp transform left a fleet
+	// governed by hooks with no team_chat, team_lease or peer_ask_lead at all —
+	// seats that come up policed and mute.
+	assert.ok(
+		written.mcpServers[TEAM_MCP_SERVER_NAME],
+		"paseo-team must be registered even when the browser entry conflicts",
+	);
 	rmSync(conflictDir, { recursive: true, force: true });
+}
+
+// --- uninstall is symmetric with merge: we only remove what we wrote ---------
+{
+	// mergeBrowserMcpServer deliberately never rewrites a valid pre-existing
+	// entry — agent-browser is a general-purpose tool a user may already run
+	// with their own flags. Remove has to honour the same ownership rule, or the
+	// pair is asymmetric in the DESTRUCTIVE direction: install politely leaves
+	// the user's config alone and uninstall deletes it.
+	const mine = browserMcpConfig({ dialect: "claude" });
+	const attached = browserMcpConfig({ cdpPort: 9333, dialect: "claude" });
+
+	assert.ok(isOwnBrowserMcpServer(mine), "a launch-mode entry we wrote is ours");
+	assert.ok(isOwnBrowserMcpServer(attached), "an --attach-cdp-port entry is ours too");
+	assert.ok(
+		isOwnBrowserMcpServer({ args: mine.args, command: mine.command, type: mine.type }),
+		"key order is not identity — a re-serialized file still matches",
+	);
+	// Anything the user shaped is theirs, whatever it resembles.
+	assert.equal(isOwnBrowserMcpServer({ ...mine, disabled: false }), false);
+	assert.equal(isOwnBrowserMcpServer({ ...mine, args: ["mcp", "--tools", "click"] }), false);
+	assert.equal(isOwnBrowserMcpServer({ ...mine, command: "my-agent-browser" }), false);
+	assert.equal(isOwnBrowserMcpServer(null), false);
+	assert.equal(isOwnBrowserMcpServer({ command: "agent-browser" }), false, "no args is not ours");
+
+	const theirs = {
+		mcpServers: {
+			[AGENT_BROWSER_MCP_SERVER]: {
+				type: "stdio",
+				command: "agent-browser",
+				args: ["--cdp", "9222", "mcp"],
+				disabled: false,
+			},
+		},
+	};
+	assert.deepEqual(
+		removeBrowserMcpServer(theirs).mcpServers[AGENT_BROWSER_MCP_SERVER],
+		theirs.mcpServers[AGENT_BROWSER_MCP_SERVER],
+		"uninstall leaves an entry the user configured",
+	);
+	assert.equal(
+		removeBrowserMcpServer({ mcpServers: { [AGENT_BROWSER_MCP_SERVER]: mine } })
+			.mcpServers[AGENT_BROWSER_MCP_SERVER],
+		undefined,
+		"uninstall still removes the entry we wrote",
+	);
 }
 
 rmSync(home, { recursive: true, force: true });
