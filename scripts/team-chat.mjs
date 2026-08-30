@@ -39,7 +39,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
+import { importPolicyCore, isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
+
+const { agentClustersById, clustersSeparate, normalizeCluster, selfCluster } =
+	await importPolicyCore();
 
 export const TEAM_MESSAGE_HEADER = "TEAM_MESSAGE_V1";
 
@@ -172,13 +175,48 @@ export function validateTeamMessage(input) {
 }
 
 /**
+ * Cluster for a `paseo ls` row — from the state file, or not at all.
+ *
+ * This used to fall back to the row's `cwd`, which looked like free information
+ * and was in fact a guess that NARROWS. `agentCluster` resolves
+ * `team.cluster → workspaceId → cwd`, so a seat whose state file exists
+ * normally answers on the `workspaceId` rung while a seat Paseo has not written
+ * state for yet would answer on the `cwd` rung. Comparing those two is
+ * comparing different axes: `clustersSeparate` says "separate", and a perfectly
+ * legitimate recipient is dropped from a broadcast in silence.
+ *
+ * So an unresolvable row is null — "could not tell" — and null never narrows
+ * anything. The cost is that a freshly created foreign seat stays in an
+ * audience until Paseo writes its state; the alternative cost is silently not
+ * delivering to one of our own, which is the worse of the two.
+ */
+function rowCluster(row, clusters) {
+	return (row?.id ? clusters[row.id] : null) ?? null;
+}
+
+/**
  * Turn `to` entries into mention tokens. `domain:<name>` is expanded here
  * because Paseo delivers mentions by agent id only (measured) — a label
  * mention parses but never reaches anyone.
+ *
+ * The expansion runs `paseo ls -g`, and `-g` is precisely the flag that escapes
+ * cwd scoping — so before the cluster axis existed, `domain:backend` mentioned
+ * every `backend` seat ON THE HOST, and a mention WAKES an idle agent. A team
+ * naming its seats `backend` in two repos silently rang both. Recipients are
+ * therefore confined to this seat's cluster, and the two kinds of recipient
+ * fail differently on purpose:
+ *
+ *   - a `domain:` entry is a BROADCAST, so a foreign seat is simply not in the
+ *     audience — dropped quietly, and NO_RECIPIENTS still fires if that empties
+ *     the list, so the fan-out can never shrink to silence unnoticed;
+ *   - an explicit agent ref is a DELIBERATE address, and silently dropping one
+ *     would post a message its author believes was delivered. That one throws.
  */
 export async function expandRecipients(to, options = {}) {
 	const run = options.runPaseo ?? runPaseo;
 	const self = options.selfAgentId ?? null;
+	const own =
+		options.cluster === undefined ? selfCluster() : normalizeCluster(options.cluster);
 	const mentions = [];
 	const agentIds = [];
 	const seen = new Set();
@@ -210,14 +248,28 @@ export async function expandRecipients(to, options = {}) {
 				// failure, not a smaller broadcast.
 				throw bad("RECIPIENT_EXPANSION_FAILED", `RECIPIENT_EXPANSION_FAILED: could not resolve domain '${domain}': ${String(error?.message ?? error)}`);
 			}
-			const list = Array.isArray(rows) ? rows : [];
+			const all = Array.isArray(rows) ? rows : [];
+			const clusters = agentClustersById(all.map((row) => row?.id));
+			const list = all.filter((row) => !clustersSeparate(rowCluster(row, clusters), own));
 			for (const row of list) add(row?.id, typeof row?.shortId === "string" ? row.shortId : undefined);
 			if (list.length === 0 || list.every((row) => row?.id === self)) {
-				throw bad("NO_RECIPIENTS", `no recipient carries team.domain=${domain}`);
+				throw bad(
+					"NO_RECIPIENTS",
+					all.length === 0
+						? `no recipient carries team.domain=${domain}`
+						: `no recipient carries team.domain=${domain} inside this seat's cluster ${JSON.stringify(own)} (${all.length} seat(s) carry it in other clusters, and a domain broadcast does not cross a cluster)`,
+				);
 			}
 			continue;
 		}
 		if (!AGENT_REF.test(entry)) throw bad("RECIPIENT_INVALID", `invalid recipient '${entry}'`);
+		const targetCluster = agentClustersById([entry])[entry] ?? null;
+		if (clustersSeparate(targetCluster, own)) {
+			throw bad(
+				"RECIPIENT_OUT_OF_CLUSTER",
+				`RECIPIENT_OUT_OF_CLUSTER: agent ${entry} is in cluster ${JSON.stringify(targetCluster)}, not this seat's ${JSON.stringify(own)}. Coordination stays inside one cluster; if these really are one cluster, set team.cluster/PASEO_TEAM_CLUSTER on both seats.`,
+			);
+		}
 		add(entry, entry.slice(0, 7));
 	}
 	if (mentions.length === 0) throw bad("NO_RECIPIENTS", "no recipient resolved");
@@ -410,6 +462,10 @@ function selfContext(options) {
 		role,
 		selfAgentId,
 		domain: (options.domain ?? process.env.PASEO_TEAM_DOMAIN ?? "").trim() || null,
+		cluster:
+			options.cluster === undefined
+				? selfCluster()
+				: normalizeCluster(options.cluster),
 		rooms: options.rooms ?? process.env.PASEO_TEAM_ROOMS,
 	};
 }
@@ -423,7 +479,11 @@ export async function postTeamMessage(input, options = {}) {
 	const run = options.runPaseo ?? runPaseo;
 	// A record resolves no recipients, so it also costs no `paseo ls` round trip.
 	const { mentions, agentIds } = message.notify
-		? await expandRecipients(message.to, { runPaseo: run, selfAgentId: ctx.selfAgentId })
+		? await expandRecipients(message.to, {
+				runPaseo: run,
+				selfAgentId: ctx.selfAgentId,
+				cluster: ctx.cluster,
+			})
 		: { mentions: [], agentIds: [] };
 	const body = buildEnvelope(message, {
 		fromAgentId: ctx.selfAgentId,
@@ -486,11 +546,30 @@ export async function readRoom(input, options = {}) {
 	return { ok: true, room, count: messages.length, messages };
 }
 
+/**
+ * `paseo chat ls` is fleet-wide: it returns every room on the daemon, including
+ * rooms opened by a team working in a different repository. Listing them
+ * unfiltered defeats the allowlist that `post` and `read` enforce — an agent
+ * that may not read a room should not learn its name and id either, because a
+ * discovered room is one the model will try to talk into. Measured 2026-08-30:
+ * a Supervisor in one repo found another repo's lease room this way, addressed
+ * that team's Lead, and reported the WRONG PROJECT'S status back to the human.
+ *
+ * Unset PASEO_TEAM_ROOMS still lists everything, so this only tightens the
+ * configuration that already asked to be tightened.
+ */
 export async function listRooms(options = {}) {
-	selfContext(options);
+	const ctx = selfContext(options);
 	const run = options.runPaseo ?? runPaseo;
 	const rows = await run(["chat", "ls"]);
-	return { ok: true, rooms: Array.isArray(rows) ? rows : [] };
+	const all = Array.isArray(rows) ? rows : [];
+	// A room is addressable by either name or id, so either matching the
+	// allowlist keeps it visible; neither matching hides it.
+	const rooms = all.filter(
+		(row) => roomAllowed(row?.name, ctx.rooms) || roomAllowed(row?.id, ctx.rooms),
+	);
+	const hidden = all.length - rooms.length;
+	return hidden > 0 ? { ok: true, rooms, hidden } : { ok: true, rooms };
 }
 
 async function main() {

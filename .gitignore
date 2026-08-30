@@ -20,3 +20,10 @@ auth.json
 # the next session drops a file in it.
 .zcode/
 .claude/
+
+# Built policy core. `extensions/paseo-team-core/*.ts` is the source; `npm run
+# build` emits the `.js` beside it because Node refuses to strip types under
+# `node_modules`, so an installed `pteam` can only load the built variant
+# (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). Generated, never edited.
+extensions/paseo-team-core/*.js
+*.tsbuildinfo

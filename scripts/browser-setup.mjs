@@ -30,6 +30,7 @@ import {
 } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { isEntrypoint } from "./lib-common.mjs";
 
 export const AGENT_BROWSER_PACKAGE = "agent-browser";
 export const AGENT_BROWSER_MCP_SERVER = "agent-browser";
@@ -70,7 +71,21 @@ function describeValue(value) {
 }
 
 /**
- * MCP entry for the agent-browser stdio server.
+ * The runtimes that read an agent-browser entry, and the config format each
+ * one expects. The server is the same process either way; only the surrounding
+ * fields differ, so writing one shape into both files yields a config that
+ * half-works — pi ignoring `type`, Claude ignoring `lifecycle`.
+ *
+ *   "pi"     ~/.pi/agent/mcp.json — pi-mcp-adapter honours `lifecycle: "lazy"`,
+ *            which keeps the server unconnected until a turn needs it.
+ *   "claude" ~/.claude.json — Claude Code wants an explicit transport `type`,
+ *            the same shape claude-setup.mjs writes for the paseo-team server.
+ */
+export const MCP_DIALECTS = ["pi", "claude"];
+
+/**
+ * MCP entry for the agent-browser stdio server, in the dialect of the runtime
+ * that will read it.
  *
  * `cdpPort: null` (the default) is launch mode: agent-browser starts its own
  * browser, which carries no ambient credentials — the isolation that makes a
@@ -81,16 +96,22 @@ function describeValue(value) {
  * agent-browser takes --cdp as a global flag, before the subcommand:
  *   agent-browser --cdp 9222 mcp
  */
-export function browserMcpConfig({ cdpPort = null } = {}) {
+export function browserMcpConfig({ cdpPort = null, dialect = "pi" } = {}) {
+	// Fail closed rather than defaulting to pi: an unrecognised dialect would
+	// otherwise write a file the target runtime cannot read, and the symptom
+	// (a role that simply has no browser tool) points nowhere near this line.
+	if (!MCP_DIALECTS.includes(dialect)) {
+		throw new Error(
+			`unknown MCP dialect ${describeValue(dialect)} (expected ${MCP_DIALECTS.join(" or ")})`,
+		);
+	}
 	const args =
 		cdpPort === null || cdpPort === undefined
 			? ["mcp"]
 			: ["--cdp", String(assertCdpPort(cdpPort)), "mcp"];
-	return {
-		command: "agent-browser",
-		args,
-		lifecycle: "lazy",
-	};
+	return dialect === "claude"
+		? { type: "stdio", command: "agent-browser", args }
+		: { command: "agent-browser", args, lifecycle: "lazy" };
 }
 
 /**
@@ -279,7 +300,10 @@ export function resolveExistingEntryDecision(existing, requestedCdpPort = null) 
 }
 
 /** Add agent-browser only when the user has not configured that server yet. */
-export function mergeAgentBrowserMcpConfig(config, { cdpPort = null } = {}) {
+export function mergeAgentBrowserMcpConfig(
+	config,
+	{ cdpPort = null, dialect = "pi" } = {},
+) {
 	const source =
 		config && typeof config === "object" && !Array.isArray(config)
 			? config
@@ -296,7 +320,7 @@ export function mergeAgentBrowserMcpConfig(config, { cdpPort = null } = {}) {
 		...source,
 		mcpServers: {
 			...servers,
-			[AGENT_BROWSER_MCP_SERVER]: browserMcpConfig({ cdpPort }),
+			[AGENT_BROWSER_MCP_SERVER]: browserMcpConfig({ cdpPort, dialect }),
 		},
 	};
 }
@@ -599,7 +623,12 @@ export function installAgentBrowser({
 	};
 }
 
-if (process.argv.includes("--install")) {
+// Run the installer only when this file IS the program. A bare argv check
+// would also fire for every importer that is itself running an install:
+// claude-setup.mjs imports the entry shape from here and is invoked with
+// exactly that flag, which would silently turn one runtime's install into
+// both runtimes' installs.
+if (isEntrypoint(import.meta.url, process.argv[1]) && process.argv.includes("--install")) {
 	const valueAfter = (flag) => {
 		const index = process.argv.indexOf(flag);
 		return index >= 0 ? process.argv[index + 1] : undefined;

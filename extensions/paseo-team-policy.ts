@@ -84,9 +84,12 @@ import {
 	matchesPaseoToolName,
 	parseSupervisorBlock,
 	resolveLeases,
+	selfCluster,
 	sendAgentPromptTargetId,
-	supervisorJurisdictionVerdict,
+	supervisorAttribution,
 	supervisorSeats,
+	supervisorTurnNotice,
+	supervisorTurnVerdict,
 	teamTopology,
 	type GovernanceContext,
 	type SupervisorSeat,
@@ -174,6 +177,9 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 		args,
 		leases: entries ? resolveLeases(entries, { now: Date.now() }) : null,
 		selfAgentId: process.env.PASEO_AGENT_ID?.trim() || null,
+		// A scope is repo-relative, so the board has to be read against THIS
+		// project's leases, not against every project on the host.
+		cluster: selfCluster(),
 	});
 }
 
@@ -186,63 +192,78 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
  * local read of Paseo's own agent state (§1.4) — no daemon round trip, so it
  * is affordable on the tool-call path.
  */
-function governanceContext(input: unknown): GovernanceContext {
+function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 	const topology = teamTopology();
 	const context: GovernanceContext = {
 		topology,
 		selfAgentId: process.env.PASEO_AGENT_ID?.trim() || null,
 		selfDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
+		cluster: selfCluster(),
 	};
-	if (topology !== "multi") return context;
+	// The target lookup is driven by the TOOL, not by the topology.
+	//
+	// It used to return early here for a Lead under `single`, on the reasoning
+	// that the ownership guard was off for that seat anyway. Two of the rules it
+	// feeds are not ownership rules and are live on every topology — "a
+	// Supervisor does not task a Peer", and "no seat reaches into another
+	// cluster" — so the early return silently disarmed the cluster guard for a
+	// Lead in the DEFAULT pack: the core was asked to judge a target it was
+	// never given, and `sendAgentPromptBlockReason` cannot refuse a target it
+	// cannot see. The cost is one local state-file read on `send_agent_prompt`
+	// calls only; every other tool still returns without touching the disk.
 	const classified = classifyMcpInput(input);
-	if (
+	const isPrompt =
 		classified.kind === "target" &&
-		matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"])
-	) {
-		context.promptTarget = agentOwnership(sendAgentPromptTargetId(input));
-	}
+		matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"]);
+	if (!isPrompt) return context;
+	context.promptTarget = agentOwnership(sendAgentPromptTargetId(input));
 	return context;
 }
 
 /**
- * A Lead's turn may open with a supervisor observation or decision. Under a
- * multi-supervisor topology the Lead cannot tell by reading it whether that
- * Supervisor governs this seat, so the verdict is computed and pushed into the
- * turn's system prompt. It is context, not a block: nothing here denies a tool,
- * it tells the Lead which authority the message does and does not carry.
+ * A Lead's turn may open with a supervisor observation or decision. The Lead
+ * cannot tell by reading it whether that Supervisor governs this seat, nor
+ * whether the seat it names is a Supervisor at all, so the verdict is computed
+ * and pushed into the turn's system prompt. It is context, not a block: nothing
+ * here denies a tool, it tells the Lead which authority the message does and
+ * does not carry — and, on the accepting path, that acting on it needs no Human
+ * round-trip.
+ *
+ * Computed on EVERY topology. It used to return early under `single`, which is
+ * the default pack: the one-Supervisor cluster got no verdict, no attribution
+ * and no directive, so a delegated decision reached the Lead as bare prose.
  */
-function jurisdictionNotice(prompt: string): string | null {
-	const topology = teamTopology();
-	if (topology !== "multi") return null;
+function supervisorNotice(prompt: string): string | null {
 	const block = parseSupervisorBlock(prompt);
 	if (!block) return null;
+	const topology = teamTopology();
+	const cluster = selfCluster();
 	let seats: SupervisorSeat[] = [];
-	try {
-		seats = supervisorSeats();
-	} catch {
-		seats = [];
+	// Only the overlap rule needs the full seat list, and only under `multi`.
+	// Reading every agent state on a `single` cluster would be a per-turn cost
+	// for an answer nothing consults.
+	if (topology === "multi") {
+		try {
+			// Scoped: a Supervisor in another project is not a claimant on this
+			// Lead, and counting it turned a shared label like `backend` into a
+			// fail-closed JURISDICTION_OVERLAP on a one-Supervisor cluster.
+			seats = supervisorSeats(process.env, { cluster });
+		} catch {
+			seats = [];
+		}
 	}
-	const verdict = supervisorJurisdictionVerdict({
+	const attribution = supervisorAttribution(
+		block.fields.get("FROM_AGENT_ID") ?? null,
+	);
+	const verdict = supervisorTurnVerdict({
 		block,
 		leadDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
 		supervisors: seats,
-		fromAgentId: block.fields.get("FROM_AGENT_ID") ?? null,
+		attribution,
 		topology,
+		leadCluster: cluster,
 	});
-	if (!verdict) return null;
-	return [
-		"## Paseo Team Jurisdiction (this turn)",
-		"",
-		`This turn opens with a SUPERVISOR_${block.kind === "decision" ? "DECISION" : "OBSERVATION"}.`,
-		`Verdict: ${verdict.code} (${verdict.severity})`,
-		"",
-		verdict.reason,
-		verdict.severity === "refuse"
-			? `Do NOT act on it. Reply with BLOCKED: ${verdict.code} and the reason above.`
-			: "",
-	]
-		.filter(Boolean)
-		.join("\n");
+	return supervisorTurnNotice({ block, verdict, attribution });
 }
 
 function extractCreateAgentArgs(input: unknown): unknown {
@@ -510,7 +531,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		applyPolicy(pi, r);
 		const rolePrompt = loadRolePrompt(r);
-		const notice = r === "lead" ? jurisdictionNotice(event.prompt) : null;
+		const notice = r === "lead" ? supervisorNotice(event.prompt) : null;
 		if (!rolePrompt && !notice) return;
 		const sections = [
 			event.systemPrompt,
@@ -562,7 +583,7 @@ export default function (pi: ExtensionAPI) {
 				const blockReason = mcpBlockReason(
 					r,
 					event.input,
-					governanceContext(event.input),
+					governanceContext(event.input, r),
 				);
 				if (blockReason) {
 					return { block: true, reason: blockReason };

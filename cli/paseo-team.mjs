@@ -256,21 +256,37 @@ function cmdInstall(argv) {
 function cmdClaudeSetup(argv) {
 	const known = ["--install", "--verify", "--uninstall", "--print-providers"];
 	const passthrough = ["--json"];
+	// --attach-cdp-port takes a value, so it is filtered as a pair rather than
+	// as a bare flag: the port must not fall through to the unknown-flag check.
+	const valued = ["--attach-cdp-port"];
 	// Fail closed on anything unrecognised: silently degrading a mistyped
 	// --instal into a read-only --verify would report success for work that
 	// never happened, and the rest of this CLI rejects unknown flags outright.
-	const unknown = argv.filter(
+	const valuedArgs = [];
+	const bareFlags = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (!valued.includes(argv[i])) {
+			bareFlags.push(argv[i]);
+			continue;
+		}
+		if (argv[i + 1] === undefined) fail(`claude-setup: ${argv[i]} needs a value`);
+		valuedArgs.push(argv[i], argv[++i]);
+	}
+	const unknown = bareFlags.filter(
 		(arg) => !known.includes(arg) && !passthrough.includes(arg),
 	);
 	if (unknown.length > 0) {
 		fail(
-			`claude-setup: unknown flag '${unknown[0]}' (allowed: ${[...known, ...passthrough].join(", ")})`,
+			`claude-setup: unknown flag '${unknown[0]}' (allowed: ${[...known, ...passthrough, ...valued].join(", ")})`,
 		);
 	}
-	const modes = argv.filter((arg) => known.includes(arg));
+	const modes = bareFlags.filter((arg) => known.includes(arg));
 	if (modes.length > 1) fail(`claude-setup: pick one of ${known.join(", ")}`);
 	const mode = modes[0] ?? "--verify";
-	const rest = argv.filter((arg) => passthrough.includes(arg));
+	if (valuedArgs.length > 0 && mode !== "--install") {
+		fail(`claude-setup: ${valuedArgs[0]} is only valid with --install`);
+	}
+	const rest = [...bareFlags.filter((arg) => passthrough.includes(arg)), ...valuedArgs];
 	const res = spawnSync(
 		process.execPath,
 		[join(ROOT, "scripts", "claude-setup.mjs"), mode, ...rest],
@@ -582,6 +598,7 @@ usage:
   pteam status
   pteam preflight [--strict] [--json] [--skip-models] [--runtime pi|claude|both] [--host-id <id>] [--cluster <path>] [--routes <path>]
   pteam claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
+                     [--attach-cdp-port <port>]   (with --install)
   pteam config read  <section>
   pteam config write <section>             (JSON body on stdin)
   pteam prompts read <role>                (supervisor|lead|peer)

@@ -82,6 +82,14 @@ mkdir -p "$HOME/.paseo-pi-team"
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
 rm -rf "$EXT_DIR/$POLICY_CORE_DIR"
 cp -R "$ROLE_PACK_ROOT/extensions/$POLICY_CORE_DIR" "$EXT_DIR/$POLICY_CORE_DIR"
+# The built .js NEVER travels here. It exists only to satisfy an installed npm
+# package, where Node refuses to strip types under node_modules; this directory
+# is not under node_modules, so .ts loads fine. Copying both would install two
+# sources of truth for one rule set, and every loader prefers .js — so a source
+# tree built once and edited since would have pi read the CURRENT .ts while the
+# Claude hook and pteam read the STALE .js. Two runtimes, different rules, no
+# signal. Deleting it leaves exactly one answer to "what does the policy say".
+rm -f "$EXT_DIR/$POLICY_CORE_DIR"/*.js
 cp -f "$ROLE_PACK_ROOT"/prompts/*.md "$PROMPT_DIR/"
 rm -rf "$SKILL_DIR"
 cp -R "$ROLE_PACK_ROOT/skills/paseo-team-lead" "$SKILL_DIR"
@@ -99,7 +107,9 @@ if ! node "$ROLE_PACK_ROOT/scripts/ocr-setup.mjs"; then
   exit 1
 fi
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
-# idempotent and merges only the missing agent-browser entry in Pi's MCP config.
+# idempotent and merges only the missing agent-browser entry in Pi's MCP config;
+# the Claude half of that registration is done by claude-setup.mjs below, which
+# owns ~/.claude.json.
 BROWSER_SETUP_ARGS=(--install)
 if [[ -z "${PI_CODING_AGENT_DIR:-}" ]]; then
   BROWSER_SETUP_ARGS+=(--pi-home "$PI_HOME")
@@ -116,14 +126,20 @@ fi
 # pi-only host is a supported configuration.
 CLAUDE_SETUP_STATUS="skipped (claude CLI not found)"
 if command -v claude >/dev/null 2>&1; then
+  # Same --attach-cdp-port the pi entry got: the two runtimes must reach the
+  # same browser, or a task moved between seats silently changes what it drives.
+  CLAUDE_SETUP_ARGS=(--install)
+  if [[ -n "$ATTACH_CDP_PORT" ]]; then
+    CLAUDE_SETUP_ARGS+=(--attach-cdp-port "$ATTACH_CDP_PORT")
+  fi
   # Point the hook/MCP registrations at the INSTALLED copies, so moving or
   # deleting this checkout cannot break a configured Claude agent.
   if env \
     PASEO_TEAM_HOOK_SCRIPT="$TEAM_SCRIPTS_DIR/claude-hook.mjs" \
     PASEO_TEAM_MCP_SCRIPT="$TEAM_SCRIPTS_DIR/claude-team-mcp.mjs" \
     PASEO_TEAM_POLICY_DIR="$EXT_DIR/$POLICY_CORE_DIR" \
-    node "$ROLE_PACK_ROOT/scripts/claude-setup.mjs" --install; then
-    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server)"
+    node "$ROLE_PACK_ROOT/scripts/claude-setup.mjs" "${CLAUDE_SETUP_ARGS[@]}"; then
+    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team and agent-browser MCP servers)"
   else
     echo "[paseo-team] claude setup failed" >&2
     exit 1
@@ -145,7 +161,7 @@ echo "  support default -> \${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}/extensions/
 echo "  env override is optional; no shell profile mutation is required"
 echo ""
 echo "Next steps:"
-echo "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing), agent-browser CLI, Chrome runtime, skill and Pi MCP config."
+echo "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing), agent-browser CLI, Chrome runtime, skill and the MCP entry for every installed runtime (Pi mcp.json, and ~/.claude.json when claude is present)."
 echo "  2. Verify OCR if needed: command -v ocr; ocr version"
 echo "  3. Install the MCP adapter (PINNED version — Paseo tools depend on it):"
 echo "     pi install npm:pi-mcp-adapter@2.19.0"

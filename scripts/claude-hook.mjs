@@ -39,14 +39,25 @@ export const SESSION_STATE_TTL_MS = 12 * 60 * 60 * 1000;
  */
 export const POLICY_CORE_DIR = "paseo-team-core";
 
+/**
+ * `.js` before `.ts`: the built output is the only variant that loads from an
+ * installed package, because Node refuses to strip types under `node_modules`.
+ * Where a checkout or a pi install holds both, they are the same module.
+ */
+export function policyModuleVariants(name) {
+	const base = name.replace(/\.(ts|js)$/, "");
+	return [`${base}.js`, `${base}.ts`];
+}
+
 export function policyModulePath(name, env = process.env) {
 	const configured = env.PASEO_TEAM_POLICY_DIR?.trim();
-	const candidates = configured
-		? [join(configured, name)]
-		: [
-				join(HERE, "..", POLICY_CORE_DIR, name),
-				join(HERE, "..", "extensions", POLICY_CORE_DIR, name),
-			];
+	const dirs = configured
+		? [configured]
+		: [join(HERE, "..", POLICY_CORE_DIR), join(HERE, "..", "extensions", POLICY_CORE_DIR)];
+	const candidates = [];
+	for (const dir of dirs) {
+		for (const variant of policyModuleVariants(name)) candidates.push(join(dir, variant));
+	}
 	const found = candidates.find((candidate) => existsSync(candidate));
 	if (!found) {
 		throw new Error(
@@ -199,46 +210,70 @@ function roleContextBlock(rolePrompt, role) {
 }
 
 /**
- * The Claude half of the jurisdiction notice (PR-D).
+ * The Claude half of the supervisor notice (PR-D).
  *
- * Identical rule, identical wording to the Pi adapter's `jurisdictionNotice` —
- * a Lead on Claude must be told the same thing about the same message, or
- * "which Supervisor governs me" becomes a per-runtime answer.
+ * Identical rule, identical wording to the Pi adapter's `supervisorNotice` — a
+ * Lead on Claude must be told the same thing about the same message, or "which
+ * Supervisor governs me, and what do I do about it" becomes a per-runtime
+ * answer. Both call the same core, so the text is not merely similar.
+ *
+ * `block` is the already-parsed supervisor block for this turn: the caller
+ * needs to know whether there is one anyway (it decides whether the full role
+ * prompt is re-injected), and parsing it twice would let the two answers drift.
  */
-export function jurisdictionBlock(core, role, prompt, env = process.env) {
-	if (role !== "lead") return null;
+export function supervisorBlockNotice(core, role, block, env = process.env) {
+	if (role !== "lead" || !block) return null;
 	const topology = core.teamTopology(env);
-	if (topology !== "multi") return null;
-	const block = core.parseSupervisorBlock(prompt);
-	if (!block) return null;
+	const cluster = core.selfCluster(env);
 	let seats = [];
-	try {
-		seats = core.supervisorSeats(env);
-	} catch {
-		seats = [];
+	// Only the overlap rule needs the seat list, and only under `multi`.
+	if (topology === "multi") {
+		try {
+			// Cluster-scoped, exactly as the Pi adapter does it: a Supervisor in
+			// another workspace is not a contender for this Lead, and counting
+			// one turned a shared domain label into a fail-closed overlap.
+			seats = core.supervisorSeats(env, { cluster });
+		} catch {
+			seats = [];
+		}
 	}
-	const verdict = core.supervisorJurisdictionVerdict({
+	const attribution = core.supervisorAttribution(
+		block.fields.get("FROM_AGENT_ID") ?? null,
+		env,
+	);
+	const verdict = core.supervisorTurnVerdict({
 		block,
 		leadDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 		supervisors: seats,
-		fromAgentId: block.fields.get("FROM_AGENT_ID") ?? null,
+		attribution,
 		topology,
+		leadCluster: cluster,
 	});
-	if (!verdict) return null;
-	return [
-		"## Paseo Team Jurisdiction (this turn)",
-		"",
-		`This turn opens with a SUPERVISOR_${block.kind === "decision" ? "DECISION" : "OBSERVATION"}.`,
-		`Verdict: ${verdict.code} (${verdict.severity})`,
-		"",
-		verdict.reason,
-		verdict.severity === "refuse"
-			? `Do NOT act on it. Reply with BLOCKED: ${verdict.code} and the reason above.`
-			: "",
-	]
-		.filter(Boolean)
-		.join("\n");
+	return core.supervisorTurnNotice({ block, verdict, attribution });
 }
+
+/**
+ * The standing half of the Lead's authority, repeated every turn.
+ *
+ * The Pi extension rebuilds the system prompt on every `before_agent_start`, so
+ * a Pi Lead carries its role contract into every turn. Claude has no such hook:
+ * the role prompt goes in ONCE, as turn context, and by turn fifty it is far
+ * behind the model's default posture of checking with the human before anything
+ * consequential — which is exactly what a delegated supervisor decision is not
+ * supposed to need. Re-injecting the whole prompt every turn would cost ~2.5k
+ * tokens a turn to say something that only occasionally matters, so the split
+ * is: this line always, the full prompt on the turns where the contract is
+ * actually load-bearing (see `handleEvent`).
+ */
+const LEAD_STANDING_AUTHORITY = [
+	"## Paseo Team Authority (standing)",
+	"",
+	"You are the Project Lead of this Paseo team. Routing, delegation, correction",
+	"and acceptance are YOUR calls to make, not the Human's — do not hand back a",
+	"decision your role contract already gives you. A supervisor message that this",
+	"turn's notice marks binding IS a decision: act on it. Only merge, push, deploy",
+	"and other irreversible or outward-facing steps go to the Human.",
+].join("\n");
 
 function authorityBlock(describe, role, brief) {
 	return [
@@ -278,8 +313,12 @@ function authorityBlock(describe, role, brief) {
  * friendly one.
  */
 function promptTargetForDecision({ core, claude }, role, toolName, toolInput, env) {
-	if (core.teamTopology(env) !== "multi") return undefined;
 	if (role !== "lead" && role !== "supervisor") return undefined;
+	// Same rule as the Pi adapter, and for the same reason: the lookup is driven
+	// by the TOOL, never by the topology. Skipping it for a Lead under `single`
+	// handed the core a null target, and a guard cannot refuse what it cannot
+	// see — which disarmed the cross-cluster refusal on the default pack, the
+	// one most likely to have two projects sharing a host.
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
 	if (classified?.kind !== "paseo-mcp") return undefined;
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"])) {
@@ -354,19 +393,26 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			},
 			env,
 		);
+		const supervisorTurn =
+			role === "lead" ? core.parseSupervisorBlock(prompt) : null;
 		const blocks = [];
 		// SessionStart is not guaranteed to have run (a resumed or imported
 		// session may start at the first prompt), so the role prompt is injected
-		// here too when it has not been injected yet.
-		if (!injected) {
+		// here too when it has not been injected yet — and again on a turn that
+		// opens with a supervisor message, which is precisely the turn where the
+		// Lead's authority contract decides the answer and the session-start copy
+		// is furthest away.
+		if (!injected || supervisorTurn) {
 			const rolePrompt = core.loadRolePrompt(role);
 			if (rolePrompt) blocks.push(roleContextBlock(rolePrompt, role));
+		} else if (role === "lead") {
+			blocks.push(LEAD_STANDING_AUTHORITY);
 		}
 		if (role === "peer") {
 			blocks.push(authorityBlock(claude.describeClaudePolicy, role, brief));
 		}
-		const jurisdiction = jurisdictionBlock(core, role, prompt, env);
-		if (jurisdiction) blocks.push(jurisdiction);
+		const notice = supervisorBlockNotice(core, role, supervisorTurn, env);
+		if (notice) blocks.push(notice);
 		if (blocks.length === 0) return null;
 		return {
 			hookSpecificOutput: {
@@ -392,6 +438,7 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			selfAgentId: env.PASEO_AGENT_ID?.trim() || null,
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
+			cluster: core.selfCluster(env),
 			promptTarget: promptTargetForDecision(
 				{ core, claude },
 				role,

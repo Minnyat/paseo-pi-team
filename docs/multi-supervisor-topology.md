@@ -451,18 +451,19 @@ có thể đang ghi dở chính là nước cờ sinh ra writer thứ hai).
 | Cờ `PASEO_TEAM_TOPOLOGY` (`single` mặc định; giá trị lạ → `multi`, phía chỉ-từ-chối) | `policy-core.ts` `teamTopology()` |
 | Ngữ pháp domain: `normalizeDomain` / `domainCovers` / `domainConflicts`, `*` = gốc | `policy-core.ts` |
 | Parser `SUPERVISOR_OBSERVATION` + phân biệt observation/decision + `malformed[]` | `policy-core.ts` `parseSupervisorBlock` |
-| Phán quyết jurisdiction (`JURISDICTION_OK/UNDECLARED/UNVERIFIABLE/MISMATCH/OVERLAP`, `SUPERVISOR_BLOCK_MALFORMED`) | `policy-core.ts` `supervisorJurisdictionVerdict` |
+| Phán quyết jurisdiction (`JURISDICTION_OK/UNDECLARED/UNVERIFIABLE/MISMATCH/OVERLAP/UNATTRIBUTED`, `SUPERVISOR_BLOCK_MALFORMED`) | `policy-core.ts` `supervisorJurisdictionVerdict` |
 | Guard `send_agent_prompt` theo quyền sở hữu + `agentOwnership()` đọc state file | `policy-core.ts`, gọi trong `mcpBlockReason` |
+| Supervisor **không** prompt thẳng Peer — `PROMPT_TARGET_IS_PEER`, áp dụng ở **mọi** topology (fail-open khi không resolve được target dưới `single`, fail-closed dưới `multi`) | `policy-core.ts` `sendAgentPromptBlockReason` |
 | `recovery_for ⊆ team.domain` của supervisor | `supervisorCreateAgentArgsBlockReason(args, { topology, selfDomain })` |
 | Nhóm tool `heartbeat` (`create_heartbeat` / `delete_heartbeat`) cho lead + supervisor | `PASEO_TOOLS.heartbeat` + hai allowlist |
-| Bind vào Pi (governanceContext + jurisdiction notice trong `before_agent_start`) | `extensions/paseo-team-policy.ts` |
+| Bind vào Pi (governanceContext + supervisor notice trong `before_agent_start`) | `extensions/paseo-team-policy.ts` |
 | Bind vào Claude (input `topology`/`selfDomain`/`promptTarget`; notice trong `user-prompt-submit`) | `claude-policy.ts` + `scripts/claude-hook.mjs` |
 | Đọc state file dùng chung cho CẢ policy lẫn CLI (một nguồn sự thật) | `extensions/paseo-team-core/agent-directory.ts`; `cli/lib/agent-state.mjs` chỉ re-export |
 | `graph.jurisdiction` = `{ supervisors, unlabeled, conflicts }` | `cli/lib/graph.mjs` `describeJurisdiction` |
 | WebUI: lọc theo phạm vi, cảnh báo chồng lấn, domain trên node/list/drawer | `webui/public/*` |
 | Prompt: mục *Jurisdiction*, heartbeat loop, `DOMAIN:`/`FROM_AGENT_ID:` trong output contract | `prompts/supervisor.md`, `prompts/lead.md` §6b |
 
-Test: `test/governance.test.mjs` (33 case thuần), cộng wiring test trong
+Test: `test/governance.test.mts` (38 case thuần), cộng wiring test trong
 `policy.test.mts`, `claude-policy.test.mjs`, `claude-hook.test.mjs` và
 `graph.test.mjs`.
 
@@ -483,6 +484,62 @@ chạy `paseo run`, nên một agent có thể khai bất kỳ parent nào. Cả
 `peer_ask_lead` lẫn guard `send_agent_prompt` đều dựa vào đúng trường đó, và
 `team.domain` cũng chỉ là một nhãn. Hai guard này chặn **nhầm lẫn và trôi dạt**,
 không chặn giả mạo. Đã ghi vào `prompts/supervisor.md` và `prompts/lead.md`.
+
+#### PR-D.1 — Lead (Claude) không chịu nhận điều hướng của Supervisor — ✅ ĐÃ SỬA
+
+**Triệu chứng đo được.** Lead chạy trên Claude nhận `SUPERVISOR_DECISION` hợp lệ,
+loại nhỏ + đảo ngược được, rồi vẫn dừng lại hỏi Human duyệt — đúng việc mà
+`lead.md` §Authority đã uỷ quyền cho nó. Lead trên pi không như vậy.
+
+**Ba nguyên nhân, không phải một.**
+
+1. **Verdict chỉ tính dưới `multi`.** Cả `jurisdictionNotice` (pi) lẫn
+   `jurisdictionBlock` (Claude) đều `return null` ngay khi topology khác `multi`.
+   Gói mặc định là `single`, nên trên gói mặc định decision tới Lead dưới dạng
+   **văn xuôi trần**: không verdict, không quy kết nguồn, không chỉ thị.
+2. **Verdict chấp nhận chỉ nêu SỰ KIỆN, không nêu HỆ QUẢ.** Nhánh từ chối luôn
+   kết bằng một mệnh lệnh ("Do NOT act on it, reply BLOCKED"); nhánh
+   `JURISDICTION_OK` kết bằng "jurisdiction phủ Lead này" — một sự kiện không
+   thắng nổi tư thế mặc định của agent lập trình là hỏi người dùng trước khi làm
+   việc hệ trọng. Lead đọc `JURISDICTION_OK` xong vẫn hỏi.
+3. **Hợp đồng vai bị tiêm sai tầng, sai tần suất trên Claude.** pi dựng lại
+   system prompt mỗi `before_agent_start`; Claude tiêm **một lần** mỗi phiên, và
+   tiêm vào `additionalContext` (nội dung lượt user, không phải system prompt).
+   Đến lượt thứ 50, hợp đồng authority ở rất xa.
+
+**Sửa.** Cả ba đều nằm ở core dùng chung, không ở adapter:
+
+| Thành phần | Nơi |
+|---|---|
+| `supervisorAttribution(fromAgentId, env)` — resolve `FROM_AGENT_ID` qua state file, chỉ ghế provider supervisor mới `verified` | `policy-core.ts` |
+| `supervisorTurnVerdict(...)` — verdict trên **mọi** topology; giữ nguyên luật `multi`, thêm kiểm tra nguồn cho cả hai | `policy-core.ts` |
+| `supervisorTurnNotice(...)` — một văn bản duy nhất cho hai runtime, kết bằng CHỈ THỊ (`ACT ON IT … needs NO Human round-trip` / `BLOCKED: <code>`) | `policy-core.ts` |
+| Mã mới: `SUPERVISOR_DECISION_BINDING`, `SUPERVISOR_OBSERVATION_ADVISORY`, `SUPERVISOR_SENDER_UNVERIFIED` | `policy-core.ts` |
+| Bind lại: `supervisorNotice` (pi) / `supervisorBlockNotice` (Claude), cùng gọi core | `paseo-team-policy.ts`, `scripts/claude-hook.mjs` |
+| Bù chênh lệch tiêm prompt trên Claude: dòng authority ngắn **mỗi lượt** Lead, tiêm lại **toàn bộ** role prompt ở lượt mở đầu bằng supervisor block | `scripts/claude-hook.mjs` |
+
+**Vì sao phải quy kết nguồn.** Chỉ thị mới bảo Lead hành động KHÔNG hỏi Human.
+Nếu bất kỳ văn bản nào chứa dòng header cũng kích hoạt được chỉ thị đó thì ta vừa
+chế ra một đòn bẩy lên Lead. Nên `FROM_AGENT_ID` giờ phải resolve về một ghế
+Supervisor thật trong state file của Paseo mới `verified`; không thì
+`SUPERVISOR_SENDER_UNVERIFIED` và **không bao giờ** binding. Vẫn theo §1.10: đây
+là nhãn khai báo, chặn nhầm lẫn/trôi dạt/văn bản lạc, **không** chặn giả mạo.
+
+**Lệch có chủ đích giữa hai topology.** Nguồn không xác minh được: `multi` từ
+chối thẳng một DECISION (đồng bộ với `JURISDICTION_UNATTRIBUTED`), `single` chỉ
+cảnh báo. Gói mặc định xưa nay không từ chối gì; biến một thư mục state không đọc
+được thành bức tường `BLOCKED` sẽ làm hỏng cụm đang chạy. Cả hai đường đều dừng
+trước mức binding — đó mới là tính chất cần giữ.
+
+**Một khả năng thứ tư, không phải bug của pack.** Nếu ghế Lead được `paseo run`
+với `--mode default`, mọi tool call của chính Lead nằm chờ trong hàng đợi
+permission cho tới khi Human bấm — nhìn từ ngoài giống hệt Lead từ chối điều
+hướng. `pi-lead` không lộ ra chuyện này vì pi không khai mode nào cả. Đã ghi
+`--mode auto` cho ghế Lead vào `docs/claude-runtime.md`.
+
+Test: 7 case mới trong `governance.test.mts` (quy kết nguồn, binding/advisory,
+thứ tự jurisdiction-trước-nguồn, parser vẫn sống dưới `single`), wiring test hai
+adapter trong `claude-hook.test.mjs` và `policy.test.mts`.
 
 ---
 
@@ -583,6 +640,91 @@ toàn bộ theo quyết định của user. Hai điều giữ lại cho lần sa
   giải phải là opt-in (một daemon điều phối được khai tường minh), không phải
   fail-closed trên cấu hình có sẵn.
 
+### PR-G — Trục cluster: governance dừng ở ranh giới workspace — ✅ ĐÃ LÀM
+
+**Triệu chứng.** `team.domain` trả lời "ghế này quản cái gì", chưa bao giờ trả
+lời "ghế này SỐNG ở đâu". Mọi phép đọc governance đều host-global một cách có
+chủ ý: `buildStateIndex` quét MỌI cwd-slug dưới `$PASEO_HOME/agents` (đúng —
+tra agent theo id phải tìm được bất kể cwd, `agent-state.test.mjs:90` assert
+điều đó), và fan-out `domain:` của `team_chat` chạy `paseo ls -g`, đúng cái cờ
+sinh ra để thoát scope cwd. Một project một host thì không lộ. Hai project thì
+lộ, ba đường:
+
+1. Hai repo không liên quan cùng đặt nhãn `backend` → mỗi Supervisor thành
+   contender của Lead bên kia → `JURISDICTION_OVERLAP` fail-closed trên một cụm
+   chỉ có MỘT Supervisor.
+2. `sendAgentPromptBlockReason` cho qua nhánh `target.role === "lead" ||
+   "supervisor"` — chỉ hỏi "target có phải coordinator", không hỏi "coordinator
+   CỦA AI" → Lead project A prompt được Lead project B.
+3. `normalizeScope` trả path **tương đối repo** (`src/index.ts` có ở mọi repo)
+   trong khi sổ lease là **một room toàn cục**. Claim `src` của project này
+   khoá `src` của mọi project; claim `.` khoá cả máy.
+
+Đường nguy hiểm nhất là (1)+(2) cộng `supervisorAttribution`, vốn chỉ xác minh
+"id này là ghế Supervisor" ở **bất cứ đâu trên host**: chỉ cần trùng tên domain
+là một Supervisor lạ nhận verdict `SUPERVISOR_DECISION_BINDING`, mà chỉ thị của
+verdict đó là *ACT ON IT … needs NO Human round-trip*.
+
+**Tiền đề đã chốt** (dung hoà hai câu mâu thuẫn trong deep-dive §0: "Supervisor
+quan sát nhiều session/workspace" vs "Lead là god trong project/workspace của
+nó"): **QUAN SÁT được phép xuyên workspace; THẨM QUYỀN thì không.**
+
+**Suy ra cluster, nguồn tường minh trước:** `team.cluster` /
+`PASEO_TEAM_CLUSTER` → `workspaceId` → `cwd` → null. Nhãn phải thắng vì
+workspace reviewer là **linked worktree** (chính
+`leadCreateWorkspaceBlockReason` bắt buộc thế), nên nó khác cả `workspaceId`
+lẫn `cwd` so với Lead sở hữu nó — chỉ nhãn khai tường minh mới giữ được hai ghế
+đó trong một cụm.
+
+**Luật nền: tách biệt phải được CHỨNG MINH.** `clustersSeparate` trả false khi
+một trong hai phía không xác định. Mọi luật cluster chỉ BỎ BỚT ràng buộc (loại
+contender, cho phép prompt, giải phóng scope), nên một câu trả lời chưa chắc
+chắn không được phép bỏ bớt. Cùng bản năng với luật typo của
+`PASEO_TEAM_TOPOLOGY`, chĩa ngược lại: đọc nhầm phải tốn một lời gọi bị chặn
+kèm lý do, không bao giờ được là governance tự tắt trong im lặng.
+
+#### Đã giao
+
+| Thành phần | Nơi |
+|---|---|
+| `TEAM_CLUSTER_LABEL`, `normalizeCluster`, `agentCluster`, `clustersSeparate`, `selfCluster`, `agentClustersById` | `policy-core.ts` |
+| `supervisorSeats(env, { cluster })` lọc contender theo cụm | `policy-core.ts` |
+| `CLUSTER_MISMATCH` trong `supervisorTurnVerdict` — **mọi topology** (decision → refuse, observation → warn) | `policy-core.ts` |
+| `PROMPT_TARGET_OUT_OF_CLUSTER` ở nhánh coordinator, **mọi topology**; parentage kiểm TRƯỚC nên subagent của chính mình trong worktree vẫn tới được | `policy-core.ts` `sendAgentPromptBlockReason` |
+| `LEASE_V1` thêm `CLUSTER:`; `leaseConflicts` chỉ va trong cùng cụm; `leaseHolderFor(leases, scope, cluster)` | `policy-core.ts`, `scripts/team-lease.mjs` |
+| Fan-out `domain:` lọc theo cụm; agent ref tường minh khác cụm ném `RECIPIENT_OUT_OF_CLUSTER` | `scripts/team-chat.mjs` |
+| Nối dây hai runtime (`cluster` trong `GovernanceContext` / `ClaudeToolDecisionInput`) | `paseo-team-policy.ts`, `claude-hook.mjs`, `claude-policy.ts` |
+
+Test: `test/cluster.test.mts` (22 case thuần) + case cluster trong
+`team-chat.test.mjs`.
+
+**Quyết định có chủ đích.**
+
+- **Không gate trên `PASEO_TEAM_TOPOLOGY`.** Cùng lý do với
+  `PROMPT_TARGET_IS_PEER`: đây không phải câu hỏi jurisdiction mà là câu hỏi
+  đứng trước nó — *thông điệp này có gửi cho project của tôi không*. Và `single`
+  mới là gói cần nhất, vì nó không chạy luật jurisdiction nào cả.
+- **Không bóp `buildStateIndex`.** Tầng reader phải thấy mọi cwd-slug; thu hẹp
+  nằm ở TẦNG POLICY. Bóp reader sẽ phá `agent-state.test.mjs` và làm hỏng chính
+  việc tra agent theo id.
+- **`CLUSTER:` là field THÊM VÀO, không gộp vào `SCOPE:`.** `SCOPE` giữ nguyên
+  nghĩa cũ nên gói chưa nâng cấp vẫn đọc được mọi bản ghi, và bản ghi cũ parse
+  ra cluster null — va chạm với tất cả, đúng hành vi tiền-cluster. Gộp vào
+  `SCOPE` sẽ làm mọi lease đang sống thành không đọc được với phía kia của một
+  rolling upgrade, mà lease không đọc được thì đọc ra "scope trống" = hai
+  writer.
+- **release/renew khớp theo tách-biệt-đã-chứng-minh, KHÔNG theo khoá.** Bản
+  nháp đầu key hoá `cluster+scope` rồi tra `live.get(key)`; hệ quả là lease
+  claim bởi gói cũ (cluster null) không thể release bằng gói mới (có cluster),
+  scope kẹt tới hết TTL. `test/team-lease.test.mjs:114` bắt được.
+
+**Chưa làm (có chủ đích).** `recovery_for` của Supervisor vẫn chỉ gate theo
+domain: `create_agent` tạo successor Lead làm subagent của chính nó, nên nó nằm
+trong cụm theo cấu tạo. Nếu sau này Supervisor được tạo agent ở workspace khác
+thì phải gate thêm ở đây.
+
+---
+
 ---
 
 ## 4. Việc phải làm xuyên suốt mọi PR
@@ -606,11 +748,48 @@ toàn bộ theo quyết định của user. Hai điều giữ lại cho lần sa
    khối cuối tự tạo agent thật nên là opt-in (`PASEO_CONTRACT_FORK=1`) và tự
    dọn. Chính khối này đã bắt ba khác biệt của `import` mà mọi unit test đều
    mock đúng theo giả định sai (§PR-E).
-4. **Chốt nguồn sự thật routing**: `~/.paseo/orchestration-preferences.json`
-   (chính thức) vs `cluster-routing.local.json` (của pack) — §1.14.
-   **Chưa chốt**, và không PR nào ở trên phụ thuộc vào nó: pack chỉ đọc file của
-   chính nó, còn file của Paseo là mặc định cho agent tạo ngoài pack. Cần một
-   quyết định trước khi có người sửa nhầm file.
+4. **Chốt nguồn sự thật routing — ✅ ĐÃ CHỐT (2026-08-28).**
+   `cluster-routing.local.json` là nguồn sự thật **duy nhất** cho mọi agent do
+   pack tạo ra. `~/.paseo/orchestration-preferences.json` là chuyện của Paseo:
+   pack **không đọc, không ghi, không đồng bộ** — nó là mặc định cho agent sinh
+   ra ngoài pack (`paseo-committee`, `paseo-advisor`, `paseo-loop`, …).
+
+   Phân chia theo **ai tạo agent**, không phải theo file nào "chính thức hơn":
+
+   | Agent được tạo bởi | Đọc route từ |
+   |---|---|
+   | pack (routing cycle của Lead) | `cluster-routing.local.json` |
+   | skill orchestration của Paseo | `orchestration-preferences.json` |
+
+   Ba lý do, theo thứ tự sức nặng:
+
+   - **Hai từ vựng không phải tập con của nhau.** Pack định tuyến theo
+     MODEL_CLASS (rủi ro × disposition) **theo từng host**, kèm họ runtime
+     (`pi-*`/`claude-*`) và một thinking option đã được verify trên đúng daemon
+     đó. File của Paseo chọn provider theo loại việc
+     (`impl`/`ui`/`research`/`planning`/`audit`), **không có** host, không có
+     thinking, không có capability filter, không có họ runtime. Ánh xạ hai chiều
+     đều mất mát — và chiều mất mát nguy hiểm là chiều bỏ mất host: một cụm
+     nhiều daemon sẽ im lặng co về một daemon.
+   - **Đọc hai file là hai cách để sai, và sai im lặng.** Invariant 3 tồn tại
+     đúng để chặn việc agent chạy trên model không ai chọn. Thêm một nguồn thứ
+     hai là mở lại chính cái cửa đó, ngay tại chỗ đã rào kỹ nhất.
+   - **Không tranh chỗ với Paseo.** Paseo có quyền định tuyến agent của chính
+     nó. Pack chỉ tuyên bố phạm vi của mình, không ghi đè file của người khác —
+     cùng nguyên tắc với `mcp.json` (chỉ đụng entry của mình) và với uninstall
+     (không bao giờ TẠO file khi gỡ).
+
+   **Phần thực thi** (chốt bằng prose thôi thì sẽ trôi): `pteam preflight` có
+   check `routing-source-of-truth` — `pass` khi file của Paseo không tồn tại,
+   `warn` khi nó tồn tại, kèm câu nói thẳng rằng pack không đọc nó và phải sửa
+   file cluster. Logic nằm ở `orchestrationPreferencesNotice()`
+   (`scripts/lib-common.mjs`), có test trong `test/lib-common.test.mjs` —
+   kể cả trường hợp file hỏng: câu hỏi duy nhất là TỒN TẠI hay không, nên file
+   không parse được vẫn ra notice sạch chứ không throw.
+
+   **Điều này KHÔNG chốt**: nếu sau này upstream trả lời câu hỏi §6 và
+   `orchestration-preferences.json` có thêm chiều host + thinking, quyết định
+   này phải mở lại — lúc đó lý do "không phải tập con" biến mất.
 
 ---
 
@@ -621,6 +800,7 @@ toàn bộ theo quyết định của user. Hai điều giữ lại cho lần sa
 | Chat retention / hiệu năng room hàng nghìn message | PR-B (nhẹ) | Dùng cursor `--since`, đo lúc làm |
 | Ngưỡng số agent làm wake/chat chậm | PR-B (nhẹ) | Đo lúc làm |
 | Chat cross-host: room per-daemon hay đồng bộ | PR-F | Đã khoanh ra ngoài. Nếu per-daemon thì cụm nhiều host có hai sổ lease — phải giải trước khi bật multi-lead cross-host |
+| Worktree reviewer phải khai `team.cluster` thủ công | PR-G (nhẹ) | Suy ra tự động không được: worktree khác cả `workspaceId` lẫn `cwd`. Nếu Paseo lộ ra repo gốc của worktree thì tự suy được |
 | Mention có đánh thức agent ở daemon khác không | PR-F | Chưa đo; khả năng cao là **không** (mention là chuyện của daemon giữ room) |
 | Fork một session **rất lớn** (vài MB) — thời gian copy + hành vi compaction thực tế | PR-E (nhẹ) | Cơ chế đã rõ (§1.2, §1.12); đã fork thật 486 entry ~tức thời, chưa đo mốc vài MB |
 
@@ -705,21 +885,23 @@ Test bằng fake `paseo` CLI (đã có khuôn `test/fixtures/fake-paseo.mjs`).
 
 | # | Case | Kỳ vọng | Ở đâu |
 |---|---|---|---|
-| D1 | `PASEO_TEAM_TOPOLOGY` không đặt / `single` | Mọi guard PR-D trả `null` | `governance.test.mjs`, wiring test hai runtime |
-| D2 | Giá trị lạ (`mult`, `many`) | Đọc là `multi` — phía chỉ từ chối | `governance.test.mjs` |
-| D3 | `backend` vs `backend.auth` vs `backendops`; `Backend/Auth` | Chứa nhau theo đoạn, không theo chuỗi con; chuẩn hoá về một cách viết | `governance.test.mjs` |
-| D4 | `SUPERVISOR_OBSERVATION` nhắc trong văn xuôi | KHÔNG parse thành block | `governance.test.mjs` |
-| D5 | `SUPERVISOR_DECISION:` rỗng | Vẫn là observation | `governance.test.mjs` |
-| D6 | Decision tự khai `REVERSIBILITY: irreversible` | `malformed` → từ chối | `governance.test.mjs` |
-| D7 | Decision ngoài domain / observation ngoài domain | Từ chối / chỉ cảnh báo | `governance.test.mjs` |
-| D8 | Lead không có `team.domain` | `JURISDICTION_UNVERIFIABLE` | `governance.test.mjs` |
-| D9 | Hai supervisor cùng phủ một Lead | `JURISDICTION_OVERLAP`, nêu tên cả hai, escalate Human | `governance.test.mjs`, `graph.test.mjs` |
-| D10 | `recovery_for` ngoài domain / supervisor chưa gán domain | `RECOVERY_OUT_OF_JURISDICTION` / `JURISDICTION_UNDECLARED` | `governance.test.mjs` + hai runtime |
+| D1 | `PASEO_TEAM_TOPOLOGY` không đặt / `single` | Mọi guard PR-D trả `null` | `governance.test.mts`, wiring test hai runtime |
+| D2 | Giá trị lạ (`mult`, `many`) | Đọc là `multi` — phía chỉ từ chối | `governance.test.mts` |
+| D3 | `backend` vs `backend.auth` vs `backendops`; `Backend/Auth` | Chứa nhau theo đoạn, không theo chuỗi con; chuẩn hoá về một cách viết | `governance.test.mts` |
+| D4 | `SUPERVISOR_OBSERVATION` nhắc trong văn xuôi | KHÔNG parse thành block | `governance.test.mts` |
+| D5 | `SUPERVISOR_DECISION:` rỗng | Vẫn là observation | `governance.test.mts` |
+| D6 | Decision tự khai `REVERSIBILITY: irreversible` | `malformed` → từ chối | `governance.test.mts` |
+| D7 | Decision ngoài domain / observation ngoài domain | Từ chối / chỉ cảnh báo | `governance.test.mts` |
+| D8 | Lead không có `team.domain` | `JURISDICTION_UNVERIFIABLE` | `governance.test.mts` |
+| D9 | Hai supervisor cùng phủ một Lead | `JURISDICTION_OVERLAP`, nêu tên cả hai, escalate Human | `governance.test.mts`, `graph.test.mjs` |
+| D10 | `recovery_for` ngoài domain / supervisor chưa gán domain | `RECOVERY_OUT_OF_JURISDICTION` / `JURISDICTION_UNDECLARED` | `governance.test.mts` + hai runtime |
 | D11 | `send_agent_prompt` tới Peer của Lead khác | `PROMPT_TARGET_NOT_OWNED`, nêu tên Lead sở hữu | `policy.test.mts`, `claude-policy.test.mjs`, `claude-hook.test.mjs` |
 | D12 | Target không đọc được state | `PROMPT_TARGET_UNKNOWN` (fail-closed) | như trên |
 | D13 | Target là Lead/Supervisor khác | Cho qua — đây là đường điều phối | như trên |
 | D14 | Hook Claude tự **resolve** ownership từ state file | Chặn đúng bằng dữ liệu thật, không phải do thiếu tham số | `claude-hook.test.mjs` |
 | D15 | `create_heartbeat` cho lead/supervisor; `create_schedule` cho supervisor | Cho / chặn | `claude-policy.test.mjs` |
+| D16 | DECISION không có `FROM_AGENT_ID` | `JURISDICTION_UNATTRIBUTED` (từ chối) — bỏ trống field bắt buộc không được là đường vòng qua luật overlap; OBSERVATION vẫn khoan dung | `governance.test.mts` |
+| D17 | Supervisor `send_agent_prompt` thẳng tới Peer, topology `single` **và** `multi` | Chặn (`PROMPT_TARGET_IS_PEER` / `PROMPT_TARGET_NOT_OWNED`); target không resolve được thì `single` cho qua, `multi` chặn | `governance.test.mts` |
 | E1 | Fork thiếu `reason`, hoặc reason lạ | `FORK_REASON_INVALID` | `team-fork.test.mjs` |
 | E2 | Fork vai độc lập (reviewer/challenger/supervisor/auditor) | `FORK_ROLE_MUST_BE_INDEPENDENT` | `team-fork.test.mjs` |
 | E3 | Lý do "hết context" — kể cả nằm trong `rationale` | `FORK_FOR_CONTEXT` + gợi ý `/compact` | `team-fork.test.mjs` |

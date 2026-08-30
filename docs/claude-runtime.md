@@ -94,6 +94,50 @@ Fail-closed on every axis, exactly like an unbriefed pi peer:
 Authority is never inherited: a turn whose prompt carries no V3 brief drops
 write mode even if the previous turn had it.
 
+### The role contract across turns
+
+The two runtimes do not inject the role prompt the same way, and the difference
+is not cosmetic:
+
+| | pi | Claude Code |
+|---|---|---|
+| where | the turn's **system prompt** | `additionalContext` — content of the **user turn** |
+| when | rebuilt on **every** `before_agent_start` | **once** per session (`SessionStart`, or the first prompt when that hook never ran) |
+
+A Lead fifty turns into a Claude session therefore had its authority contract
+far behind it, outweighed by the model's own default posture of checking with
+the human before anything consequential — which is exactly what a delegated
+supervisor decision is not supposed to need. Re-sending the whole prompt every
+turn would cost ~2.5k tokens a turn to say something that only sometimes
+matters, so the hook splits it:
+
+- **every** Lead turn carries a short standing-authority block (routing,
+  delegation, correction and acceptance are the Lead's calls; only irreversible
+  steps go to the Human);
+- a turn that **opens with a supervisor message** re-injects the full role
+  prompt, because that is the turn where the contract decides the answer.
+
+### A supervisor message, on either runtime
+
+`send_agent_prompt` has no channel of its own: a Supervisor's block arrives as
+an ordinary user prompt, indistinguishable from the Human typing. So both
+adapters run it through `policy-core.ts` and put one shared notice in the turn:
+
+1. `parseSupervisorBlock` — is this actually a block, and is it a decision?
+2. `supervisorAttribution` — does `FROM_AGENT_ID` resolve, in Paseo's own agent
+   state, to a seat whose provider is a Supervisor role provider? Unresolvable
+   or not-a-Supervisor ⇒ `SUPERVISOR_SENDER_UNVERIFIED`, and the message never
+   binds. This is what stops the directive below from becoming a lever anything
+   can pull by typing the header. It is not authentication — provider and
+   parentage are declared labels — it catches mistakes, drift and stray text.
+3. `supervisorTurnVerdict` — jurisdiction under `multi` (unchanged), then the
+   sender check on both topologies.
+4. `supervisorTurnNotice` — the verdict **and what to do about it**: `ACT ON IT
+   … needs NO Human round-trip` on the binding path, `Do NOT act on it, reply
+   BLOCKED: <code>` on the refusing one.
+
+The notice is context, not a deny: nothing here blocks a tool.
+
 ## What Claude roles may do
 
 | | Supervisor | Lead | Peer |
@@ -101,7 +145,8 @@ write mode even if the previous turn had it.
 | Read/Glob/Grep | yes | yes | yes |
 | Bash | no | yes | yes, guarded |
 | Write/Edit | no | only with `PASEO_TEAM_LEAD_WRITE=1` | only with `MODE: write` + `EDIT_AUTHORITY: allowed` |
-| `mcp__paseo__*` | monitoring + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
+| `mcp__paseo__*` | monitoring + `create_heartbeat`/`delete_heartbeat` + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
+| `mcp__paseo-team__*` | `team_watchdog`, `team_chat`, `team_fork`, `team_lease` (`status` only) | all four, `team_lease` unrestricted | `peer_ask_lead` only |
 | `mcp__agent-browser__*` | no | yes | only with `BROWSER_MCP_AUTHORITY: allowed` |
 | `Task` (Claude subagents) | no | no | no |
 
@@ -120,7 +165,7 @@ a granted push is branch-scoped to exactly
 present. Manually:
 
 ```bash
-node scripts/claude-setup.mjs --install          # hooks + paseo-team MCP server
+node scripts/claude-setup.mjs --install          # hooks + paseo-team and agent-browser MCP servers
 node scripts/claude-setup.mjs --print-providers  # the claude-* provider block
 node scripts/claude-setup.mjs --verify           # exit 1 when incomplete
 pteam claude-setup --verify --json               # same thing through the CLI
@@ -135,6 +180,16 @@ Both target files belong to the user and already carry other tools' entries
 merges: our entries are tagged `paseo-team-role-policy`, and only tagged
 entries are replaced or removed. A file that cannot be parsed is reported and
 left byte-for-byte alone.
+
+`~/.claude.json` gets two servers, and they are owned differently.
+`paseo-team` is ours and is rewritten on every install. `agent-browser` is the
+same stdio server the pi installer registers in `~/.pi/agent/mcp.json`, written
+in Claude's dialect (`type: "stdio"`, no `lifecycle`) — and an entry the user
+already configured is left exactly as it is. Without it the `Lead` and `Peer`
+rows for `mcp__agent-browser__*` in the table above are unreachable: the policy
+allows a tool the runtime never registered. `--verify` and `preflight` both
+report it, so the gap fails a check rather than surfacing as an agent that says
+it cannot reach a browser.
 
 ## Mixed-fleet routing
 
@@ -155,22 +210,75 @@ stays legible in `pteam graph` and the WebUI.
 Rule of thumb: mix Peers freely, keep ONE Lead per project on ONE family for
 the life of that project — the Lead is the deterministic part of the loop.
 
-### Crossing families needs an explicit mode
+### Every Claude agent needs an explicit mode
 
-Permission modes belong to the provider and are not inherited from the caller,
-so creating a Claude agent from a pi Lead (or the reverse) fails without one:
+A permission mode belongs to the provider and is never inherited across
+providers. The check fires when the TARGET provider declares modes and its id
+differs from the caller's — and the value being legal for the target does not
+save it:
 
 ```text
-cannot inherit mode '<none>' from caller (provider 'pi-lead') for new agent
+cannot inherit mode 'auto' from caller (provider 'claude-lead') for new agent
 (provider 'claude-peer'). Pass an explicit mode. Available modes for
 'claude-peer': plan, default, acceptEdits, auto, bypassPermissions
 ```
 
-`mode: "default"` is the right answer for a Peer: every tool call raises a Paseo
-permission the Lead triages, which is the loop the pack is built around. Use
-`acceptEdits` only for a write Peer whose brief already grants `EDIT_AUTHORITY`.
-Never `bypassPermissions` — the role policy still applies, but the human loses
-the permission gate.
+`auto` is in that list and was still refused. This is not a cross-family rule:
+`claude-lead` → `claude-peer` is one family and is rejected exactly the same.
+What separates the two runtimes is that they declare different mode sets:
+
+```text
+pi-lead      Mode=default  AvailableModes=[]
+claude-lead  Mode=auto     AvailableModes=[plan, default, acceptEdits, auto, bypassPermissions]
+```
+
+pi declares none, so nothing is required and `pi-lead` → `pi-peer` has always
+worked. Claude declares five, and in this pack a Lead and a Peer are never the
+same profile — so **every `claude-*` creation needs the mode passed in, from
+either family.**
+
+The parameter is `settings.modeId`, NOT a top-level `mode`. Paseo's own contract
+is `create_agent { title, provider, initialPrompt, workspaceId?, settings?,
+labels? }` with "initial runtime settings live under `settings`: `modeId`,
+`thinkingOptionId`, features". A top-level `mode` is ignored and the create
+fails with the message above:
+
+```jsonc
+create_agent({
+  provider: "claude-peer/claude-opus-5",
+  settings: { modeId: "default", thinkingOptionId: "high" },
+  // ...
+})
+```
+
+The Paseo CLI spells the same thing `--mode` (`paseo run --mode default`), and
+so does `remote-paseo.mjs run`, which refuses a `claude-*` route without one.
+
+`modeId: "default"` is the right answer for a Peer: every tool call raises a
+Paseo permission the Lead triages, which is the loop the pack is built around.
+Use `acceptEdits` only for a write Peer whose brief already grants
+`EDIT_AUTHORITY`. Never `bypassPermissions` — the role policy still applies, but
+the human loses the permission gate.
+
+### …including the Lead's own seat
+
+The rule above is about agents the Lead creates. The Lead's own seat is started
+by the Human, and its mode is a separate decision the pack used to leave
+unsaid — with real consequences, because **nobody triages the Lead's
+permissions but the Human**:
+
+```bash
+paseo run --provider "claude-lead/<model>" --thinking high --mode auto "..."
+```
+
+`--mode auto` is the working default for a Lead. On `default`, every one of the
+Lead's own tool calls parks in the pending-permission queue until the Human
+clicks — so a Lead that correctly accepts a supervisor decision still cannot
+carry it out, which looks from the outside exactly like a Lead that refused it.
+A pi Lead never showed this: `pi-lead` declares no modes at all
+(`Mode=default AvailableModes=[]`) and its tool calls simply run. If a Claude
+Lead seems to be waiting on you for everything, check its mode before you
+suspect the policy.
 
 ## Verifying
 

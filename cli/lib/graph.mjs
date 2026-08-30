@@ -28,7 +28,7 @@ import { readAgentStates, isAgentId } from "./agent-state.mjs";
 import {
 	domainConflicts,
 	normalizeDomain,
-} from "../../extensions/paseo-team-core/policy-core.ts";
+} from "../../extensions/paseo-team-core/policy-core.js";
 
 export const ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 

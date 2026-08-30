@@ -1,6 +1,6 @@
 {
   "name": "paseo-pi-team",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": true,
   "description": "Paseo multi-agent role pack — one rule core, two runtimes (pi extension + Claude Code hooks), role prompts, support scripts.",
   "type": "module",
@@ -29,6 +29,10 @@
     "node": ">=22.18"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "pretest": "npm run build",
     "test": "node --test \"test/*.test.mjs\" \"test/*.test.mts\"",
     "typecheck": "tsc --noEmit -p tsconfig.ci.json",
     "check": "npm run test && npm run typecheck",

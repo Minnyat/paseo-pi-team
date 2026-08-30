@@ -135,9 +135,14 @@ paseo-pi-team/
 
 | Profile | `PASEO_PI_ROLE` | Default tools |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog` |
-| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog` |
+| `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog`, `team_chat`, `team_lease` (status), `team_fork` |
+| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog`, `team_chat`, `team_lease`, `team_fork` |
 | `pi-peer` | `peer` | `read`, `bash`, `peer_ask_lead` (+ `write`/`edit` under `MODE: write`) |
+
+The `claude-*` profiles carry the same three roles and the same team tools,
+reached as `mcp__paseo-team__<tool>`. A Peer gets `peer_ask_lead` and nothing
+else: `team_chat`, `team_lease`, `team_fork` and `team_watchdog` are all
+refused for it, because a Peer coordinates through its Lead.
 
 Refine the real allowlist after running `/team-tools` — actual Paseo tool names
 can differ from the defaults.
@@ -225,6 +230,186 @@ reading Pi's docs — including a one-click preset for unstable providers — vi
 `pteam config read/write pi-settings` (`~/.pi/agent/settings.json`). Changes
 take effect for agent sessions started after the save.
 
+## Coordination between seats (more than one Lead, more than one Supervisor)
+
+One Lead and one Supervisor need none of this. It exists because a second Lead
+cannot see the first one's intentions, so what used to be held by being careful
+has to be held by the policy instead.
+
+### Scope leases — one writer per moving scope, enforced
+
+`create_agent` in write mode is **refused** unless the Lead holds a lease
+covering the scope that writer will own:
+
+```text
+team_lease { action: "claim", scope: "src/auth", ttlMs: <work window> }
+team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
+```
+
+- The ledger is a Paseo chat room (`leases`) and has **no locking**, so a claim
+  is written even when it loses. Read `granted`, not merely `ok`.
+- Scopes nest: holding `src` holds `src/auth`. Claim the narrowest scope the
+  writer needs, or you block Leads you did not mean to.
+- Read-only dispositions (scout, researcher, architect, reviewer) take no lease
+  and are never gated — they share a tree by design.
+- An unreadable ledger is `BLOCKED: LEASE_UNVERIFIABLE`, never "proceed".
+- TTL is capped at 12h, so a smuggled `TTL_MS` cannot lock the repo root
+  indefinitely.
+
+### `team_chat` — the Lead ↔ Lead / Supervisor ↔ Lead bus
+
+`peer_ask_lead` is one-way and parent-scoped; it cannot reach another Lead.
+`team_chat` is the many-to-many channel, built on Paseo chat rooms because a
+post is queryable (so the graph draws a **confirmed** `message` edge) and a
+mention **wakes** an idle recipient — the room is both ledger and doorbell.
+
+```text
+team_chat { action: "post", room, recipients: ["<agent-id|short-id|domain:<name>>"], body }
+team_chat { action: "read", room }
+team_chat { action: "rooms" }
+```
+
+Bounds are transport-imposed: an 8192-byte payload ceiling (`paseo chat post`
+takes the body as ARGV and Windows caps a command line near 32K), a
+**cooperative** hop/TTL bound (it stops a well-behaved relay loop and makes a
+bad one visible — it cannot prevent one), and a room allowlist via
+`PASEO_TEAM_ROOMS` (chat rooms have no ACL of their own). Typing `paseo chat`
+in bash is redirected to the tool, the only path that enforces any of this.
+
+### Multi-supervisor governance — `PASEO_TEAM_TOPOLOGY`
+
+| Value | Effect |
+|---|---|
+| unset / `single` | default; the jurisdiction, `recovery_for` and `send_agent_prompt` guards return immediately — behaviour is line-for-line what it was before governance existed |
+| `multi` | the guards are live |
+| anything else | **read as `multi`** |
+
+An unrecognised value reads as the strict side on purpose: every rule the flag
+adds only ever refuses, so misreading toward strict costs one blocked call with
+a stated reason, while misreading toward loose turns governance off silently on
+a cluster the operator believes is governed.
+
+One thing the flag does **not** gate is the verdict on a supervisor message.
+On every topology, a Lead turn that opens with a `SUPERVISOR_OBSERVATION` /
+`SUPERVISOR_DECISION` gets a notice in its turn context saying what the message
+is, whether its `FROM_AGENT_ID` resolves to a real Supervisor seat in Paseo, and
+**what the Lead is to do about it** — `ACT ON IT … needs NO Human round-trip` on
+the binding path, `BLOCKED: <code>` on the refusing one. It used to be computed
+only under `multi`, so on the default pack a delegated decision reached the Lead
+as bare prose and the Lead, quite reasonably, asked the Human to approve what
+its own contract had already delegated to it. A block whose sender does not
+resolve to a Supervisor seat is `SUPERVISOR_SENDER_UNVERIFIED` and never binds:
+anything can type the header, so the directive is reachable only through a seat
+the runtime can point at.
+
+Under `multi`, seats carry a domain (`team.domain` label / `PASEO_TEAM_DOMAIN`,
+hierarchical: `backend` contains `backend.auth`, `*` is the root) and every
+`SUPERVISOR_OBSERVATION` / `SUPERVISOR_DECISION` carries `DOMAIN:`. The runtime
+computes the jurisdiction verdict too — a misrouted
+**observation** is a warning (noise costs nothing), a misrouted **decision** is
+refused (that is the one the Lead would act on), and an overlap refuses both
+Supervisors and escalates to the Human, and a DECISION with no `FROM_AGENT_ID`
+is refused (`JURISDICTION_UNATTRIBUTED`) because an unsigned one cannot be
+checked for overlap at all. Two ownership guards come with it:
+`send_agent_prompt` may not target another Lead's Peer
+(`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and a Supervisor's `recovery_for` must
+fall inside its own domain.
+
+One ownership rule is deliberately NOT gated on the flag: a Supervisor
+prompting a Peer is refused (`BLOCKED: PROMPT_TARGET_IS_PEER`) under `single`
+too. It is the Supervisor's own role boundary, not a jurisdiction question, and
+gating it meant the default pack enforced it nowhere. That check is fail-OPEN
+on a target it cannot resolve under `single` (fail-closed under `multi`), so an
+unreadable state file cannot silence a Supervisor that works today. Parentage is a declared label, not an authenticated
+fact — these catch mistakes, not forgery.
+
+### Which workspace a seat belongs to — `team.cluster`
+
+`team.domain` says what a seat **governs**. It never said where a seat
+**lives**, and every governance read in the pack is host-global on purpose:
+`$PASEO_HOME/agents` is indexed by agent id across every cwd-slug, and the
+`team_chat` domain fan-out runs `paseo ls -g` — the flag whose whole job is to
+escape cwd scoping. With one project per host that gap never showed. With two
+it did, three ways: two unrelated repos that both label a seat `backend` made
+each other's Supervisors contenders (so `JURISDICTION_OVERLAP` fired on a
+cluster with exactly one Supervisor); a Lead could `send_agent_prompt` another
+project's Lead, because the ownership guard asked only *is the target a
+coordinator*; and `src/index.ts` is a lease scope in every repo on the machine,
+all filed in one global ledger room.
+
+A seat's cluster is derived, explicit source first, so an existing deployment is
+scoped without relabelling anything:
+
+| Order | Source | Why |
+|---|---|---|
+| 1 | `team.cluster` label / `PASEO_TEAM_CLUSTER` | a reviewer workspace is a linked **worktree** — different `workspaceId` *and* different cwd from its Lead, so only a declared label can keep those two seats together |
+| 2 | `workspaceId` | Paseo's own boundary, when there is one |
+| 3 | `cwd` | what a plain `paseo run` has instead |
+| 4 | *(none)* | unknown |
+
+**Unknown narrows nothing.** Every cluster rule only ever *removes* a
+restriction — drops a contender, permits a prompt, frees a scope — so
+separation has to be proven: an underivable cluster on either side leaves
+today's behaviour exactly as it was. This is the same instinct as the
+`PASEO_TEAM_TOPOLOGY` typo rule, pointed the other way: a wrong guess must cost
+a blocked call with a reason, never governance that quietly switched itself off.
+
+What the axis gates — **authority, never observation**. A Supervisor may watch
+several workspaces; that is its job. It may not *decide* for one it does not
+live in:
+
+| Surface | Refusal |
+|---|---|
+| `SUPERVISOR_DECISION` from another cluster | `CLUSTER_MISMATCH` (refused; a bare observation only warns) |
+| `send_agent_prompt` at another cluster's Lead/Supervisor | `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER` |
+| `team_chat` `domain:` fan-out | foreign seats drop out of the audience; `NO_RECIPIENTS` if that empties it |
+| `team_chat` explicit agent ref | `RECIPIENT_OUT_OF_CLUSTER` — a deliberate address fails loudly rather than being dropped |
+| scope lease | `LEASE_V1` carries `CLUSTER:`; scopes collide only inside one cluster |
+
+`CLUSTER_MISMATCH` and `PROMPT_TARGET_OUT_OF_CLUSTER` are **not** gated on
+`PASEO_TEAM_TOPOLOGY`, for the same reason `PROMPT_TARGET_IS_PEER` is not: this
+is not a jurisdiction question but a prior one — *is this message even addressed
+to my project*. `single` is the pack that needs it most, since it runs no
+jurisdiction rules at all; before the axis existed, a Supervisor in another
+workspace on the same host reached a Lead with a verdict of
+`SUPERVISOR_DECISION_BINDING`, whose directive is *ACT ON IT … needs NO Human
+round-trip*.
+
+A seat's own subagent is always reachable, cluster or not — the parentage test
+runs first, which is what keeps the mandated reviewer-worktree flow working.
+
+The lease ledger stays backward compatible: `CLUSTER:` is a new field beside
+`SCOPE:`, never folded into it, and a record written before the field existed
+parses with a null cluster that collides with everything — its old, coarser
+meaning. Release and renew match on *proven* separation rather than on an exact
+key, so a lease claimed by the old pack can still be released by the new one
+mid-upgrade.
+
+### Handing a seat over — briefing handoff vs `team_fork`
+
+| Situation | Mechanism |
+|---|---|
+| The receiver must be **independent** (reviewer, challenger, supervisor) | **Briefing handoff** — a fork is refused, because it inherits the framing the role exists to question |
+| The context summarizes cleanly | Briefing handoff (the default) |
+| The reasoning history itself must travel (split load, change host/model, take over mid-flight) | **Session fork** |
+| Running out of context | **Neither** — `/compact`. Auto-compaction fires on the fork too, so a fork buys a compacted agent *and* a second seat |
+
+A fork copies the transcript file — no LLM turn, near-instant — then imports it:
+
+```text
+team_fork { action: "fork", agentId, reason: "takeover", disposition: "lead", scope, provider, model, thinkingOptionId }
+team_fork { action: "verify", agentId, model, thinkingOptionId }
+```
+
+`fork` stops before the model is routed (the CLI has no `--model`; only MCP
+`update_agent` moves it) and hands back both that call and a `FORK_SEED_V1`
+seed prompt, which is **built in code** so it cannot be softened: the fork
+inherits belief, not authority — no lease, no Peers, and it must not act as the
+source agent. `verify` reads `runtimeInfo` (never the stale creation-time
+`persistence.metadata`) and **deletes** a fork that came up on the wrong model.
+Peers stay with the source: there is no reparent API, and `detach` is a Human
+action that leaves a Peer unable to escalate.
+
 ## OpenCodeReview delegation (Phase 1)
 
 `paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill.
@@ -289,9 +474,13 @@ What the installers copy:
 | bundled `agent-browser` skill | `~/.pi/agent/skills/agent-browser/` |
 
 It also installs the `agent-browser` CLI and Chrome runtime when missing, and
-merges an MCP entry — `agent-browser: { command: "agent-browser", args: ["mcp"] }`
-— into `~/.pi/agent/mcp.json` when it is absent from the standard config
-locations.
+merges an MCP entry for **every runtime installed on the host** when it is
+absent: `{ command: "agent-browser", args: ["mcp"], lifecycle: "lazy" }` into
+`~/.pi/agent/mcp.json` for pi, and `{ type: "stdio", command: "agent-browser",
+args: ["mcp"] }` into `~/.claude.json` for Claude Code. Same server, two config
+dialects — pi ignores `type`, Claude ignores `lifecycle`. Registering only one
+of them leaves the other runtime's Lead and Peers with no browser tool at all,
+while the role policy still says they may use one.
 
 When the `claude` CLI is present, the installers also run
 `scripts/claude-setup.mjs --install`, which merges this pack's hooks into
@@ -314,13 +503,20 @@ The installer probes four things:
 - `agent-browser --version`
 - `agent-browser doctor --offline --quick`
 - the bundled skill (`agent-browser skills path agent-browser`)
-- the standard MCP config locations
+- the standard MCP config locations, per runtime (`~/.pi/agent/mcp.json` and,
+  when `claude` is installed, `~/.claude.json`)
 
 Whatever is missing, it then repairs: installs OCR (current pin `1.9.2`, keeping
 any `>= 1.8.10` that passes the capability probe), runs `npm install -g
 agent-browser` followed by `agent-browser install` (`--with-deps` on Linux),
 copies the skill, and merges the `agent-browser` entry into
-`~/.pi/agent/mcp.json` without overwriting other servers.
+`~/.pi/agent/mcp.json` — and into `~/.claude.json` through
+`scripts/claude-setup.mjs`, which owns that file — without overwriting other
+servers. An `agent-browser` entry that already exists is never rewritten in
+either file; asking for an `--attach-cdp-port` that contradicts it is a visible
+error, not a silent no-op. `preflight` reports the registration per runtime
+(`agent-browser-mcp`, `agent-browser-mcp:claude`), so a half-installed browser
+surface fails a check instead of passing one.
 
 Re-running the installer is safe.
 
@@ -483,6 +679,25 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
    Peer, owns observed routing evidence.
 5. **Remote hosts** go through `remote-paseo.mjs`, never through MCP — see
    below.
+
+**Which file is the source of truth.** Paseo ships its own
+`~/.paseo/orchestration-preferences.json`, which picks a provider per task kind
+(`impl`/`ui`/`research`/`planning`/`audit`). The pack does **not** read it and
+never writes it. The split is by who creates the agent:
+
+| Agent created by | Routed from |
+|---|---|
+| this pack (the Lead's routing cycle) | `cluster-routing.local.json` — the only source |
+| Paseo's own orchestration skills (`paseo-committee`, `paseo-advisor`, `paseo-loop`, …) | `orchestration-preferences.json` — Paseo's business, left alone |
+
+The two vocabularies are not a subset of each other: the pack routes by
+MODEL_CLASS (task risk × disposition) **per host**, with a runtime family and a
+verified thinking option, while Paseo's file has no host, no thinking level, no
+capability filter and no family. Mapping between them would be lossy in both
+directions, and reading both would give two ways to be wrong about which model
+an agent is on — silently, which is the exact failure the routing cycle exists
+to prevent. `pteam preflight` warns when `orchestration-preferences.json`
+exists, so nobody edits the file the pack ignores.
 
 ### Reaching a remote host
 

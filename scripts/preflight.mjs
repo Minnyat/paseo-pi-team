@@ -8,7 +8,8 @@
 // Checks (per host): node, git, paseo CLI + daemon, pi CLI, pi-mcp-adapter,
 // role-pack extension + prompts, Paseo role providers, model inventory,
 // routing-config validity, per-model thinking support, cluster routing
-// contract, endpoint env presence, agent-browser CDP mode + reachability,
+// contract, endpoint env presence, agent-browser MCP registration per runtime,
+// CDP mode + reachability,
 // repository state.
 //
 // Never prints secret values: only env-var NAMES are checked/reported.
@@ -22,7 +23,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { verify as verifyClaudeSetup } from "./claude-setup.mjs";
+import {
+	browserMcpInstalled,
+	claudeUserConfigPath,
+	readJsonOrNull,
+	verify as verifyClaudeSetup,
+} from "./claude-setup.mjs";
+import { orchestrationPreferencesNotice } from "./lib-common.mjs";
 import {
 	describeCdpTarget,
 	inspectAgentBrowser,
@@ -296,67 +303,94 @@ if (wantPi) {
 			"agent-browser-runtime",
 			"Chrome/runtime missing or doctor failed → run agent-browser install",
 		);
-	if (browser.skill) pass("agent-browser-skill", browser.skillPath);
-	else
-		fail(
-			"agent-browser-skill",
-			`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
-		);
-	if (browser.configReadable && browser.browserMcpEnabled)
-		pass("agent-browser-mcp", browser.configPath);
-	else if (!browser.configReadable)
-		fail(
-			"agent-browser-mcp",
-			`${browser.configPath} is missing or invalid JSON`,
-		);
-	else if (browser.browserMcp)
-		fail(
-			"agent-browser-mcp",
-			`${browser.configPath} contains a disabled agent-browser server`,
-		);
-	else
-		fail(
-			"agent-browser-mcp",
-			`${browser.configPath} has no agent-browser server entry`,
-		);
-
-	// How the entry reaches a browser. A config only names a port; without the
-	// probe below, an unreachable CDP target first shows up as a failed browser
-	// call in the middle of a Peer turn instead of as host unreadiness.
-	if (browser.browserMcpEnabled && browser.cdpTarget) {
-		const target = browser.cdpTarget;
-		if (target.mode === "launch") {
-			pass("agent-browser-cdp", describeCdpTarget(target));
-		} else if (target.mode === "ambiguous") {
+	// Everything from here to the Claude sub-check reads PI's own tree: the
+	// skill under ~/.pi/agent/skills and the MCP config at ~/.pi/agent/mcp.json.
+	// A host running `--runtime claude` has no reason to own either, so failing
+	// those checks there invents work — and under --strict it fails the WHOLE
+	// preflight over a file that host is correct not to have. The CLI and Chrome
+	// checks above stay unconditional: those are host-level, and both runtimes
+	// need them.
+	if (wantPi) {
+		if (browser.skill) pass("agent-browser-skill", browser.skillPath);
+		else
 			fail(
-				"agent-browser-cdp",
-				`the agent-browser entry in ${browser.configPath} has ambiguous --cdp flags (duplicated with different ports, or one is missing its port) — leave exactly one "--cdp <port>"`,
+				"agent-browser-skill",
+				`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
 			);
-		} else {
-			const probe = await probeCdpEndpoint({ port: target.port });
-			if (probe.ok) {
-				pass(
-					"agent-browser-cdp",
-					`attached to 127.0.0.1:${target.port} (${probe.browser}) — a Peer granted BROWSER_MCP_AUTHORITY inherits every session in that profile`,
-				);
-				// Loopback reachability says nothing about the bind address. A
-				// browser started with --remote-debugging-address=0.0.0.0 hands
-				// full, unauthenticated control to the whole network. Only
-				// meaningful once something is actually listening.
-				const exposed = await probeCdpExposure({ port: target.port });
-				if (exposed.length > 0)
-					warn(
-						"agent-browser-cdp-exposure",
-						`CDP port ${target.port} also answers on ${exposed.join(", ")} — unauthenticated browser control is reachable off-host; bind the browser to 127.0.0.1`,
-					);
-				else pass("agent-browser-cdp-exposure", "CDP port is loopback-only");
-			} else {
+		if (browser.configReadable && browser.browserMcpEnabled)
+			pass("agent-browser-mcp", browser.configPath);
+		else if (!browser.configReadable)
+			fail(
+				"agent-browser-mcp",
+				`${browser.configPath} is missing or invalid JSON`,
+			);
+		else if (browser.browserMcp)
+			fail(
+				"agent-browser-mcp",
+				`${browser.configPath} contains a disabled agent-browser server`,
+			);
+		else
+			fail(
+				"agent-browser-mcp",
+				`${browser.configPath} has no agent-browser server entry`,
+			);
+
+		// How the entry reaches a browser. A config only names a port; without the
+		// probe below, an unreachable CDP target first shows up as a failed browser
+		// call in the middle of a Peer turn instead of as host unreadiness.
+		if (browser.browserMcpEnabled && browser.cdpTarget) {
+			const target = browser.cdpTarget;
+			if (target.mode === "launch") {
+				pass("agent-browser-cdp", describeCdpTarget(target));
+			} else if (target.mode === "ambiguous") {
 				fail(
 					"agent-browser-cdp",
-					`nothing answers CDP on 127.0.0.1:${target.port} (${probe.error}) — start the browser with --remote-debugging-port=${target.port}, or reinstall without --attach-cdp-port to use launch mode`,
+					`the agent-browser entry in ${browser.configPath} has ambiguous --cdp flags (duplicated with different ports, or one is missing its port) — leave exactly one "--cdp <port>"`,
 				);
+			} else {
+				const probe = await probeCdpEndpoint({ port: target.port });
+				if (probe.ok) {
+					pass(
+						"agent-browser-cdp",
+						`attached to 127.0.0.1:${target.port} (${probe.browser}) — a Peer granted BROWSER_MCP_AUTHORITY inherits every session in that profile`,
+					);
+					// Loopback reachability says nothing about the bind address. A
+					// browser started with --remote-debugging-address=0.0.0.0 hands
+					// full, unauthenticated control to the whole network. Only
+					// meaningful once something is actually listening.
+					const exposed = await probeCdpExposure({ port: target.port });
+					if (exposed.length > 0)
+						warn(
+							"agent-browser-cdp-exposure",
+							`CDP port ${target.port} also answers on ${exposed.join(", ")} — unauthenticated browser control is reachable off-host; bind the browser to 127.0.0.1`,
+						);
+					else pass("agent-browser-cdp-exposure", "CDP port is loopback-only");
+				} else {
+					fail(
+						"agent-browser-cdp",
+						`nothing answers CDP on 127.0.0.1:${target.port} (${probe.error}) — start the browser with --remote-debugging-port=${target.port}, or reinstall without --attach-cdp-port to use launch mode`,
+					);
+				}
 			}
 		}
+	}
+
+	// The checks above read PI's config only. Claude Code keeps its MCP servers
+	// in a different file with a different owner, so a pi-only probe reports a
+	// green browser surface for a fleet whose Claude seats have no browser tool
+	// at all — the exact silence this check exists to break.
+	if (wantClaude) {
+		const claudeConfigPath = claudeUserConfigPath();
+		const claudeConfig = readJsonOrNull(claudeConfigPath);
+		if (claudeConfig === undefined)
+			fail("agent-browser-mcp:claude", `${claudeConfigPath} is present but not valid JSON`);
+		else if (browserMcpInstalled(claudeConfig))
+			pass("agent-browser-mcp:claude", claudeConfigPath);
+		else
+			fail(
+				"agent-browser-mcp:claude",
+				`${claudeConfigPath} has no usable agent-browser server — Claude Lead/Peer cannot call mcp__agent-browser__* → run: node scripts/claude-setup.mjs --install`,
+			);
 	}
 }
 
@@ -377,8 +411,12 @@ if (wantPi) {
 	// Both runtimes read the SAME policy core and the SAME role prompts, so
 	// these are checked regardless of family.
 	const coreDir = join(homedir(), ".pi", "agent", "extensions", "paseo-team-core");
-	const missingModules = ["policy-core.ts", "claude-policy.ts"].filter(
-		(name) => !existsSync(join(coreDir, name)),
+	// Either extension satisfies the check: `.ts` is what pi loads, `.js` is the
+	// built sibling, and an install carrying only one of them is still complete.
+	const coreModule = (name) =>
+		[join(coreDir, `${name}.js`), join(coreDir, `${name}.ts`)].find((p) => existsSync(p)) ?? null;
+	const missingModules = ["policy-core", "claude-policy"].filter(
+		(name) => coreModule(name) === null,
 	);
 	if (missingModules.length > 0) {
 		fail(
@@ -392,9 +430,9 @@ if (wantPi) {
 		// looks identical to a healthy install until a Peer runs unrestricted.
 		// Importing it here is the only check that actually proves it loads.
 		try {
-			const core = await import(pathToFileURL(join(coreDir, "policy-core.ts")).href);
+			const core = await import(pathToFileURL(coreModule("policy-core")).href);
 			const claudeDialect = await import(
-				pathToFileURL(join(coreDir, "claude-policy.ts")).href
+				pathToFileURL(coreModule("claude-policy")).href
 			);
 			if (
 				typeof core.parseTaskBrief !== "function" ||
@@ -835,6 +873,19 @@ if (existsSync(clusterPath)) {
 		"cluster-config",
 		`${clusterPath} missing (copy config/cluster-routing.example.json; required for cross-host routing)`,
 	);
+}
+
+// Two files describe routing and only one of them is ours (§4.4). Paseo's is
+// left strictly alone; the check exists so an operator who edits it notices
+// that the pack did not read a single line of it.
+{
+	const notice = orchestrationPreferencesNotice();
+	if (notice) warn("routing-source-of-truth", notice.message);
+	else
+		pass(
+			"routing-source-of-truth",
+			"cluster-routing.local.json is the only routing source the pack reads",
+		);
 }
 
 if (cluster) {

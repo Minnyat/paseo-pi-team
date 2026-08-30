@@ -9,12 +9,16 @@
  * protection, and what happens when recipient expansion cannot be resolved.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	MAX_BODY_BYTES,
 	MAX_HOP,
 	TEAM_MESSAGE_KINDS,
 	buildEnvelope,
 	expandRecipients,
+	listRooms,
 	parseTeamMessage,
 	postTeamMessage,
 	roomAllowed,
@@ -24,6 +28,7 @@ import {
 
 const SELF = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
+const THIRD = "33333333-3333-4333-8333-333333333333";
 
 const base = { room: "coord", kind: "dependency", topic: "T-42", message: "need the schema decision", to: [OTHER] };
 
@@ -157,6 +162,97 @@ assert.equal(parseTeamMessage(null), null);
 }
 await assert.rejects(expandRecipients(["not a ref"], { runPaseo: async () => [], selfAgentId: SELF }), /invalid recipient/i);
 
+// --- a broadcast does not cross a workspace ------------------------------
+// The expansion runs `paseo ls -g`, and `-g` is the flag whose whole purpose is
+// to escape cwd scoping — so `domain:payments` used to mention every `payments`
+// seat ON THE HOST, and a mention WAKES an idle agent. A team that names a seat
+// `payments` in two repos silently rang both.
+{
+	// The cluster comes from the agent STATE FILE, never from the `paseo ls`
+	// row. A row carries `cwd`, which looks like free information but is the
+	// third rung of agentCluster's ladder — comparing it against an `own` that
+	// resolved on the workspaceId rung compares different axes and drops a
+	// legitimate recipient. So these fixtures are real state files.
+	const home = mkdtempSync(join(tmpdir(), "pteam-chat-"));
+	const previous = process.env.PASEO_HOME;
+	try {
+		const dir = join(home, "agents", "slug");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `${OTHER}.json`), JSON.stringify({ id: OTHER, cwd: "D:/Code/shop" }));
+		writeFileSync(join(dir, `${THIRD}.json`), JSON.stringify({ id: THIRD, cwd: "D:/Code/blog" }));
+		process.env.PASEO_HOME = home;
+
+		const rows = [
+			{ id: OTHER, shortId: "2222222" },
+			{ id: THIRD, shortId: "3333333" },
+		];
+		const scoped = await expandRecipients(["domain:payments"], {
+			runPaseo: async () => rows,
+			selfAgentId: SELF,
+			cluster: "D:\\Code\\shop",
+		});
+		assert.deepEqual(scoped.agentIds, [OTHER], "the other project's seat is not in the audience");
+
+		// Fail-open: a seat Paseo has written no state for cannot be shown to be
+		// elsewhere, so it stays in the audience. Silently not delivering to one
+		// of our own is worse than briefly over-delivering.
+		const unknownSeat = "44444444-4444-4444-8444-444444444444";
+		const unknown = await expandRecipients(["domain:payments"], {
+			runPaseo: async () => [{ id: unknownSeat, shortId: "4444444" }],
+			selfAgentId: SELF,
+			cluster: "D:/Code/shop",
+		});
+		assert.deepEqual(unknown.agentIds, [unknownSeat]);
+
+		// A fan-out that filters down to nothing must SAY so — a broadcast can
+		// never shrink to silence unnoticed — and name the reason.
+		await assert.rejects(
+			expandRecipients(["domain:payments"], {
+				runPaseo: async () => [{ id: THIRD, shortId: "3333333" }],
+				selfAgentId: SELF,
+				cluster: "D:/Code/shop",
+			}),
+			/NO_RECIPIENTS|other clusters/i,
+		);
+	} finally {
+		if (previous === undefined) delete process.env.PASEO_HOME;
+		else process.env.PASEO_HOME = previous;
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+{
+	// An explicit agent ref is a DELIBERATE address, so a foreign one throws
+	// rather than being dropped: silently discarding it would post a message its
+	// author believes was delivered.
+	const home = mkdtempSync(join(tmpdir(), "pteam-chat-"));
+	const previous = process.env.PASEO_HOME;
+	try {
+		const dir = join(home, "agents", "slug");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `${THIRD}.json`), JSON.stringify({ id: THIRD, cwd: "D:/Code/blog" }));
+		process.env.PASEO_HOME = home;
+		await assert.rejects(
+			expandRecipients([THIRD], {
+				runPaseo: async () => [],
+				selfAgentId: SELF,
+				cluster: "D:/Code/shop",
+			}),
+			/RECIPIENT_OUT_OF_CLUSTER/,
+		);
+		// Same seat, same cluster: unchanged.
+		const ok = await expandRecipients([THIRD], {
+			runPaseo: async () => [],
+			selfAgentId: SELF,
+			cluster: "D:/Code/blog",
+		});
+		assert.deepEqual(ok.agentIds, [THIRD]);
+	} finally {
+		if (previous === undefined) delete process.env.PASEO_HOME;
+		else process.env.PASEO_HOME = previous;
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+
 // --- posting: one shot, never retried ------------------------------------
 {
 	const calls = [];
@@ -196,6 +292,39 @@ await assert.rejects(expandRecipients(["not a ref"], { runPaseo: async () => [],
 		postTeamMessage(base, { selfAgentId: SELF, role: "lead", rooms: "leases", runPaseo: async () => [{ id: OTHER, shortId: "2222222" }] }),
 		/ROOM_NOT_ALLOWED/,
 	);
+}
+{
+	// `paseo chat ls` is fleet-wide, so the listing has to honour the same
+	// allowlist that post/read do. A room an agent may not talk into must not
+	// show up as a suggestion either: that is how a Supervisor in one repo
+	// found another repo's lease room and reported the wrong project's status.
+	const FLEET = [
+		{ id: "408c6b0f-ea7b-4e6c-9310-15574bfa88a3", name: "leases" },
+		{ id: "99999999-9999-4999-8999-999999999999", name: "other-repo-coord" },
+	];
+	const ls = async () => FLEET;
+	const confined = await listRooms({ selfAgentId: SELF, role: "supervisor", rooms: "leases", runPaseo: ls });
+	assert.deepEqual(confined.rooms.map((r) => r.name), ["leases"]);
+	assert.equal(confined.hidden, 1, "the listing says something was withheld rather than pretending the fleet is small");
+
+	// A room named by id in the allowlist stays visible under its id.
+	const byId = await listRooms({
+		selfAgentId: SELF,
+		role: "supervisor",
+		rooms: "99999999-9999-4999-8999-999999999999",
+		runPaseo: ls,
+	});
+	assert.deepEqual(byId.rooms.map((r) => r.name), ["other-repo-coord"]);
+
+	// Unset allowlist keeps today's behaviour: everything, and no `hidden` key.
+	const open = await listRooms({ selfAgentId: SELF, role: "supervisor", runPaseo: ls });
+	assert.equal(open.rooms.length, 2);
+	assert.equal(open.hidden, undefined);
+
+	// An empty allowlist grants nothing, listing included.
+	const closed = await listRooms({ selfAgentId: SELF, role: "supervisor", rooms: "", runPaseo: ls });
+	assert.deepEqual(closed.rooms, []);
+	assert.equal(closed.hidden, 2);
 }
 
 // Only Lead and Supervisor hold this channel; a Peer has peer_ask_lead.

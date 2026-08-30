@@ -1729,12 +1729,61 @@ function restoreEnv(name: string, previous: string | undefined): void {
 			systemPrompt: "BASE",
 		})) as { systemPrompt?: string } | undefined;
 		assert.match(String(inJurisdiction?.systemPrompt), /JURISDICTION_OK/);
+		// The accepting verdict states the CONSEQUENCE, not only the fact. A Lead
+		// that reads "jurisdiction covers you" and stops there falls back to
+		// asking the Human for a decision already delegated to it.
+		assert.match(String(inJurisdiction?.systemPrompt), /ACT ON IT/);
 
 		// An ordinary prompt carries no supervisor block and gains no notice.
 		const plain = (await beforeStart({ prompt: "please review PR 12", systemPrompt: "BASE" })) as
 			| { systemPrompt?: string }
 			| undefined;
-		assert.ok(!String(plain?.systemPrompt).includes("Jurisdiction"));
+		assert.ok(!String(plain?.systemPrompt).includes("supervisor message (this turn)"));
+
+		// The DEFAULT pack is `single`, and that is where the notice used to be
+		// skipped entirely — the Lead got the decision as bare prose. Same core,
+		// same directive, so the two runtimes cannot drift on this.
+		process.env.PASEO_TEAM_TOPOLOGY = "single";
+		const { piStub: singleStub, handlers: singleHandlers } = makePiStub(["read", "mcp"]);
+		(await loadFreshExtension("lifecycle=governance-single-notice"))(singleStub);
+		const onSingle = (await requireHandler(singleHandlers, "before_agent_start")({
+			prompt: decision,
+			systemPrompt: "BASE",
+		})) as { systemPrompt?: string } | undefined;
+		assert.match(String(onSingle?.systemPrompt), /SUPERVISOR_DECISION_BINDING/);
+		assert.match(String(onSingle?.systemPrompt), /ACT ON IT/);
+		process.env.PASEO_TEAM_TOPOLOGY = "multi";
+
+		// A Supervisor does not task a Peer, and that rule is NOT gated on the
+		// topology flag: on `single` — the default pack — it must still bite, or
+		// the boundary exists only in the prompt.
+		process.env.PASEO_PI_ROLE = "supervisor";
+		process.env.PASEO_AGENT_ID = SUP_A;
+		process.env.PASEO_TEAM_TOPOLOGY = "single";
+		const { piStub: supStub, handlers: supHandlers } = makePiStub(["read", "mcp"]);
+		(await loadFreshExtension("lifecycle=governance-single-supervisor"))(supStub);
+		const supToolCall = requireHandler(supHandlers, "tool_call");
+		const supPrompt = async (agentId: string) =>
+			(await supToolCall({
+				toolName: "mcp",
+				input: { tool: "send_agent_prompt", args: { agentId, prompt: "do this" } },
+			})) as { block?: boolean; reason?: string } | undefined;
+
+		const peerUnderSingle = await supPrompt(PEER_OF_B);
+		assert.equal(peerUnderSingle?.block, true, "supervisor -> peer is blocked under single too");
+		assert.match(String(peerUnderSingle?.reason), /PROMPT_TARGET_IS_PEER/);
+		assert.match(String(peerUnderSingle?.reason), /bbbbbbbb/, "and names the Lead to talk to");
+
+		assert.equal(
+			(await supPrompt(LEAD_B))?.block,
+			undefined,
+			"the Lead the Supervisor governs stays reachable",
+		);
+		assert.equal(
+			(await supPrompt("eeeeeeee-7777-4777-8777-777777777777"))?.block,
+			undefined,
+			"under single an unresolvable target stays allowed — fail-open, nothing else changed",
+		);
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 		restoreEnv("PASEO_PI_ROLE", prevRole);

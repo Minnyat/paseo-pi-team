@@ -445,7 +445,28 @@ rmSync(home, { recursive: true, force: true });
 		assert.equal(
 			await prompt(PEER_OF_B, { ...leadEnv, PASEO_TEAM_TOPOLOGY: "single" }),
 			null,
-			"single topology leaves the previous behaviour untouched",
+			"single topology leaves a Lead's previous behaviour untouched",
+		);
+
+		// The Supervisor→Peer boundary is the Supervisor's own role rule, not a
+		// jurisdiction rule, so the flag does not gate it. Same expectation as
+		// the Pi adapter's — a difference here is an authority asymmetry.
+		const supEnv = {
+			...leadEnv,
+			PASEO_PI_ROLE: "supervisor",
+			PASEO_AGENT_ID: SUP_A,
+			PASEO_TEAM_TOPOLOGY: "single",
+		};
+		assert.match(
+			String((await prompt(PEER_OF_B, supEnv))?.hookSpecificOutput?.permissionDecisionReason),
+			/PROMPT_TARGET_IS_PEER/,
+			"a Supervisor may not task a Peer, on any topology",
+		);
+		assert.equal(await prompt(LEAD_B, supEnv), null, "its Lead stays reachable");
+		assert.equal(
+			await prompt("eeeeeeee-7777-4777-8777-777777777777", supEnv),
+			null,
+			"and under single an unresolvable target stays allowed (fail-open)",
 		);
 
 		// The jurisdiction verdict has to reach the Lead's turn, the same way the
@@ -482,11 +503,147 @@ rmSync(home, { recursive: true, force: true });
 			{ ...leadEnv, PASEO_TEAM_TOPOLOGY: "multi" },
 		);
 		assert.ok(
-			!String(plain?.hookSpecificOutput?.additionalContext ?? "").includes("Jurisdiction"),
-			"an ordinary prompt gains no jurisdiction notice",
+			!/supervisor message \(this turn\)/.test(
+				String(plain?.hookSpecificOutput?.additionalContext ?? ""),
+			),
+			"an ordinary prompt gains no supervisor notice",
 		);
+
+		// --- the reported failure -------------------------------------------
+		// A Lead on the DEFAULT pack (`single`, one Supervisor) used to receive a
+		// SUPERVISOR_DECISION with no verdict, no attribution and no directive:
+		// bare prose in a user turn. Claude Code's default posture with an
+		// unverified instruction that claims delegated authority is to ask the
+		// human, so the Lead asked — for a decision its own contract had already
+		// delegated to it. The turn context now says so out loud.
+		const singleEnv = { ...leadEnv, PASEO_TEAM_TOPOLOGY: "single" };
+		const binding = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-5", prompt: decision },
+			singleEnv,
+		);
+		const bindingContext = String(binding?.hookSpecificOutput?.additionalContext);
+		assert.match(bindingContext, /SUPERVISOR_DECISION_BINDING/);
+		assert.match(bindingContext, /ACT ON IT/);
+		assert.match(bindingContext, /needs NO Human round-trip/);
+		assert.match(bindingContext, /Sender: verified/);
+		// And the contract it is being asked to apply travels with it: the role
+		// prompt goes in ONCE per session on Claude, so the turn where authority
+		// decides the answer re-injects it rather than trusting a copy from turn
+		// one to still be in reach.
+		assert.match(bindingContext, /Paseo Team Role/);
+
+		// The same directive must not be reachable by anything that can type the
+		// header. An unsigned block is weighed on its evidence and never binds.
+		const unsigned = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-6", prompt: decision.replace(`FROM_AGENT_ID: ${SUP_A}\n`, "") },
+			singleEnv,
+		);
+		const unsignedContext = String(unsigned?.hookSpecificOutput?.additionalContext);
+		assert.match(unsignedContext, /SUPERVISOR_SENDER_UNVERIFIED/);
+		assert.ok(
+			!/ACT ON IT/.test(unsignedContext),
+			"an unverified sender never gets the binding directive",
+		);
+
+		// An ordinary Lead turn, mid-session: no supervisor block, so no notice
+		// and no second copy of the role prompt — but the standing authority line
+		// stays, because Claude never rebuilds the system prompt the way the Pi
+		// extension does on every turn.
+		const ordinary = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-5", prompt: "status on T-1?" },
+			singleEnv,
+		);
+		const ordinaryContext = String(ordinary?.hookSpecificOutput?.additionalContext);
+		assert.match(ordinaryContext, /Paseo Team Authority \(standing\)/);
+		assert.ok(!/supervisor message \(this turn\)/.test(ordinaryContext));
+		assert.ok(
+			!/Paseo Team Role/.test(ordinaryContext),
+			"the full role prompt is not re-sent on every turn",
+		);
+
+		// A Peer is untouched by all of this: no standing block, no notice, even
+		// if its prompt quotes a supervisor block verbatim.
+		const peerTurn = await handleEvent(
+			"user-prompt-submit",
+			{ session_id: "gov-7", prompt: decision },
+			{ ...singleEnv, PASEO_PI_ROLE: "peer" },
+		);
+		const peerContext = String(peerTurn?.hookSpecificOutput?.additionalContext);
+		assert.ok(!/ACT ON IT/.test(peerContext));
+		assert.ok(!/Paseo Team Authority \(standing\)/.test(peerContext));
 	} finally {
 		rmSync(govHome, { recursive: true, force: true });
+		rmSync(paseoHome, { recursive: true, force: true });
+	}
+}
+
+// --- the cluster gate must be reachable THROUGH the adapter ------------------
+//
+// The core rule is unit-tested in cluster.test.mts, but a core rule is only as
+// live as the adapter that feeds it. This case exists because it was NOT: the
+// hook resolved a send_agent_prompt target only under `multi`, so on the
+// DEFAULT `single` pack the core was handed a null target and
+// sendAgentPromptBlockReason cannot refuse a target it cannot see. Every
+// core-level test still passed, because each supplied the target by hand.
+{
+	const clusterHome = mkdtempSync(join(tmpdir(), "paseo-cluster-hook-"));
+	const paseoHome = mkdtempSync(join(tmpdir(), "paseo-cluster-state-"));
+	try {
+		const SELF_LEAD = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+		const FOREIGN_LEAD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+		const HOME_LEAD = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+		const dir = join(paseoHome, "agents", "slug");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `${SELF_LEAD}.json`), JSON.stringify({
+			id: SELF_LEAD, provider: "claude-lead/claude-opus-5", cwd: "D:/Code/shop",
+		}));
+		writeFileSync(join(dir, `${FOREIGN_LEAD}.json`), JSON.stringify({
+			id: FOREIGN_LEAD, provider: "claude-lead/claude-opus-5", cwd: "D:/Code/blog",
+		}));
+		writeFileSync(join(dir, `${HOME_LEAD}.json`), JSON.stringify({
+			id: HOME_LEAD, provider: "claude-lead/claude-opus-5", cwd: "D:/Code/shop",
+		}));
+
+		const leadEnv = {
+			PASEO_TEAM_HOME: clusterHome,
+			PASEO_PI_ROLE: "lead",
+			PASEO_HOME: paseoHome,
+			PASEO_AGENT_ID: SELF_LEAD,
+		};
+		const prompt = (agentId) => ({
+			session_id: "cluster-1",
+			tool_name: "mcp__paseo__send_agent_prompt",
+			tool_input: { agentId, prompt: "status?" },
+		});
+
+		// The topology flag must not gate this: `single` is the pack most likely
+		// to have two projects sharing one host.
+		for (const topology of [undefined, "multi"]) {
+			const env = topology ? { ...leadEnv, PASEO_TEAM_TOPOLOGY: topology } : leadEnv;
+			const denied = await handleEvent("pre-tool-use", prompt(FOREIGN_LEAD), env);
+			assert.match(
+				String(denied?.hookSpecificOutput?.permissionDecisionReason),
+				/PROMPT_TARGET_OUT_OF_CLUSTER/,
+				`a Lead must not prompt another workspace's Lead (topology=${topology ?? "single"})`,
+			);
+			assert.equal(
+				denied?.hookSpecificOutput?.permissionDecision,
+				"deny",
+				"the verdict has to be an actual deny, not just a message",
+			);
+		}
+
+		// ...and coordinator traffic inside the cluster is untouched.
+		assert.equal(
+			await handleEvent("pre-tool-use", prompt(HOME_LEAD), leadEnv),
+			null,
+			"a Lead in the same cluster is still reachable",
+		);
+	} finally {
+		rmSync(clusterHome, { recursive: true, force: true });
 		rmSync(paseoHome, { recursive: true, force: true });
 	}
 }

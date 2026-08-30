@@ -34,8 +34,10 @@ const {
 	LEASE_ACTIONS,
 	LEASE_MAX_TTL_MS,
 	leaseHolderFor,
+	normalizeCluster,
 	normalizeScope,
 	resolveLeases,
+	selfCluster,
 } = await importPolicyCore();
 import { postTeamMessage, readRoom, runPaseo } from "./team-chat.mjs";
 
@@ -69,8 +71,24 @@ function bad(code, message) {
 	return Object.assign(new Error(message), { code });
 }
 
-function leaseBody(action, scope, ttlMs) {
+/**
+ * The LEASE_V1 wire record.
+ *
+ * CLUSTER is APPENDED rather than folded into SCOPE, and that is what keeps the
+ * upgrade safe. SCOPE keeps its exact old meaning, so a pack that has not been
+ * updated still reads every record; and a record written before the field
+ * existed parses with cluster null, which collides with everything — the
+ * pre-cluster behaviour. Rewriting SCOPE instead would have made every live
+ * lease in the room unreadable to the other side of a rolling upgrade, and an
+ * unreadable lease reads as a free scope, which is two writers on one tree.
+ *
+ * Omitted entirely when the cluster is underivable: an empty `CLUSTER:` line
+ * would parse to null anyway, and a field that is sometimes a lie is worse than
+ * a field that is sometimes absent.
+ */
+function leaseBody(action, scope, ttlMs, cluster) {
 	const lines = ["LEASE_V1", `ACTION: ${action}`, `SCOPE: ${scope}`];
+	if (cluster) lines.push(`CLUSTER: ${cluster}`);
 	if (action !== "release") lines.push(`TTL_MS: ${ttlMs}`);
 	return lines.join("\n");
 }
@@ -154,6 +172,13 @@ async function postLease(action, input, options = {}) {
 	const ttlMs = action === "release" ? null : requireTtl(input?.ttlMs);
 	const room = input?.room ?? LEASE_ROOM;
 	const run = options.runPaseo ?? runPaseo;
+	// A scope is repo-relative, so it only identifies a tree together with the
+	// cluster it belongs to. Without this, `src` in one project held `src` in
+	// every other project checked out on the same host.
+	const cluster =
+		options.cluster === undefined
+			? selfCluster()
+			: normalizeCluster(options.cluster);
 
 	const post = () =>
 		postTeamMessage(
@@ -161,7 +186,7 @@ async function postLease(action, input, options = {}) {
 			room,
 			kind: action === "release" ? "release" : "claim",
 			topic: input?.taskId ?? "lease",
-			message: leaseBody(action, scope, ttlMs),
+			message: leaseBody(action, scope, ttlMs, cluster),
 			// A lease event is a record, not a request: it belongs in the room's
 			// history, but no Lead should be pulled out of its work to read it.
 			notify: false,
@@ -190,12 +215,13 @@ async function postLease(action, input, options = {}) {
 	}
 
 	const after = await fetchLeases({ ...options, room, runPaseo: run });
-	const holder = after.ok ? leaseHolderFor(after.leases, scope) : null;
+	const holder = after.ok ? leaseHolderFor(after.leases, scope, cluster) : null;
 	const self = options.selfAgentId ?? process.env.PASEO_AGENT_ID ?? null;
 	return {
 		ok: true,
 		action,
 		scope,
+		cluster,
 		ttlMs,
 		room,
 		correlationId: posted.correlationId,
@@ -246,12 +272,18 @@ export async function leaseStatus(input = {}, options = {}) {
 	}
 	const held = [...result.leases.values()].sort((a, b) => a.claimedAt - b.claimedAt);
 	const scope = input.scope === undefined ? null : requireScope(input.scope);
+	const cluster =
+		input.cluster === undefined ? selfCluster() : normalizeCluster(input.cluster);
 	return {
 		ok: true,
 		room: input.room ?? LEASE_ROOM,
+		cluster,
 		count: held.length,
+		// The whole board, every cluster, deliberately: a Lead reading status is
+		// entitled to SEE that another project holds something. Only the `holder`
+		// answer below — the one a decision is actually made on — is narrowed.
 		leases: held.map((holder) => ({ ...holder, expiresAtIso: new Date(holder.expiresAt).toISOString() })),
-		...(scope ? { scope, holder: leaseHolderFor(result.leases, scope) } : {}),
+		...(scope ? { scope, holder: leaseHolderFor(result.leases, scope, cluster) } : {}),
 	};
 }
 
