@@ -486,11 +486,30 @@ export async function readRoom(input, options = {}) {
 	return { ok: true, room, count: messages.length, messages };
 }
 
+/**
+ * `paseo chat ls` is fleet-wide: it returns every room on the daemon, including
+ * rooms opened by a team working in a different repository. Listing them
+ * unfiltered defeats the allowlist that `post` and `read` enforce — an agent
+ * that may not read a room should not learn its name and id either, because a
+ * discovered room is one the model will try to talk into. Measured 2026-08-30:
+ * a Supervisor in one repo found another repo's lease room this way, addressed
+ * that team's Lead, and reported the WRONG PROJECT'S status back to the human.
+ *
+ * Unset PASEO_TEAM_ROOMS still lists everything, so this only tightens the
+ * configuration that already asked to be tightened.
+ */
 export async function listRooms(options = {}) {
-	selfContext(options);
+	const ctx = selfContext(options);
 	const run = options.runPaseo ?? runPaseo;
 	const rows = await run(["chat", "ls"]);
-	return { ok: true, rooms: Array.isArray(rows) ? rows : [] };
+	const all = Array.isArray(rows) ? rows : [];
+	// A room is addressable by either name or id, so either matching the
+	// allowlist keeps it visible; neither matching hides it.
+	const rooms = all.filter(
+		(row) => roomAllowed(row?.name, ctx.rooms) || roomAllowed(row?.id, ctx.rooms),
+	);
+	const hidden = all.length - rooms.length;
+	return hidden > 0 ? { ok: true, rooms, hidden } : { ok: true, rooms };
 }
 
 async function main() {

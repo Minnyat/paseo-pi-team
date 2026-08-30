@@ -15,6 +15,7 @@ import {
 	TEAM_MESSAGE_KINDS,
 	buildEnvelope,
 	expandRecipients,
+	listRooms,
 	parseTeamMessage,
 	postTeamMessage,
 	roomAllowed,
@@ -196,6 +197,39 @@ await assert.rejects(expandRecipients(["not a ref"], { runPaseo: async () => [],
 		postTeamMessage(base, { selfAgentId: SELF, role: "lead", rooms: "leases", runPaseo: async () => [{ id: OTHER, shortId: "2222222" }] }),
 		/ROOM_NOT_ALLOWED/,
 	);
+}
+{
+	// `paseo chat ls` is fleet-wide, so the listing has to honour the same
+	// allowlist that post/read do. A room an agent may not talk into must not
+	// show up as a suggestion either: that is how a Supervisor in one repo
+	// found another repo's lease room and reported the wrong project's status.
+	const FLEET = [
+		{ id: "408c6b0f-ea7b-4e6c-9310-15574bfa88a3", name: "leases" },
+		{ id: "99999999-9999-4999-8999-999999999999", name: "other-repo-coord" },
+	];
+	const ls = async () => FLEET;
+	const confined = await listRooms({ selfAgentId: SELF, role: "supervisor", rooms: "leases", runPaseo: ls });
+	assert.deepEqual(confined.rooms.map((r) => r.name), ["leases"]);
+	assert.equal(confined.hidden, 1, "the listing says something was withheld rather than pretending the fleet is small");
+
+	// A room named by id in the allowlist stays visible under its id.
+	const byId = await listRooms({
+		selfAgentId: SELF,
+		role: "supervisor",
+		rooms: "99999999-9999-4999-8999-999999999999",
+		runPaseo: ls,
+	});
+	assert.deepEqual(byId.rooms.map((r) => r.name), ["other-repo-coord"]);
+
+	// Unset allowlist keeps today's behaviour: everything, and no `hidden` key.
+	const open = await listRooms({ selfAgentId: SELF, role: "supervisor", runPaseo: ls });
+	assert.equal(open.rooms.length, 2);
+	assert.equal(open.hidden, undefined);
+
+	// An empty allowlist grants nothing, listing included.
+	const closed = await listRooms({ selfAgentId: SELF, role: "supervisor", rooms: "", runPaseo: ls });
+	assert.deepEqual(closed.rooms, []);
+	assert.equal(closed.hidden, 2);
 }
 
 // Only Lead and Supervisor hold this channel; a Peer has peer_ask_lead.
