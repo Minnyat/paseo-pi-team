@@ -314,12 +314,11 @@ function authorityBlock(describe, role, brief) {
  */
 function promptTargetForDecision({ core, claude }, role, toolName, toolInput, env) {
 	if (role !== "lead" && role !== "supervisor") return undefined;
-	// Same split as the Pi adapter: under `single` a Lead needs no lookup, but
-	// the Supervisor→Peer boundary is live on every topology and the core cannot
-	// apply it without knowing the target's role.
-	if (core.teamTopology(env) !== "multi" && role !== "supervisor") {
-		return undefined;
-	}
+	// Same rule as the Pi adapter, and for the same reason: the lookup is driven
+	// by the TOOL, never by the topology. Skipping it for a Lead under `single`
+	// handed the core a null target, and a guard cannot refuse what it cannot
+	// see — which disarmed the cross-cluster refusal on the default pack, the
+	// one most likely to have two projects sharing a host.
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
 	if (classified?.kind !== "paseo-mcp") return undefined;
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"])) {

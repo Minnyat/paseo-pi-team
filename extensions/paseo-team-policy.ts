@@ -200,18 +200,23 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 		selfDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
 		cluster: selfCluster(),
 	};
-	// Under `single` the ownership guard is off for a Lead, so it needs no
-	// lookup at all. The Supervisor still does: "a Supervisor does not task a
-	// Peer" holds on every topology, and the core cannot see the target's role
-	// without this.
-	if (topology !== "multi" && role !== "supervisor") return context;
+	// The target lookup is driven by the TOOL, not by the topology.
+	//
+	// It used to return early here for a Lead under `single`, on the reasoning
+	// that the ownership guard was off for that seat anyway. Two of the rules it
+	// feeds are not ownership rules and are live on every topology — "a
+	// Supervisor does not task a Peer", and "no seat reaches into another
+	// cluster" — so the early return silently disarmed the cluster guard for a
+	// Lead in the DEFAULT pack: the core was asked to judge a target it was
+	// never given, and `sendAgentPromptBlockReason` cannot refuse a target it
+	// cannot see. The cost is one local state-file read on `send_agent_prompt`
+	// calls only; every other tool still returns without touching the disk.
 	const classified = classifyMcpInput(input);
-	if (
+	const isPrompt =
 		classified.kind === "target" &&
-		matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"])
-	) {
-		context.promptTarget = agentOwnership(sendAgentPromptTargetId(input));
-	}
+		matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"]);
+	if (!isPrompt) return context;
+	context.promptTarget = agentOwnership(sendAgentPromptTargetId(input));
 	return context;
 }
 

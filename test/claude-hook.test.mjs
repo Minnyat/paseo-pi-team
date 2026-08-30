@@ -580,4 +580,72 @@ rmSync(home, { recursive: true, force: true });
 	}
 }
 
+// --- the cluster gate must be reachable THROUGH the adapter ------------------
+//
+// The core rule is unit-tested in cluster.test.mts, but a core rule is only as
+// live as the adapter that feeds it. This case exists because it was NOT: the
+// hook resolved a send_agent_prompt target only under `multi`, so on the
+// DEFAULT `single` pack the core was handed a null target and
+// sendAgentPromptBlockReason cannot refuse a target it cannot see. Every
+// core-level test still passed, because each supplied the target by hand.
+{
+	const clusterHome = mkdtempSync(join(tmpdir(), "paseo-cluster-hook-"));
+	const paseoHome = mkdtempSync(join(tmpdir(), "paseo-cluster-state-"));
+	try {
+		const SELF_LEAD = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+		const FOREIGN_LEAD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+		const HOME_LEAD = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+		const dir = join(paseoHome, "agents", "slug");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `${SELF_LEAD}.json`), JSON.stringify({
+			id: SELF_LEAD, provider: "claude-lead/claude-opus-5", cwd: "D:/Code/shop",
+		}));
+		writeFileSync(join(dir, `${FOREIGN_LEAD}.json`), JSON.stringify({
+			id: FOREIGN_LEAD, provider: "claude-lead/claude-opus-5", cwd: "D:/Code/blog",
+		}));
+		writeFileSync(join(dir, `${HOME_LEAD}.json`), JSON.stringify({
+			id: HOME_LEAD, provider: "claude-lead/claude-opus-5", cwd: "D:/Code/shop",
+		}));
+
+		const leadEnv = {
+			PASEO_TEAM_HOME: clusterHome,
+			PASEO_PI_ROLE: "lead",
+			PASEO_HOME: paseoHome,
+			PASEO_AGENT_ID: SELF_LEAD,
+		};
+		const prompt = (agentId) => ({
+			session_id: "cluster-1",
+			tool_name: "mcp__paseo__send_agent_prompt",
+			tool_input: { agentId, prompt: "status?" },
+		});
+
+		// The topology flag must not gate this: `single` is the pack most likely
+		// to have two projects sharing one host.
+		for (const topology of [undefined, "multi"]) {
+			const env = topology ? { ...leadEnv, PASEO_TEAM_TOPOLOGY: topology } : leadEnv;
+			const denied = await handleEvent("pre-tool-use", prompt(FOREIGN_LEAD), env);
+			assert.match(
+				String(denied?.hookSpecificOutput?.permissionDecisionReason),
+				/PROMPT_TARGET_OUT_OF_CLUSTER/,
+				`a Lead must not prompt another workspace's Lead (topology=${topology ?? "single"})`,
+			);
+			assert.equal(
+				denied?.hookSpecificOutput?.permissionDecision,
+				"deny",
+				"the verdict has to be an actual deny, not just a message",
+			);
+		}
+
+		// ...and coordinator traffic inside the cluster is untouched.
+		assert.equal(
+			await handleEvent("pre-tool-use", prompt(HOME_LEAD), leadEnv),
+			null,
+			"a Lead in the same cluster is still reachable",
+		);
+	} finally {
+		rmSync(clusterHome, { recursive: true, force: true });
+		rmSync(paseoHome, { recursive: true, force: true });
+	}
+}
+
 console.log("claude hook tests passed");

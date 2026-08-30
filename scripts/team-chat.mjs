@@ -175,15 +175,23 @@ export function validateTeamMessage(input) {
 }
 
 /**
- * Cluster for a `paseo ls` row.
+ * Cluster for a `paseo ls` row — from the state file, or not at all.
  *
- * `ls` returns `cwd` but neither labels nor workspaceId, so the state file is
- * the better source and `cwd` is the fallback for an agent Paseo has written no
- * state for. Null means "could not tell", which never narrows anything.
+ * This used to fall back to the row's `cwd`, which looked like free information
+ * and was in fact a guess that NARROWS. `agentCluster` resolves
+ * `team.cluster → workspaceId → cwd`, so a seat whose state file exists
+ * normally answers on the `workspaceId` rung while a seat Paseo has not written
+ * state for yet would answer on the `cwd` rung. Comparing those two is
+ * comparing different axes: `clustersSeparate` says "separate", and a perfectly
+ * legitimate recipient is dropped from a broadcast in silence.
+ *
+ * So an unresolvable row is null — "could not tell" — and null never narrows
+ * anything. The cost is that a freshly created foreign seat stays in an
+ * audience until Paseo writes its state; the alternative cost is silently not
+ * delivering to one of our own, which is the worse of the two.
  */
 function rowCluster(row, clusters) {
-	const byId = row?.id ? clusters[row.id] : null;
-	return byId ?? normalizeCluster(row?.cwd) ?? null;
+	return (row?.id ? clusters[row.id] : null) ?? null;
 }
 
 /**

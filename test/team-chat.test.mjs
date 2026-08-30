@@ -168,38 +168,57 @@ await assert.rejects(expandRecipients(["not a ref"], { runPaseo: async () => [],
 // seat ON THE HOST, and a mention WAKES an idle agent. A team that names a seat
 // `payments` in two repos silently rang both.
 {
-	const rows = [
-		{ id: OTHER, shortId: "2222222", cwd: "D:/Code/shop" },
-		{ id: THIRD, shortId: "3333333", cwd: "D:/Code/blog" },
-	];
-	const runner = async () => rows;
+	// The cluster comes from the agent STATE FILE, never from the `paseo ls`
+	// row. A row carries `cwd`, which looks like free information but is the
+	// third rung of agentCluster's ladder — comparing it against an `own` that
+	// resolved on the workspaceId rung compares different axes and drops a
+	// legitimate recipient. So these fixtures are real state files.
+	const home = mkdtempSync(join(tmpdir(), "pteam-chat-"));
+	const previous = process.env.PASEO_HOME;
+	try {
+		const dir = join(home, "agents", "slug");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `${OTHER}.json`), JSON.stringify({ id: OTHER, cwd: "D:/Code/shop" }));
+		writeFileSync(join(dir, `${THIRD}.json`), JSON.stringify({ id: THIRD, cwd: "D:/Code/blog" }));
+		process.env.PASEO_HOME = home;
 
-	const scoped = await expandRecipients(["domain:payments"], {
-		runPaseo: runner,
-		selfAgentId: SELF,
-		cluster: "D:\\Code\\shop",
-	});
-	assert.deepEqual(scoped.agentIds, [OTHER], "the other project's seat is not in the audience");
+		const rows = [
+			{ id: OTHER, shortId: "2222222" },
+			{ id: THIRD, shortId: "3333333" },
+		];
+		const scoped = await expandRecipients(["domain:payments"], {
+			runPaseo: async () => rows,
+			selfAgentId: SELF,
+			cluster: "D:\\Code\\shop",
+		});
+		assert.deepEqual(scoped.agentIds, [OTHER], "the other project's seat is not in the audience");
 
-	// Fail-open: a seat whose cluster cannot be derived stays in the audience,
-	// so an unlabelled host behaves exactly as it did before.
-	const unknown = await expandRecipients(["domain:payments"], {
-		runPaseo: async () => [{ id: OTHER, shortId: "2222222" }],
-		selfAgentId: SELF,
-		cluster: "D:/Code/shop",
-	});
-	assert.deepEqual(unknown.agentIds, [OTHER]);
-
-	// A fan-out that filters down to nothing must SAY so — a broadcast can never
-	// shrink to silence unnoticed — and name the reason.
-	await assert.rejects(
-		expandRecipients(["domain:payments"], {
-			runPaseo: async () => [{ id: THIRD, shortId: "3333333", cwd: "D:/Code/blog" }],
+		// Fail-open: a seat Paseo has written no state for cannot be shown to be
+		// elsewhere, so it stays in the audience. Silently not delivering to one
+		// of our own is worse than briefly over-delivering.
+		const unknownSeat = "44444444-4444-4444-8444-444444444444";
+		const unknown = await expandRecipients(["domain:payments"], {
+			runPaseo: async () => [{ id: unknownSeat, shortId: "4444444" }],
 			selfAgentId: SELF,
 			cluster: "D:/Code/shop",
-		}),
-		/NO_RECIPIENTS|other clusters/i,
-	);
+		});
+		assert.deepEqual(unknown.agentIds, [unknownSeat]);
+
+		// A fan-out that filters down to nothing must SAY so — a broadcast can
+		// never shrink to silence unnoticed — and name the reason.
+		await assert.rejects(
+			expandRecipients(["domain:payments"], {
+				runPaseo: async () => [{ id: THIRD, shortId: "3333333" }],
+				selfAgentId: SELF,
+				cluster: "D:/Code/shop",
+			}),
+			/NO_RECIPIENTS|other clusters/i,
+		);
+	} finally {
+		if (previous === undefined) delete process.env.PASEO_HOME;
+		else process.env.PASEO_HOME = previous;
+		rmSync(home, { recursive: true, force: true });
+	}
 }
 {
 	// An explicit agent ref is a DELIBERATE address, so a foreign one throws

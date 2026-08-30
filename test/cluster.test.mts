@@ -299,6 +299,36 @@ test("an observation from another cluster only warns — observing across projec
 	assert.equal(verdict.severity, "warn");
 });
 
+test("under multi, a cross-cluster decision says CLUSTER_MISMATCH, not OVERLAP", () => {
+	// Regression guard for an ordering bug that only appears once the seat list
+	// is REAL. Deciding cluster after the jurisdiction branch made it
+	// unreachable under `multi`: supervisorSeats() filters the foreign sender
+	// out, so `covering` holds only the legitimate in-cluster Supervisor while
+	// `contenders` keeps it (the sender's id matches nothing) — and the Lead was
+	// told to escalate a jurisdiction conflict that does not exist instead of
+	// being told the message came from another workspace. Passing `supervisors:
+	// []` here, as the first version of this suite did, hides it completely.
+	const verdict = withHomeReturning(
+		{
+			[SUP_B]: { provider: "pi-supervisor/x/y", labels: { "team.domain": "backend" }, cwd: "D:/Code/blog" },
+		},
+		(env) =>
+			supervisorTurnVerdict({
+				block: parseSupervisorBlock(decision()),
+				leadDomain: "backend",
+				// The Lead's OWN cluster has a Supervisor, as any real one does.
+				supervisors: [{ agentId: SUP_A, domain: "backend", cluster: SHOP }],
+				attribution: supervisorAttribution(SUP_B, env),
+				topology: "multi",
+				leadCluster: SHOP,
+			}),
+	);
+	assert.ok(verdict);
+	assert.equal(verdict.code, "CLUSTER_MISMATCH");
+	assert.notEqual(verdict.code, "JURISDICTION_OVERLAP");
+	assert.equal(verdict.severity, "refuse");
+});
+
 test("same cluster, and unknown cluster, leave the verdict exactly as it was", () => {
 	const same = verdictFor(decision(), { topology: "single", leadCluster: BLOG });
 	assert.ok(same);
