@@ -80,7 +80,9 @@ foreach ($supportFile in $teamSupportFiles) {
 }
 
 # agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
-# idempotent and merges only the missing agent-browser entry in Pi's MCP config.
+# idempotent and merges only the missing agent-browser entry in Pi's MCP config;
+# the Claude half of that registration is done by claude-setup.mjs below, which
+# owns ~/.claude.json.
 & node (Join-Path $RolePackRoot "scripts\ocr-setup.mjs")
 if ($LASTEXITCODE -ne 0) {
   throw "OCR setup failed with exit code $LASTEXITCODE"
@@ -102,11 +104,15 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
   $env:PASEO_TEAM_HOOK_SCRIPT = (Join-Path $teamScriptsDir "claude-hook.mjs")
   $env:PASEO_TEAM_MCP_SCRIPT  = (Join-Path $teamScriptsDir "claude-team-mcp.mjs")
   $env:PASEO_TEAM_POLICY_DIR  = $policyCoreTarget
-  & node (Join-Path $RolePackRoot "scripts\claude-setup.mjs") --install
+  # Same --attach-cdp-port the pi entry got: the two runtimes must reach the
+  # same browser, or a task moved between seats silently changes what it drives.
+  $claudeSetupArgs = @("--install")
+  if ($AttachCdpPort) { $claudeSetupArgs += @("--attach-cdp-port", $AttachCdpPort) }
+  & node (Join-Path $RolePackRoot "scripts\claude-setup.mjs") @claudeSetupArgs
   if ($LASTEXITCODE -ne 0) {
     throw "claude setup failed with exit code $LASTEXITCODE"
   }
-  $claudeSetupStatus = "installed (hooks + paseo-team MCP server)"
+  $claudeSetupStatus = "installed (hooks + paseo-team and agent-browser MCP servers)"
 }
 
 Write-Host ""
@@ -124,7 +130,7 @@ Write-Host "  support default -> `$env:PI_CODING_AGENT_DIR\extensions\paseo-team
 Write-Host "  env override is optional; no user-profile mutation is required"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing), agent-browser CLI, Chrome runtime, skill and Pi MCP config."
+Write-Host "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing), agent-browser CLI, Chrome runtime, skill and the MCP entry for every installed runtime (Pi mcp.json, and ~/.claude.json when claude is present)."
 Write-Host "  2. Verify OCR if needed: Get-Command ocr; ocr version"
 Write-Host "  3. Install the MCP adapter (PINNED version - Paseo tools depend on it):"
 Write-Host "     pi install npm:pi-mcp-adapter@2.19.0"

@@ -8,7 +8,8 @@
 // Checks (per host): node, git, paseo CLI + daemon, pi CLI, pi-mcp-adapter,
 // role-pack extension + prompts, Paseo role providers, model inventory,
 // routing-config validity, per-model thinking support, cluster routing
-// contract, endpoint env presence, agent-browser CDP mode + reachability,
+// contract, endpoint env presence, agent-browser MCP registration per runtime,
+// CDP mode + reachability,
 // repository state.
 //
 // Never prints secret values: only env-var NAMES are checked/reported.
@@ -22,7 +23,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { verify as verifyClaudeSetup } from "./claude-setup.mjs";
+import {
+	browserMcpInstalled,
+	claudeUserConfigPath,
+	readJsonOrNull,
+	verify as verifyClaudeSetup,
+} from "./claude-setup.mjs";
 import { orchestrationPreferencesNotice } from "./lib-common.mjs";
 import {
 	describeCdpTarget,
@@ -358,6 +364,24 @@ if (wantPi) {
 				);
 			}
 		}
+	}
+
+	// The checks above read PI's config only. Claude Code keeps its MCP servers
+	// in a different file with a different owner, so a pi-only probe reports a
+	// green browser surface for a fleet whose Claude seats have no browser tool
+	// at all — the exact silence this check exists to break.
+	if (wantClaude) {
+		const claudeConfigPath = claudeUserConfigPath();
+		const claudeConfig = readJsonOrNull(claudeConfigPath);
+		if (claudeConfig === undefined)
+			fail("agent-browser-mcp:claude", `${claudeConfigPath} is present but not valid JSON`);
+		else if (browserMcpInstalled(claudeConfig))
+			pass("agent-browser-mcp:claude", claudeConfigPath);
+		else
+			fail(
+				"agent-browser-mcp:claude",
+				`${claudeConfigPath} has no usable agent-browser server — Claude Lead/Peer cannot call mcp__agent-browser__* → run: node scripts/claude-setup.mjs --install`,
+			);
 	}
 }
 

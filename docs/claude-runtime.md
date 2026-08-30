@@ -165,7 +165,7 @@ a granted push is branch-scoped to exactly
 present. Manually:
 
 ```bash
-node scripts/claude-setup.mjs --install          # hooks + paseo-team MCP server
+node scripts/claude-setup.mjs --install          # hooks + paseo-team and agent-browser MCP servers
 node scripts/claude-setup.mjs --print-providers  # the claude-* provider block
 node scripts/claude-setup.mjs --verify           # exit 1 when incomplete
 pteam claude-setup --verify --json               # same thing through the CLI
@@ -180,6 +180,16 @@ Both target files belong to the user and already carry other tools' entries
 merges: our entries are tagged `paseo-team-role-policy`, and only tagged
 entries are replaced or removed. A file that cannot be parsed is reported and
 left byte-for-byte alone.
+
+`~/.claude.json` gets two servers, and they are owned differently.
+`paseo-team` is ours and is rewritten on every install. `agent-browser` is the
+same stdio server the pi installer registers in `~/.pi/agent/mcp.json`, written
+in Claude's dialect (`type: "stdio"`, no `lifecycle`) — and an entry the user
+already configured is left exactly as it is. Without it the `Lead` and `Peer`
+rows for `mcp__agent-browser__*` in the table above are unreachable: the policy
+allows a tool the runtime never registered. `--verify` and `preflight` both
+report it, so the gap fails a check rather than surfacing as an agent that says
+it cannot reach a browser.
 
 ## Mixed-fleet routing
 

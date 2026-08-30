@@ -323,6 +323,68 @@ on a target it cannot resolve under `single` (fail-closed under `multi`), so an
 unreadable state file cannot silence a Supervisor that works today. Parentage is a declared label, not an authenticated
 fact — these catch mistakes, not forgery.
 
+### Which workspace a seat belongs to — `team.cluster`
+
+`team.domain` says what a seat **governs**. It never said where a seat
+**lives**, and every governance read in the pack is host-global on purpose:
+`$PASEO_HOME/agents` is indexed by agent id across every cwd-slug, and the
+`team_chat` domain fan-out runs `paseo ls -g` — the flag whose whole job is to
+escape cwd scoping. With one project per host that gap never showed. With two
+it did, three ways: two unrelated repos that both label a seat `backend` made
+each other's Supervisors contenders (so `JURISDICTION_OVERLAP` fired on a
+cluster with exactly one Supervisor); a Lead could `send_agent_prompt` another
+project's Lead, because the ownership guard asked only *is the target a
+coordinator*; and `src/index.ts` is a lease scope in every repo on the machine,
+all filed in one global ledger room.
+
+A seat's cluster is derived, explicit source first, so an existing deployment is
+scoped without relabelling anything:
+
+| Order | Source | Why |
+|---|---|---|
+| 1 | `team.cluster` label / `PASEO_TEAM_CLUSTER` | a reviewer workspace is a linked **worktree** — different `workspaceId` *and* different cwd from its Lead, so only a declared label can keep those two seats together |
+| 2 | `workspaceId` | Paseo's own boundary, when there is one |
+| 3 | `cwd` | what a plain `paseo run` has instead |
+| 4 | *(none)* | unknown |
+
+**Unknown narrows nothing.** Every cluster rule only ever *removes* a
+restriction — drops a contender, permits a prompt, frees a scope — so
+separation has to be proven: an underivable cluster on either side leaves
+today's behaviour exactly as it was. This is the same instinct as the
+`PASEO_TEAM_TOPOLOGY` typo rule, pointed the other way: a wrong guess must cost
+a blocked call with a reason, never governance that quietly switched itself off.
+
+What the axis gates — **authority, never observation**. A Supervisor may watch
+several workspaces; that is its job. It may not *decide* for one it does not
+live in:
+
+| Surface | Refusal |
+|---|---|
+| `SUPERVISOR_DECISION` from another cluster | `CLUSTER_MISMATCH` (refused; a bare observation only warns) |
+| `send_agent_prompt` at another cluster's Lead/Supervisor | `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER` |
+| `team_chat` `domain:` fan-out | foreign seats drop out of the audience; `NO_RECIPIENTS` if that empties it |
+| `team_chat` explicit agent ref | `RECIPIENT_OUT_OF_CLUSTER` — a deliberate address fails loudly rather than being dropped |
+| scope lease | `LEASE_V1` carries `CLUSTER:`; scopes collide only inside one cluster |
+
+`CLUSTER_MISMATCH` and `PROMPT_TARGET_OUT_OF_CLUSTER` are **not** gated on
+`PASEO_TEAM_TOPOLOGY`, for the same reason `PROMPT_TARGET_IS_PEER` is not: this
+is not a jurisdiction question but a prior one — *is this message even addressed
+to my project*. `single` is the pack that needs it most, since it runs no
+jurisdiction rules at all; before the axis existed, a Supervisor in another
+workspace on the same host reached a Lead with a verdict of
+`SUPERVISOR_DECISION_BINDING`, whose directive is *ACT ON IT … needs NO Human
+round-trip*.
+
+A seat's own subagent is always reachable, cluster or not — the parentage test
+runs first, which is what keeps the mandated reviewer-worktree flow working.
+
+The lease ledger stays backward compatible: `CLUSTER:` is a new field beside
+`SCOPE:`, never folded into it, and a record written before the field existed
+parses with a null cluster that collides with everything — its old, coarser
+meaning. Release and renew match on *proven* separation rather than on an exact
+key, so a lease claimed by the old pack can still be released by the new one
+mid-upgrade.
+
 ### Handing a seat over — briefing handoff vs `team_fork`
 
 | Situation | Mechanism |
@@ -412,9 +474,13 @@ What the installers copy:
 | bundled `agent-browser` skill | `~/.pi/agent/skills/agent-browser/` |
 
 It also installs the `agent-browser` CLI and Chrome runtime when missing, and
-merges an MCP entry — `agent-browser: { command: "agent-browser", args: ["mcp"] }`
-— into `~/.pi/agent/mcp.json` when it is absent from the standard config
-locations.
+merges an MCP entry for **every runtime installed on the host** when it is
+absent: `{ command: "agent-browser", args: ["mcp"], lifecycle: "lazy" }` into
+`~/.pi/agent/mcp.json` for pi, and `{ type: "stdio", command: "agent-browser",
+args: ["mcp"] }` into `~/.claude.json` for Claude Code. Same server, two config
+dialects — pi ignores `type`, Claude ignores `lifecycle`. Registering only one
+of them leaves the other runtime's Lead and Peers with no browser tool at all,
+while the role policy still says they may use one.
 
 When the `claude` CLI is present, the installers also run
 `scripts/claude-setup.mjs --install`, which merges this pack's hooks into
@@ -437,13 +503,20 @@ The installer probes four things:
 - `agent-browser --version`
 - `agent-browser doctor --offline --quick`
 - the bundled skill (`agent-browser skills path agent-browser`)
-- the standard MCP config locations
+- the standard MCP config locations, per runtime (`~/.pi/agent/mcp.json` and,
+  when `claude` is installed, `~/.claude.json`)
 
 Whatever is missing, it then repairs: installs OCR (current pin `1.9.2`, keeping
 any `>= 1.8.10` that passes the capability probe), runs `npm install -g
 agent-browser` followed by `agent-browser install` (`--with-deps` on Linux),
 copies the skill, and merges the `agent-browser` entry into
-`~/.pi/agent/mcp.json` without overwriting other servers.
+`~/.pi/agent/mcp.json` — and into `~/.claude.json` through
+`scripts/claude-setup.mjs`, which owns that file — without overwriting other
+servers. An `agent-browser` entry that already exists is never rewritten in
+either file; asking for an `--attach-cdp-port` that contradicts it is a visible
+error, not a silent no-op. `preflight` reports the registration per runtime
+(`agent-browser-mcp`, `agent-browser-mcp:claude`), so a half-installed browser
+surface fails a check instead of passing one.
 
 Re-running the installer is safe.
 

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	AGENT_BROWSER_MCP_SERVER,
 	agentBrowserCdpTarget,
@@ -390,6 +392,95 @@ for (const args of [["mcp", "--tools", "core"], ["--cdp", "9333", "mcp"]]) {
 	const probe = await probeCdpEndpoint({ host: "::1", port, timeoutMs: 2000 });
 	assert.equal(probe.ok, true, "probeCdpEndpoint must reach an IPv6 endpoint");
 	await new Promise((resolve) => server.close(resolve));
+}
+
+// --- MCP dialects: the same server, two config formats ------------------------
+//
+// The entry is read by two different runtimes. pi-mcp-adapter takes
+// `lifecycle`; Claude Code does not know that field and wants an explicit
+// transport `type`. One shape written into both files is a config that only
+// half-works, so the dialect is part of the entry contract.
+{
+	const pi = browserMcpConfig();
+	assert.deepEqual(pi, { command: "agent-browser", args: ["mcp"], lifecycle: "lazy" });
+	assert.deepEqual(browserMcpConfig({ dialect: "pi" }), pi, "pi is the default dialect");
+
+	const claude = browserMcpConfig({ dialect: "claude" });
+	assert.deepEqual(claude, {
+		type: "stdio",
+		command: "agent-browser",
+		args: ["mcp"],
+	});
+	assert.equal(claude.lifecycle, undefined, "lifecycle is a pi-only field");
+
+	// Attach mode carries the same global --cdp flag in both dialects.
+	assert.deepEqual(browserMcpConfig({ dialect: "claude", cdpPort: 9222 }).args, [
+		"--cdp",
+		"9222",
+		"mcp",
+	]);
+
+	// Both shapes must pass the validator that decides whether an install
+	// OVERWRITES an entry — otherwise a Claude entry we wrote ourselves would
+	// be clobbered on the next run.
+	assert.equal(isValidAgentBrowserMcpServer(claude), true);
+	assert.deepEqual(agentBrowserCdpTarget(claude), { mode: "launch", port: null });
+	assert.deepEqual(
+		agentBrowserCdpTarget(browserMcpConfig({ dialect: "claude", cdpPort: 9222 })),
+		{ mode: "attach", port: 9222 },
+	);
+
+	// An unknown dialect is a programming error, not a silently-pi default: it
+	// would write a file the target runtime cannot read.
+	assert.throws(() => browserMcpConfig({ dialect: "codex" }), /dialect/i);
+}
+
+// The merge honours the dialect and still never rewrites what the user owns.
+{
+	const merged = mergeAgentBrowserMcpConfig({}, { dialect: "claude" });
+	assert.deepEqual(merged.mcpServers[AGENT_BROWSER_MCP_SERVER], {
+		type: "stdio",
+		command: "agent-browser",
+		args: ["mcp"],
+	});
+
+	const owned = {
+		mcpServers: {
+			[AGENT_BROWSER_MCP_SERVER]: { command: "agent-browser", args: ["mcp"] },
+		},
+	};
+	assert.deepEqual(
+		mergeAgentBrowserMcpConfig(owned, { dialect: "claude" }),
+		owned,
+		"a valid existing entry survives a claude-dialect merge untouched",
+	);
+}
+
+// Importing this module must never INSTALL anything.
+//
+// The entry point used to fire on a bare `process.argv.includes("--install")`,
+// which is true for every importer that happens to be running an install of
+// its own — claude-setup.mjs imports the entry shape from here and is invoked
+// with exactly that flag. A module that installs when it is read turns one
+// runtime's install into the other runtime's too.
+{
+	const dir = mkdtempSync(join(tmpdir(), "paseo-browser-import-"));
+	const probe = join(dir, "probe.mjs");
+	const moduleUrl = pathToFileURL(
+		join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "browser-setup.mjs"),
+	).href;
+	writeFileSync(
+		probe,
+		`import ${JSON.stringify(moduleUrl)};\nprocess.stdout.write("imported");\n`,
+		"utf8",
+	);
+	const result = spawnSync(process.execPath, [probe, "--install"], {
+		encoding: "utf8",
+		timeout: 60000,
+	});
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "imported", "an import must not run the installer");
+	rmSync(dir, { recursive: true, force: true });
 }
 
 console.log("[paseo-team] browser setup tests passed");

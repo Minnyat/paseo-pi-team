@@ -25,10 +25,13 @@ import {
 	removeMcpServer,
 	uninstall,
 	verify,
+	mergeBrowserMcpServer,
+	removeBrowserMcpServer,
 	HOOK_EVENTS,
 	PASEO_TEAM_HOOK_TAG,
 	TEAM_MCP_SERVER_NAME,
 } from "../scripts/claude-setup.mjs";
+import { AGENT_BROWSER_MCP_SERVER } from "../scripts/browser-setup.mjs";
 
 const home = mkdtempSync(join(tmpdir(), "paseo-claude-setup-"));
 const claudeDir = join(home, ".claude");
@@ -255,6 +258,116 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		assert.deepEqual(example.agents.providers[name], provider, `${name} drifted from the generator`);
 	}
 	assert.ok(example.agents.providers["pi-peer"], "pi providers stay in the example");
+}
+
+// --- agent-browser on the Claude side -----------------------------------------
+//
+// The Lead may drive a browser and a granted Peer may too (claude-policy.ts
+// classifies mcp__agent-browser__* before the role allowlist), but a tool the
+// runtime never registered cannot be called. Pi got its entry from
+// browser-setup.mjs; ~/.claude.json is owned by this module, so the same
+// server has to be registered here or the Claude half of that policy is dead.
+{
+	const merged = mergeBrowserMcpServer({ mcpServers: { other: { command: "x" } } });
+	assert.deepEqual(merged.mcpServers.other, { command: "x" });
+	assert.deepEqual(merged.mcpServers[AGENT_BROWSER_MCP_SERVER], {
+		type: "stdio",
+		command: "agent-browser",
+		args: ["mcp"],
+	});
+
+	// Attach mode reaches Claude through the same flag the pi entry gets.
+	assert.deepEqual(
+		mergeBrowserMcpServer({}, { cdpPort: 9222 }).mcpServers[AGENT_BROWSER_MCP_SERVER].args,
+		["--cdp", "9222", "mcp"],
+	);
+
+	// An entry the user already owns is never rewritten — same rule as pi.
+	const owned = {
+		mcpServers: {
+			[AGENT_BROWSER_MCP_SERVER]: { command: "agent-browser", args: ["--cdp", "9333", "mcp"] },
+		},
+	};
+	assert.deepEqual(mergeBrowserMcpServer(owned), owned);
+
+	const removed = removeBrowserMcpServer(merged);
+	assert.deepEqual(Object.keys(removed.mcpServers), ["other"]);
+	assert.deepEqual(removeBrowserMcpServer({}), {});
+}
+
+// install/verify/uninstall must cover BOTH servers, on a fresh config file.
+{
+	const browserDir = mkdtempSync(join(tmpdir(), "paseo-claude-browser-"));
+	const browserConfig = join(browserDir, ".claude.json");
+	const browserEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: browserDir,
+		PASEO_TEAM_CLAUDE_USER_CONFIG: browserConfig,
+	};
+
+	const before = await verify(browserEnv);
+	assert.equal(before.browserMcpServer, false);
+	assert.ok(
+		before.missing.includes(`mcp:${AGENT_BROWSER_MCP_SERVER}`),
+		"a missing browser server is reported, not silently passed",
+	);
+
+	const installed = await install(browserEnv);
+	assert.equal(installed.ok, true);
+	const config = JSON.parse(readFileSync(browserConfig, "utf8"));
+	assert.ok(config.mcpServers[TEAM_MCP_SERVER_NAME], "the team server is still installed");
+	assert.equal(config.mcpServers[AGENT_BROWSER_MCP_SERVER].command, "agent-browser");
+
+	const after = await verify(browserEnv);
+	assert.equal(after.browserMcpServer, true);
+	assert.equal(after.ok, true, JSON.stringify(after.missing));
+
+	// Idempotent: the second install writes nothing.
+	assert.equal((await install(browserEnv)).mcp.status, "unchanged");
+
+	// A disabled entry is present but unusable — verify must not call it ok.
+	const disabled = JSON.parse(readFileSync(browserConfig, "utf8"));
+	disabled.mcpServers[AGENT_BROWSER_MCP_SERVER].disabled = true;
+	writeFileSync(browserConfig, JSON.stringify(disabled, null, 2), "utf8");
+	assert.equal((await verify(browserEnv)).browserMcpServer, false);
+	writeFileSync(browserConfig, JSON.stringify(config, null, 2), "utf8");
+
+	await uninstall(browserEnv);
+	const cleaned = JSON.parse(readFileSync(browserConfig, "utf8"));
+	assert.equal(cleaned.mcpServers[AGENT_BROWSER_MCP_SERVER], undefined);
+	assert.equal(cleaned.mcpServers[TEAM_MCP_SERVER_NAME], undefined);
+	rmSync(browserDir, { recursive: true, force: true });
+}
+
+// A requested attach port that contradicts the entry already on disk is an
+// error you can see, not an install that silently keeps the old mode.
+{
+	const conflictDir = mkdtempSync(join(tmpdir(), "paseo-claude-cdp-"));
+	const conflictConfig = join(conflictDir, ".claude.json");
+	writeFileSync(
+		conflictConfig,
+		JSON.stringify({
+			mcpServers: {
+				[AGENT_BROWSER_MCP_SERVER]: { command: "agent-browser", args: ["mcp"] },
+			},
+		}, null, 2),
+		"utf8",
+	);
+	const conflictEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: conflictDir,
+		PASEO_TEAM_CLAUDE_USER_CONFIG: conflictConfig,
+	};
+	const result = await install(conflictEnv, { cdpPort: 9222 });
+	assert.equal(result.ok, false);
+	assert.equal(result.mcp.status, "failed");
+	assert.match(result.mcp.error, /9222/);
+	assert.deepEqual(
+		JSON.parse(readFileSync(conflictConfig, "utf8")).mcpServers[AGENT_BROWSER_MCP_SERVER].args,
+		["mcp"],
+		"the user's entry is left exactly as it was",
+	);
+	rmSync(conflictDir, { recursive: true, force: true });
 }
 
 rmSync(home, { recursive: true, force: true });

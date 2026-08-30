@@ -18,7 +18,11 @@ import { join } from "node:path";
 import * as cw from "./config-walker.mjs";
 import * as claudeSetup from "../../scripts/claude-setup.mjs";
 
-/** The one mcp.json server entry browser-setup.mjs adds; nothing else is ours. */
+/**
+ * The one PI mcp.json server entry browser-setup.mjs adds; nothing else there
+ * is ours. The Claude copy of this same server lives in ~/.claude.json and is
+ * removed by claudeSetup.uninstall(), which owns that file.
+ */
 export const MCP_ENTRY = "agent-browser";
 
 export function teamScriptsDir() {
