@@ -1,0 +1,18 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"skipLibCheck": true,
+		"noUncheckedIndexedAccess": true,
+		"allowImportingTsExtensions": true,
+		"rewriteRelativeImportExtensions": true,
+		"types": ["node"],
+		"noEmit": false,
+		"declaration": false,
+		"sourceMap": false,
+		"removeComments": false
+	},
+	"include": ["extensions/paseo-team-core/**/*.ts"]
+}

@@ -39,14 +39,25 @@ export const SESSION_STATE_TTL_MS = 12 * 60 * 60 * 1000;
  */
 export const POLICY_CORE_DIR = "paseo-team-core";
 
+/**
+ * `.js` before `.ts`: the built output is the only variant that loads from an
+ * installed package, because Node refuses to strip types under `node_modules`.
+ * Where a checkout or a pi install holds both, they are the same module.
+ */
+export function policyModuleVariants(name) {
+	const base = name.replace(/\.(ts|js)$/, "");
+	return [`${base}.js`, `${base}.ts`];
+}
+
 export function policyModulePath(name, env = process.env) {
 	const configured = env.PASEO_TEAM_POLICY_DIR?.trim();
-	const candidates = configured
-		? [join(configured, name)]
-		: [
-				join(HERE, "..", POLICY_CORE_DIR, name),
-				join(HERE, "..", "extensions", POLICY_CORE_DIR, name),
-			];
+	const dirs = configured
+		? [configured]
+		: [join(HERE, "..", POLICY_CORE_DIR), join(HERE, "..", "extensions", POLICY_CORE_DIR)];
+	const candidates = [];
+	for (const dir of dirs) {
+		for (const variant of policyModuleVariants(name)) candidates.push(join(dir, variant));
+	}
 	const found = candidates.find((candidate) => existsSync(candidate));
 	if (!found) {
 		throw new Error(

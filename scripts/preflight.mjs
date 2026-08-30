@@ -402,8 +402,12 @@ if (wantPi) {
 	// Both runtimes read the SAME policy core and the SAME role prompts, so
 	// these are checked regardless of family.
 	const coreDir = join(homedir(), ".pi", "agent", "extensions", "paseo-team-core");
-	const missingModules = ["policy-core.ts", "claude-policy.ts"].filter(
-		(name) => !existsSync(join(coreDir, name)),
+	// Either extension satisfies the check: `.ts` is what pi loads, `.js` is the
+	// built sibling, and an install carrying only one of them is still complete.
+	const coreModule = (name) =>
+		[join(coreDir, `${name}.js`), join(coreDir, `${name}.ts`)].find((p) => existsSync(p)) ?? null;
+	const missingModules = ["policy-core", "claude-policy"].filter(
+		(name) => coreModule(name) === null,
 	);
 	if (missingModules.length > 0) {
 		fail(
@@ -417,9 +421,9 @@ if (wantPi) {
 		// looks identical to a healthy install until a Peer runs unrestricted.
 		// Importing it here is the only check that actually proves it loads.
 		try {
-			const core = await import(pathToFileURL(join(coreDir, "policy-core.ts")).href);
+			const core = await import(pathToFileURL(coreModule("policy-core")).href);
 			const claudeDialect = await import(
-				pathToFileURL(join(coreDir, "claude-policy.ts")).href
+				pathToFileURL(coreModule("claude-policy")).href
 			);
 			if (
 				typeof core.parseTaskBrief !== "function" ||

@@ -18,7 +18,7 @@ import {
 	isAgentId,
 	normalizeAgentState,
 	readAgentStates as readAgentStatesAt,
-} from "../../extensions/paseo-team-core/agent-directory.ts";
+} from "../../extensions/paseo-team-core/agent-directory.js";
 import { paseoAgentsDir } from "./config-walker.mjs";
 
 export {

@@ -261,15 +261,32 @@ export function orchestrationPreferencesNotice(env = process.env, exists = exist
 
 const POLICY_CORE_DIR = "paseo-team-core";
 
-/** Absolute path to a policy-core module, in either layout. */
+/**
+ * The same module, under two extensions. `.ts` is the source pi loads directly
+ * from `~/.pi/agent/extensions/`; `.js` is what `npm run build` emits beside it
+ * and is the ONLY one that loads out of an installed package, because Node
+ * refuses to strip types under `node_modules`
+ * (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). Preferring `.js` therefore
+ * costs nothing where both exist and is the difference between a working and a
+ * crashing `pteam` where only one does.
+ */
+export function policyCoreVariants(name) {
+	const base = name.replace(/\.(ts|js)$/, "");
+	return [`${base}.js`, `${base}.ts`];
+}
+
+/** Absolute path to a policy-core module, in either layout and either extension. */
 export function policyCorePath(name, env = process.env, here = dirname(fileURLToPath(import.meta.url))) {
 	const configured = env.PASEO_TEAM_POLICY_DIR?.trim();
-	const candidates = configured
-		? [join(configured, name)]
-		: [
-				join(here, "..", POLICY_CORE_DIR, name),
-				join(here, "..", "extensions", POLICY_CORE_DIR, name),
-			];
+	const dirs = configured
+		? [configured]
+		: [join(here, "..", POLICY_CORE_DIR), join(here, "..", "extensions", POLICY_CORE_DIR)];
+	const candidates = [];
+	// Directory is the outer loop: a complete install wins over a stray
+	// leftover `.js` in a directory that no longer holds the rest of the core.
+	for (const dir of dirs) {
+		for (const variant of policyCoreVariants(name)) candidates.push(join(dir, variant));
+	}
 	const found = candidates.find((candidate) => existsSync(candidate));
 	if (!found) {
 		throw new Error(
