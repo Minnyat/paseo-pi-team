@@ -82,6 +82,14 @@ mkdir -p "$HOME/.paseo-pi-team"
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
 rm -rf "$EXT_DIR/$POLICY_CORE_DIR"
 cp -R "$ROLE_PACK_ROOT/extensions/$POLICY_CORE_DIR" "$EXT_DIR/$POLICY_CORE_DIR"
+# The built .js NEVER travels here. It exists only to satisfy an installed npm
+# package, where Node refuses to strip types under node_modules; this directory
+# is not under node_modules, so .ts loads fine. Copying both would install two
+# sources of truth for one rule set, and every loader prefers .js — so a source
+# tree built once and edited since would have pi read the CURRENT .ts while the
+# Claude hook and pteam read the STALE .js. Two runtimes, different rules, no
+# signal. Deleting it leaves exactly one answer to "what does the policy say".
+rm -f "$EXT_DIR/$POLICY_CORE_DIR"/*.js
 cp -f "$ROLE_PACK_ROOT"/prompts/*.md "$PROMPT_DIR/"
 rm -rf "$SKILL_DIR"
 cp -R "$ROLE_PACK_ROOT/skills/paseo-team-lead" "$SKILL_DIR"

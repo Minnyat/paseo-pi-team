@@ -2,7 +2,7 @@
 // unrelated project cwd and must include remote-paseo dependencies.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -128,6 +128,17 @@ for (const installer of ["install.sh", "install.ps1"]) {
   for (const file of ["claude-hook.mjs", "claude-team-mcp.mjs", "paseo-team-core"]) {
     assert.ok(text.includes(file), `${installer} must ship ${file}`);
   }
+  // The built .js must NOT reach the installed core. It exists only so an
+  // installed npm package can load a core Node will not type-strip under
+  // node_modules; the pi extension directory is not under node_modules, so the
+  // .ts loads there. Shipping both installs two answers to one question, and
+  // every loader prefers .js — a tree built once and edited since would have pi
+  // read the CURRENT .ts while the Claude hook and pteam read the STALE .js.
+  assert.match(
+    text,
+    /(rm -f "\$EXT_DIR\/\$POLICY_CORE_DIR"\/\*\.js|Filter \*\.js -File)/,
+    `${installer} must delete the generated *.js from the installed policy core`,
+  );
 }
 
 {
@@ -142,6 +153,17 @@ for (const installer of ["install.sh", "install.ps1"]) {
   cpSync(join(root, "extensions", "paseo-team-core"), join(extDir, "paseo-team-core"), {
     recursive: true,
   });
+  // ...then strip the built .js exactly as the installers do, so this replica
+  // exercises the .ts the installed hook actually loads. Without this the
+  // replica would prove the BUILT core resolves and say nothing about the one
+  // on a user's disk.
+  for (const stale of readdirSync(join(extDir, "paseo-team-core"))) {
+    if (stale.endsWith(".js")) rmSync(join(extDir, "paseo-team-core", stale));
+  }
+  assert.ok(
+    existsSync(join(extDir, "paseo-team-core", "policy-core.ts")),
+    "the installed core keeps its .ts source",
+  );
   for (const file of [
     "claude-hook.mjs",
     "claude-team-mcp.mjs",

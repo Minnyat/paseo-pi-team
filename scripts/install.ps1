@@ -66,6 +66,10 @@ Copy-Item (Join-Path $RolePackRoot "extensions\paseo-team-policy.ts") (Join-Path
 $policyCoreTarget = Join-Path $extDir $policyCoreDir
 if (Test-Path $policyCoreTarget) { Remove-Item -Recurse -Force $policyCoreTarget }
 Copy-Item -Recurse -Force (Join-Path $RolePackRoot "extensions\$policyCoreDir") $policyCoreTarget
+# The built .js NEVER travels here — see the note in install.sh. This directory
+# is not under node_modules, so .ts loads; installing both would let a stale .js
+# shadow an edited .ts for the Claude hook and pteam while pi read the .ts.
+Get-ChildItem -Path $policyCoreTarget -Filter *.js -File -ErrorAction SilentlyContinue | Remove-Item -Force
 Copy-Item (Join-Path $RolePackRoot "prompts\*.md") $promptDir -Force
 # Replace skill directories deterministically; Copy-Item -Recurse otherwise
 # merges stale files and can create nested directories on repeated installs.
