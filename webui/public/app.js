@@ -632,6 +632,7 @@ function renderList(graph) {
 					el("span", { text: roleLabel(node.role) }),
 					node.family ? el("span", { class: "pill", text: familyLabel(node.family) }) : null,
 					node.domain ? el("span", { class: "pill", text: node.domain }) : null,
+					node.cluster ? el("span", { class: "pill", title: "Cluster (team.cluster)", text: node.cluster }) : null,
 				]),
 				el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
 				el("td", { text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
@@ -711,10 +712,30 @@ function renderJurisdiction(graph) {
 	box.classList.toggle("alert", conflicts.length > 0);
 }
 
+/**
+ * A Supervisor and a Lead PROVABLY in different clusters (`graph.clusterMismatches`,
+ * computed by the CLI from policy-core's own `agentCluster`/`clustersSeparate` —
+ * this box only renders what it is given, it does not recompute the mismatch).
+ *
+ * Every SUPERVISOR_DECISION between such a pair is already refused with
+ * CLUSTER_MISMATCH by policy; policy cannot fix a seat it did not create, so
+ * this is the one place an operator sees the mismatch before it shows up as a
+ * silently-refused decision.
+ */
+function renderClusterMismatches(graph) {
+	const box = $("graph-cluster-mismatch");
+	if (!box) return;
+	const mismatches = graph.clusterMismatches ?? [];
+	box.textContent = mismatches.map((mismatch) => mismatch.detail).join(" ");
+	box.classList.toggle("hidden", mismatches.length === 0);
+	box.classList.toggle("alert", mismatches.length > 0);
+}
+
 function renderTeam(fullGraph) {
 	const domain = syncDomainFilter(fullGraph);
 	const graph = filterByDomain(fullGraph, domain);
 	renderJurisdiction(fullGraph);
+	renderClusterMismatches(fullGraph);
 	return renderTeamGraph(graph, fullGraph);
 }
 
@@ -762,6 +783,7 @@ function openDrawer(node) {
 	];
 	if (node.role === "supervisor" || node.role === "lead") {
 		facts.push(["Phạm vi quản (team.domain)", domainLabel(node.domain)]);
+		facts.push(["Cluster (team.cluster)", node.cluster ?? "chưa xác định được"]);
 	}
 	if (node.forkOf) {
 		const source = lastGraph?.nodes?.find((other) => other.id === node.forkOf);

@@ -26,8 +26,11 @@ import { runPaseoJson, mapWithConcurrency, PaseoError } from "./paseo-bridge.mjs
 import * as cache from "./graph-cache.mjs";
 import { readAgentStates, isAgentId } from "./agent-state.mjs";
 import {
+	agentCluster,
+	clustersSeparate,
 	domainConflicts,
 	normalizeDomain,
+	TEAM_CLUSTER_LABEL,
 } from "../../extensions/paseo-team-core/policy-core.js";
 
 export const ROLES = Object.freeze(["supervisor", "lead", "peer"]);
@@ -275,6 +278,79 @@ export function describeJurisdiction(nodes = []) {
 	};
 }
 
+/**
+ * Supervisor/Lead pairs that ARE a team (a real edge already connects them —
+ * spawn, fork, or a message, in either direction) but are PROVEN to sit in
+ * different clusters.
+ *
+ * The cluster axis exists precisely so two unrelated projects on one host
+ * stay apart (policy-core.ts, ~line 1005-1020): a Supervisor in `pod-product`
+ * and a Lead in `WonderQuest` having different clusters is the feature
+ * working, not a fault. `clustersSeparate` alone cannot tell "two strangers"
+ * from "one team split across a workspace boundary" — only a real edge can,
+ * because it is positive evidence the two seats were ALREADY meant to be one
+ * team before their clusters diverged. So this only fires on a Supervisor/
+ * Lead pair that both (a) have an edge and (b) are cluster-separate; a pair
+ * with no edge at all is silently assumed to be two different projects, and
+ * describeClusterMismatches will never warn about their difference alone.
+ *
+ * `supervisorTurnVerdict` (policy-core.ts) refuses every SUPERVISOR_DECISION
+ * between a cluster-separate pair with CLUSTER_MISMATCH, and does so
+ * unconditionally — a Supervisor a human created directly in the wrong
+ * workspace is not something the policy can fix; it did not create that
+ * seat. Once a real edge exists (they have spawned, forked, or messaged one
+ * another) that refusal is silent from the Lead's side until an operator
+ * sees it here, before it happens.
+ *
+ * Known, deliberate gap: a Supervisor that has never once spawned, forked,
+ * or messaged a cluster-separate Lead has no edge yet, so this stays silent
+ * about it — and that Lead's FIRST SUPERVISOR_DECISION from that Supervisor
+ * will still be refused with CLUSTER_MISMATCH with no warning here to
+ * explain it. Widening the check to "any cluster-separate pair" was tried
+ * and rejected: on a host running several unrelated projects it fires on
+ * every one of them (39 warnings for 23 real agents, zero real problems, on
+ * the machine this was verified against), and a board that cries wolf on
+ * the normal case trains the operator to stop reading it — including for
+ * the pair that is actually broken.
+ *
+ * Reuses `clustersSeparate` rather than a `!==` on `node.cluster`: separation
+ * must be PROVEN, and an unresolvable cluster on either side (null) must
+ * never be treated as "different". Takes `edges` as already built by
+ * `buildGraph` rather than re-deriving relatedness from `parentId` — one
+ * source of truth for "is there a connection", the same discipline as
+ * everything else this function reads.
+ */
+export function describeClusterMismatches(nodes = [], edges = []) {
+	const supervisors = nodes.filter((node) => node.role === "supervisor");
+	const leads = nodes.filter((node) => node.role === "lead");
+	if (supervisors.length === 0 || leads.length === 0) return [];
+
+	const RELATING_TYPES = new Set(["spawn", "fork", "message"]);
+	const related = new Set();
+	for (const edge of Array.isArray(edges) ? edges : []) {
+		if (!edge || !RELATING_TYPES.has(edge.type)) continue;
+		if (typeof edge.from !== "string" || typeof edge.to !== "string") continue;
+		// Direction does not decide "are these two a team" — a Lead replying to
+		// its own Supervisor is exactly as much evidence as the other way round.
+		related.add(`${edge.from}|${edge.to}`);
+		related.add(`${edge.to}|${edge.from}`);
+	}
+
+	const mismatches = [];
+	for (const supervisor of supervisors) {
+		for (const lead of leads) {
+			if (!related.has(`${supervisor.id}|${lead.id}`)) continue;
+			if (!clustersSeparate(supervisor.cluster, lead.cluster)) continue;
+			mismatches.push({
+				supervisor: { id: supervisor.id, shortId: supervisor.shortId, cluster: supervisor.cluster },
+				lead: { id: lead.id, shortId: lead.shortId, cluster: lead.cluster },
+				detail: `Supervisor ${supervisor.shortId} (cluster "${supervisor.cluster}") and Lead ${lead.shortId} (cluster "${lead.cluster}") are already connected but in different workspaces. Every SUPERVISOR_DECISION this Supervisor sends to this Lead will be refused with CLUSTER_MISMATCH. Set the same ${TEAM_CLUSTER_LABEL} label (or PASEO_TEAM_CLUSTER env var) on both seats to fix it.`,
+			});
+		}
+	}
+	return mismatches;
+}
+
 export function buildGraph({ agents = [], parents = {}, states = {}, permits = [], messages = [], degraded = [], now = 0 } = {}) {
 	const rows = Array.isArray(agents) ? agents.filter((a) => a && typeof a.id === "string") : [];
 	const known = new Set(rows.map((a) => a.id));
@@ -343,6 +419,11 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// From Paseo's own agent state file. A node without one still renders;
 			// these are simply null, and the read fault is in degraded[].
 			domain: state?.domain ?? null,
+			// Which workspace this seat lives in (policy-core's `agentCluster`,
+			// not re-derived here — see the module comment on describeClusterMismatches
+			// for why). A node without a resolvable state file gets null, same as
+			// domain: an unproven cluster, not "no cluster".
+			cluster: agentCluster(state),
 			// A session fork keeps the source's whole transcript, so "who did this
 			// reasoning first" is a real question about the board and not a
 			// bookkeeping detail. The label is written by team-fork.mjs.
@@ -420,6 +501,7 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			byDomain,
 		},
 		jurisdiction: describeJurisdiction(nodes),
+		clusterMismatches: describeClusterMismatches(nodes, edges),
 		nodes,
 		edges,
 		permits: normalizedPermits.map(({ ok, raw, ...rest }) => ({ ...rest, raw })),
