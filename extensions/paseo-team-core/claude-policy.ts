@@ -49,8 +49,10 @@ import {
 	peerAuthority,
 	peerGitAuthority,
 	resolvePeerMode,
+	leadCreateSupervisorArgsBlockReason,
 	supervisorCreateAgentArgsBlockReason,
 	teamToolBlockReason,
+	LEAD_CONSULT_TOOL,
 	PEER_COMMUNICATION_TOOL,
 	SUPERVISOR_ALLOWED_MCP_TARGETS,
 	TEAM_WATCHDOG_TOOL,
@@ -116,7 +118,11 @@ export function classifyClaudeTool(name: string): ClaudeToolClass {
 		if (server === TEAM_MCP_SERVER) return { kind: "team", target };
 		return { kind: "other-mcp", target };
 	}
-	if (tool === PEER_COMMUNICATION_TOOL || tool === TEAM_WATCHDOG_TOOL) {
+	if (
+		tool === PEER_COMMUNICATION_TOOL ||
+		tool === TEAM_WATCHDOG_TOOL ||
+		tool === LEAD_CONSULT_TOOL
+	) {
 		return { kind: "team", target: tool };
 	}
 	if (CLAUDE_READ_TOOLS.includes(tool)) return { kind: "read" };
@@ -294,6 +300,17 @@ export function claudeToolBlockReason(
 				topology: input.topology ?? "single",
 				selfDomain: input.selfDomain ?? null,
 			});
+		}
+		if (role === "lead" && matchesPaseoToolName(target, ["create_agent"])) {
+			// A Lead seating its own governance seat (PR-H), gated in the same
+			// order as the Pi adapter runs it. Returns null for every create_agent
+			// whose provider is not a supervisor one, so the lease gate above and
+			// the ordinary Peer path are untouched.
+			const supervisorSeatBlock = leadCreateSupervisorArgsBlockReason(input.toolInput, {
+				topology: input.topology ?? "single",
+				selfDomain: input.selfDomain ?? null,
+			});
+			if (supervisorSeatBlock) return supervisorSeatBlock;
 		}
 		if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 			return leadCreateWorkspaceArgsBlockReason(input.toolInput);

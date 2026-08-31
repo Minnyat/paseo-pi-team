@@ -113,6 +113,8 @@ export const TEAM_WATCHDOG_TOOL = "team_watchdog";
 export const TEAM_CHAT_TOOL = "team_chat";
 export const TEAM_LEASE_TOOL = "team_lease";
 export const TEAM_FORK_TOOL = "team_fork";
+/** The Lead -> Supervisor consult channel; see the PR-H section below. */
+export const LEAD_CONSULT_TOOL = "lead_ask_supervisor";
 /** Payload ceiling, kept in sync with scripts/team-chat.mjs MAX_BODY_BYTES. */
 export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
 /** Mirror of TEAM_MESSAGE_KINDS in scripts/team-chat.mjs (shapes tool schemas). */
@@ -243,6 +245,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 					TEAM_CHAT_TOOL,
 					TEAM_LEASE_TOOL,
 					TEAM_FORK_TOOL,
+					LEAD_CONSULT_TOOL,
 					...LEAD_ALLOWED_MCP_TARGETS,
 					...MCP_TOOLS,
 				],
@@ -1676,6 +1679,603 @@ export function supervisorTurnNotice({
 }
 
 // ---------------------------------------------------------------------------
+// PR-H — the Lead's own escalation path.
+//
+// Everything above this line is Supervisor-INITIATED: the Supervisor observes
+// on a heartbeat, forms a verdict, and sends it. That left the Lead with
+// exactly one addressable party for a question of its own — the Human. So the
+// measured behaviour was a Lead that asked the Human about matters its own
+// contract had already delegated, which is the failure mode `lead.md`
+// invariant 6b exists to prevent, arriving through the one door 6b does not
+// cover: the Lead speaking first.
+//
+// The channel is `lead_ask_supervisor`, deliberately shaped like the block it
+// wants back rather than like a chat message:
+//
+//   - it carries OPTIONS, EVIDENCE and REVERSIBILITY, which are three of the
+//     four Delegated-decision criteria in `supervisor.md`. A consult that
+//     cannot fill them is one the Supervisor would have bounced anyway, so the
+//     schema refuses it at the sender rather than after a round trip;
+//   - it is delivered as a PROMPT (`paseo send`), not as a chat post, because
+//     a prompt wakes an idle Supervisor AND opens a turn — which is what makes
+//     the notice below fire;
+//   - a cluster with no Supervisor seat is a NAMED answer
+//     (`NO_SUPERVISOR_SEAT`), not a silent fallback to the Human. That is the
+//     whole point: the Human is reached because nobody else could be, and the
+//     Lead can say so.
+//
+// The Supervisor side is the mirror of `supervisorTurnNotice`. A Lead that
+// receives a decision is told to act on it; a Supervisor that receives a
+// consult is told that answering is not optional and that the answer has
+// exactly two shapes — decide, or escalate naming which criterion failed.
+// ---------------------------------------------------------------------------
+
+export const LEAD_CONSULT_HEADER = "LEAD_CONSULT_V1";
+
+/** What the Lead is asking for. Shapes the directive, not the authority. */
+export const LEAD_CONSULT_KINDS = ["decision", "question", "risk"] as const;
+export type LeadConsultKind = (typeof LEAD_CONSULT_KINDS)[number];
+
+/**
+ * Fields a consult cannot be judged without.
+ *
+ * `supervisor.md` lets the Supervisor decide only when all four Delegated-
+ * decision criteria hold, and three of them are questions about the CONSULT,
+ * not about the Supervisor: how small is it (SCOPE), is it reversible
+ * (REVERSIBILITY), is the evidence proven (EVIDENCE). A consult missing one is
+ * not a hard question — it is an unanswerable one, and the fail-closed answer
+ * to an unanswerable consult is to say so rather than to guess generously.
+ */
+const LEAD_CONSULT_REQUIRED_FIELDS = [
+	"QUESTION",
+	"OPTIONS",
+	"EVIDENCE",
+	"SCOPE",
+	"REVERSIBILITY",
+];
+
+/**
+ * The complete field vocabulary, and the reason it is a closed set.
+ *
+ * A consult's substance is prose the Lead pasted in — test output, a Peer's
+ * report, a stack trace. Prose contains lines like `ERROR: connection reset`,
+ * and a parser that treats every `WORD:` as a field would turn one of those
+ * into a phantom field or, worse, into a duplicate of a real one and refuse an
+ * honest consult. So an unrecognised key is prose, exactly as it reads, and
+ * only these names are fields. Same reasoning as the V3 brief's allowlist:
+ * the authority-bearing vocabulary is closed, and everything else is content.
+ */
+const LEAD_CONSULT_FIELDS = new Set([
+	"KIND",
+	"CORRELATION_ID",
+	"TASK_ID",
+	"PROJECT_ID",
+	"FROM_AGENT_ID",
+	"DOMAIN",
+	"SCOPE",
+	"REVERSIBILITY",
+	"QUESTION",
+	"OPTIONS",
+	"EVIDENCE",
+	"RECOMMENDATION",
+	"DEADLINE",
+]);
+
+/** The field names a consult body may not contain as a bare line; see above. */
+export const LEAD_CONSULT_FIELD_NAMES: string[] = [...LEAD_CONSULT_FIELDS];
+
+export interface LeadConsultBlock {
+	kind: LeadConsultKind;
+	/** Normalized DOMAIN the Lead speaks for, or null when absent/unparseable. */
+	domain: string | null;
+	rawDomain: string | null;
+	/** `true` when the Lead itself marked the matter irreversible. */
+	irreversible: boolean;
+	/** Uppercase FIELD → value; a field whose value runs on later lines is joined. */
+	fields: Map<string, string>;
+	malformed: string[];
+}
+
+const LEAD_CONSULT_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
+
+/**
+ * Parse a LEAD_CONSULT_V1 message.
+ *
+ * Same fail-closed shape as `parseSupervisorBlock` — header on a line of its
+ * own, duplicates recorded rather than resolved — with one difference that the
+ * content forces: a consult's substance (EVIDENCE, OPTIONS) is prose and does
+ * not fit on the field's own line. So a field whose value is empty absorbs the
+ * following lines until the next field, and the joined text is what the
+ * required-field check reads. Without that, every honest multi-line consult
+ * would parse as an empty one and be refused for being empty.
+ */
+export function parseLeadConsultBlock(prompt: unknown): LeadConsultBlock | null {
+	if (typeof prompt !== "string" || prompt.trim() === "") return null;
+	const lines = prompt.split(/\r?\n/);
+	const start = lines.findIndex((line) => line.trim() === LEAD_CONSULT_HEADER);
+	if (start < 0) return null;
+
+	const fields = new Map<string, string>();
+	const malformed: string[] = [];
+	const continuation: string[] = [];
+	let current: string | null = null;
+
+	const flush = (): void => {
+		if (current === null) return;
+		const tail = continuation.join("\n").trim();
+		if (tail !== "") {
+			const head = fields.get(current) ?? "";
+			fields.set(current, head === "" ? tail : `${head}\n${tail}`);
+		}
+		continuation.length = 0;
+		current = null;
+	};
+
+	for (const line of lines.slice(start + 1)) {
+		const trimmed = line.trim();
+		if (trimmed === LEAD_CONSULT_HEADER) break;
+		const match = LEAD_CONSULT_FIELD_RE.exec(trimmed);
+		if (!match || !LEAD_CONSULT_FIELDS.has(match[1] as string)) {
+			// Blank lines inside a field's body are kept (paragraph breaks in
+			// EVIDENCE are meaningful); a blank line outside one is skipped by the
+			// trim in flush(). A `WORD:` line outside the allowlist is prose too —
+			// see LEAD_CONSULT_FIELDS.
+			if (current !== null) continuation.push(line);
+			continue;
+		}
+		flush();
+		const key = match[1] as string;
+		const value = (match[2] ?? "").trim();
+		if (fields.has(key)) {
+			malformed.push(`duplicate field ${key}`);
+			continue;
+		}
+		fields.set(key, value);
+		current = key;
+	}
+	flush();
+
+	const rawKind = (fields.get("KIND") ?? "").toLowerCase();
+	const kind = (LEAD_CONSULT_KINDS as readonly string[]).includes(rawKind)
+		? (rawKind as LeadConsultKind)
+		: "question";
+	if (rawKind === "") {
+		malformed.push("KIND is missing");
+	} else if (!(LEAD_CONSULT_KINDS as readonly string[]).includes(rawKind)) {
+		malformed.push(
+			`KIND is not one of ${LEAD_CONSULT_KINDS.join(" | ")}: ${JSON.stringify(fields.get("KIND"))}`,
+		);
+	}
+
+	for (const required of LEAD_CONSULT_REQUIRED_FIELDS) {
+		if ((fields.get(required) ?? "").trim() === "") {
+			malformed.push(`${required} is missing or empty`);
+		}
+	}
+
+	const rawReversibility = (fields.get("REVERSIBILITY") ?? "").toLowerCase();
+	if (
+		rawReversibility !== "" &&
+		rawReversibility !== "reversible" &&
+		rawReversibility !== "irreversible"
+	) {
+		malformed.push(
+			`REVERSIBILITY must be "reversible" or "irreversible": ${JSON.stringify(fields.get("REVERSIBILITY"))}`,
+		);
+	}
+
+	const rawDomain = fields.has("DOMAIN")
+		? (fields.get("DOMAIN") as string)
+		: null;
+	const domain = rawDomain === null ? null : normalizeDomain(rawDomain);
+	if (rawDomain === "") {
+		malformed.push("DOMAIN is present but empty");
+	} else if (rawDomain !== null && domain === null) {
+		malformed.push(
+			`DOMAIN is not a valid jurisdiction: ${JSON.stringify(rawDomain)}`,
+		);
+	}
+
+	return {
+		kind,
+		domain,
+		rawDomain,
+		irreversible: rawReversibility === "irreversible",
+		fields,
+		malformed,
+	};
+}
+
+/**
+ * Who sent this consult.
+ *
+ * The mirror of `supervisorAttribution`, and load-bearing for the same reason
+ * in the opposite direction: the notice below tells the Supervisor to answer a
+ * consult with a DECISION that the Lead's own runtime will then treat as
+ * binding. Handing that to text whose sender cannot be resolved to a Lead seat
+ * would close a loop in which any prose carrying the header manufactures a
+ * delegated decision for itself.
+ *
+ * Not a security boundary — provider and parentage are declared labels, so this
+ * catches mistakes, drift and stray text rather than a seat setting out to
+ * forge one.
+ */
+export interface LeadConsultAttribution {
+	fromAgentId: string | null;
+	role: TeamRole | null;
+	status: "verified" | "unverified" | "unclaimed";
+	reason: string;
+	cluster?: string | null;
+}
+
+export function leadConsultAttribution(
+	fromAgentId: unknown,
+	env: Record<string, string | undefined> = process.env,
+): LeadConsultAttribution {
+	const claimed =
+		typeof fromAgentId === "string" && fromAgentId.trim() !== ""
+			? fromAgentId.trim()
+			: null;
+	if (!claimed) {
+		return {
+			fromAgentId: null,
+			role: null,
+			status: "unclaimed",
+			reason:
+				"the consult names no FROM_AGENT_ID, so the sender cannot be checked against Paseo's agent state",
+		};
+	}
+	let owner: AgentOwnership | null = null;
+	try {
+		owner = agentOwnership(claimed, env);
+	} catch {
+		owner = null;
+	}
+	if (!owner) {
+		return {
+			fromAgentId: claimed,
+			role: null,
+			status: "unverified",
+			reason: `Paseo has no readable state for agent ${claimed}, so the sender could not be confirmed as a Lead seat`,
+		};
+	}
+	if (owner.role !== "lead") {
+		return {
+			fromAgentId: claimed,
+			role: owner.role,
+			status: "unverified",
+			cluster: owner.cluster,
+			reason: `agent ${claimed} resolves to ${owner.role ?? "an agent with no role provider"}, not to a Lead seat`,
+		};
+	}
+	return {
+		fromAgentId: claimed,
+		role: "lead",
+		status: "verified",
+		cluster: owner.cluster,
+		reason: `agent ${claimed} holds a Lead seat in Paseo`,
+	};
+}
+
+export const LEAD_CONSULT_ACTIONABLE = "LEAD_CONSULT_ACTIONABLE";
+export const LEAD_CONSULT_HUMAN_BOUND = "LEAD_CONSULT_HUMAN_BOUND";
+export const LEAD_CONSULT_SENDER_UNVERIFIED = "LEAD_CONSULT_SENDER_UNVERIFIED";
+export const LEAD_CONSULT_MALFORMED = "LEAD_CONSULT_MALFORMED";
+export const LEAD_CONSULT_CLUSTER_MISMATCH = "LEAD_CONSULT_CLUSTER_MISMATCH";
+export const LEAD_CONSULT_OUT_OF_JURISDICTION =
+	"LEAD_CONSULT_OUT_OF_JURISDICTION";
+export const LEAD_CONSULT_JURISDICTION_UNDECLARED =
+	"LEAD_CONSULT_JURISDICTION_UNDECLARED";
+
+/**
+ * The verdict on a consult, from the Supervisor's side.
+ *
+ * Order mirrors `supervisorTurnVerdict` on purpose: shape first (a block that
+ * cannot be read cannot be judged), then cluster (is this addressed to my
+ * project at all — a question prior to jurisdiction, so never topology-gated),
+ * then sender, then jurisdiction under `multi`, then the one content question
+ * that changes the answer rather than the authority.
+ *
+ * `LEAD_CONSULT_HUMAN_BOUND` is that last one, and it is an ACCEPTING verdict:
+ * the consult is legitimate and must be answered, but the Lead has already
+ * declared the matter irreversible, so criterion 2 of Delegated decisions
+ * fails before the Supervisor reads a word of it. Saying so here spares the
+ * Supervisor the most common wrong answer — self-deciding something the
+ * sender itself flagged as one-way.
+ */
+export function leadConsultVerdict({
+	block,
+	attribution,
+	supervisorDomain,
+	supervisorCluster,
+	topology,
+}: {
+	block: LeadConsultBlock;
+	attribution: LeadConsultAttribution;
+	/** This Supervisor's own `team.domain`; only read under `multi`. */
+	supervisorDomain?: string | null;
+	/** This Supervisor's own cluster; see selfCluster. */
+	supervisorCluster?: string | null;
+	topology?: TeamTopology;
+}): JurisdictionVerdict {
+	if (block.malformed.length > 0) {
+		return {
+			ok: false,
+			severity: "refuse",
+			code: LEAD_CONSULT_MALFORMED,
+			reason: `The consult is malformed and cannot be judged against the Delegated-decision criteria: ${block.malformed.join("; ")}. Ask the Lead to resend it complete; do not answer it meanwhile.`,
+		};
+	}
+	if (clustersSeparate(attribution.cluster, supervisorCluster)) {
+		return {
+			ok: false,
+			severity: "refuse",
+			code: LEAD_CONSULT_CLUSTER_MISMATCH,
+			reason: `The consult comes from a Lead in cluster "${attribution.cluster}", while this Supervisor governs "${supervisorCluster}". Observing another workspace is part of the job; deciding for one is not. Refer the Lead to its own cluster's Supervisor.`,
+		};
+	}
+	if (attribution.status !== "verified") {
+		return {
+			ok: false,
+			severity: "warn",
+			code: LEAD_CONSULT_SENDER_UNVERIFIED,
+			reason: `The sender could not be verified: ${attribution.reason}. Anything can type the header, and a SUPERVISOR_DECISION addressed to unverified text is delegated authority handed to an unknown party.`,
+		};
+	}
+	if ((topology ?? "single") === "multi") {
+		const own = normalizeDomain(supervisorDomain);
+		if (!own) {
+			return {
+				ok: false,
+				severity: "refuse",
+				code: LEAD_CONSULT_JURISDICTION_UNDECLARED,
+				reason: `This Supervisor carries no ${TEAM_DOMAIN_LABEL} of its own, so whether the consulted matter falls inside its jurisdiction cannot be established. Ask the Human to label this seat before answering consults.`,
+			};
+		}
+		if (!block.domain) {
+			return {
+				ok: false,
+				severity: "refuse",
+				code: LEAD_CONSULT_JURISDICTION_UNDECLARED,
+				reason:
+					"The consult declares no DOMAIN, so which jurisdiction it belongs to cannot be established. Under PASEO_TEAM_TOPOLOGY=multi every consult must name the domain the asking Lead speaks for.",
+			};
+		}
+		if (!domainCovers(own, block.domain)) {
+			return {
+				ok: false,
+				severity: "refuse",
+				code: LEAD_CONSULT_OUT_OF_JURISDICTION,
+				reason: `The consult belongs to domain "${block.domain}", which is not inside this Supervisor's domain "${own}". Refer the Lead to the Supervisor that governs "${block.domain}".`,
+			};
+		}
+	}
+	if (block.irreversible) {
+		return {
+			ok: true,
+			severity: "accept",
+			code: LEAD_CONSULT_HUMAN_BOUND,
+			reason:
+				'The consult is legitimate and must be answered, but the Lead marked it REVERSIBILITY: irreversible. Criterion 2 of Delegated decisions therefore fails before the content is weighed — an irreversible matter is never a delegated decision.',
+		};
+	}
+	return {
+		ok: true,
+		severity: "accept",
+		code: LEAD_CONSULT_ACTIONABLE,
+		reason: `${attribution.reason}, and the consult falls inside this Supervisor's authority. It carries the SCOPE, OPTIONS, EVIDENCE and REVERSIBILITY the Delegated-decision criteria are checked against.`,
+	};
+}
+
+/**
+ * What the Supervisor must DO about the consult.
+ *
+ * The asymmetry with `supervisorTurnDirective` is deliberate and is the whole
+ * reason this exists. A Lead receiving a decision is told to ACT; a Supervisor
+ * receiving a consult is told to ANSWER — and that the answer has exactly two
+ * legal shapes. Silence is called out explicitly because it is the one failure
+ * mode that costs the most: a consult nobody replies to leaves the Lead parked,
+ * and a parked Lead falls back to the Human, which is the behaviour this whole
+ * channel exists to remove.
+ */
+function leadConsultDirective(verdict: JurisdictionVerdict): string {
+	if (verdict.severity === "refuse") {
+		return [
+			`Do NOT answer it with a decision. Reply BLOCKED: ${verdict.code} with the reason above,`,
+			"so the asking Lead learns why and can route the question correctly instead of",
+			"waiting on an answer that is not coming.",
+		].join("\n");
+	}
+	if (verdict.severity === "warn") {
+		return [
+			"Do NOT issue a SUPERVISOR_DECISION in reply — an unverified sender cannot be",
+			"granted delegated authority. You may still answer on the evidence as an",
+			`observation, and ask for the consult again with FROM_AGENT_ID filled. Say`,
+			`BLOCKED: ${verdict.code} so the sender knows why no decision came back.`,
+		].join("\n");
+	}
+	const shared = [
+		"",
+		"Reply to the asking Lead with `send_agent_prompt`, and quote its CORRELATION_ID so",
+		"the Lead can match the answer to the question. Answering is NOT optional: a consult",
+		"left unanswered parks the Lead, and a parked Lead escalates to the Human — which is",
+		"exactly what this channel exists to prevent.",
+	];
+	if (verdict.code === LEAD_CONSULT_HUMAN_BOUND) {
+		return [
+			"ESCALATE. Answer with a SUPERVISOR_OBSERVATION carrying",
+			"HUMAN_DECISION_REQUIRED: yes, and name criterion 2 (reversibility) as the one",
+			"that failed plus the exact question the Human must be asked. Do NOT fill a",
+			"SUPERVISOR_DECISION block — you may not self-decide an irreversible matter, and",
+			"the sender has already told you this one is.",
+			...shared,
+		].join("\n");
+	}
+	return [
+		"DECIDE OR ESCALATE — those are the only two answers, and one of them is due now.",
+		"",
+		"Run the four Delegated-decision criteria (supervisor.md) against the SCOPE,",
+		"OPTIONS, EVIDENCE and REVERSIBILITY this consult carries:",
+		"",
+		"  ALL FOUR HOLD → answer with a filled SUPERVISOR_DECISION block and",
+		"  HUMAN_DECISION_REQUIRED: no. This is the expected outcome for a small,",
+		"  reversible, evidence-backed, in-protocol matter, and the Lead's runtime will",
+		"  treat it as binding — that is the delegation working, not a risk you are taking.",
+		"  Decide exactly one thing, prefer the most easily reversible valid option, and",
+		"  fill ROLLBACK_PATH.",
+		"",
+		"  ANY ONE FAILS → answer with HUMAN_DECISION_REQUIRED: yes, naming WHICH criterion",
+		"  failed and the exact question the Human must be asked. Do not escalate without",
+		"  naming it: an unexplained escalation is indistinguishable from not having read",
+		"  the consult, and the Lead cannot act on it either.",
+		"",
+		"Do not answer with a bare recommendation, and do not send the consult back as a",
+		"question the Lead already answered in OPTIONS or EVIDENCE.",
+		...shared,
+	].join("\n");
+}
+
+/**
+ * The whole Supervisor-side notice, built once and used by both adapters —
+ * the mirror of `supervisorTurnNotice`. One text, because "a Lead is asking me
+ * to decide, and what am I obliged to do about it" must not have a per-runtime
+ * answer any more than the Lead's half does.
+ */
+export function leadConsultTurnNotice({
+	block,
+	verdict,
+	attribution,
+}: {
+	block: LeadConsultBlock | null;
+	verdict: JurisdictionVerdict | null;
+	attribution: LeadConsultAttribution;
+}): string | null {
+	if (!block || !verdict) return null;
+	const correlation = block.fields.get("CORRELATION_ID");
+	return [
+		"## Paseo Team — a Lead is consulting you (this turn)",
+		"",
+		`This turn opens with a ${LEAD_CONSULT_HEADER} of kind "${block.kind}".`,
+		`Verdict: ${verdict.code} (${verdict.severity})`,
+		`Sender: ${attribution.status}${attribution.fromAgentId ? ` (${attribution.fromAgentId})` : ""}`,
+		...(correlation ? [`Correlation: ${correlation}`] : []),
+		"",
+		verdict.reason,
+		"",
+		leadConsultDirective(verdict),
+	].join("\n");
+}
+
+/**
+ * Who may consult the Supervisor.
+ *
+ * Lead only, and the reasons are different at each end. A Peer already has
+ * `peer_ask_lead` and must not have a second escalation path that its own Lead
+ * cannot see — that is how a Peer routes around a Lead's decision. A Supervisor
+ * consulting itself is a loop, and a Supervisor consulting ANOTHER Supervisor
+ * is a governance conversation that belongs in `team_chat` where it is logged
+ * as a message edge rather than arriving as a delegated-decision request.
+ */
+export function leadConsultToolBlockReason(
+	role: TeamRole,
+	toolName: string = LEAD_CONSULT_TOOL,
+): string | null {
+	if (toolName !== LEAD_CONSULT_TOOL) return null;
+	if (role === "lead") return null;
+	if (role === "peer") {
+		return `${LEAD_CONSULT_TOOL} is restricted to Lead agents. A Peer escalates through peer_ask_lead so its own Lead sees the question; a second path to the Supervisor would route around that Lead.`;
+	}
+	return `${LEAD_CONSULT_TOOL} is restricted to Lead agents — it is the channel INTO your seat, not out of it. Use team_chat to reach another coordinator.`;
+}
+
+export function leadAskSupervisorToolDescription(): string {
+	return (
+		"Ask this cluster's Supervisor to DECIDE a matter, instead of asking the Human. " +
+		"Delivers a LEAD_CONSULT_V1 prompt that wakes the Supervisor, which answers with either a binding SUPERVISOR_DECISION or an escalation naming which delegation criterion failed. " +
+		"Use it whenever you would otherwise stop and ask the Human: a choice between approaches you have evidence for, a retry after a transient failure, a scope or ordering call, an ambiguous protocol reading. " +
+		"Requires the four things the Supervisor is obliged to check — question, options, evidence, scope and reversibility — so a decision can come back in one round trip. " +
+		"Go to the Human directly only for what is genuinely irreversible (merge, push, deploy, delete data, external comms), or when this tool reports NO_SUPERVISOR_SEAT."
+	);
+}
+
+/**
+ * Argument gate for a Lead seating its OWN Supervisor.
+ *
+ * A Lead may create the seat that governs it — that is the pack's design, not a
+ * loophole: a cluster with no Supervisor has no delegation path, so every
+ * question in it lands on the Human. What a Lead must not do is seat a
+ * Supervisor it has quietly weakened, because the resulting seat looks like
+ * governance in `paseo agent ls` while being unable to act:
+ *
+ *   - a bare `pi-supervisor` / `claude-supervisor` lets the daemon pick a
+ *     model, and a governance seat on a daemon default is the one seat whose
+ *     reasoning quality is load-bearing;
+ *   - `labels.purpose: governance` is what separates this from a Lead creating
+ *     a supervisor-shaped Peer, and it is the audit trail afterwards;
+ *   - under `multi`, a Supervisor with a domain WIDER than the Lead's own would
+ *     be an escalation by creation — the Lead would have manufactured authority
+ *     over Leads it does not own. Equal or narrower only.
+ *
+ * The cluster label is checked separately by `clusterLabelBlockReason`, which
+ * runs for every create_agent on both paths.
+ */
+export function leadCreateSupervisorArgsBlockReason(
+	args: unknown,
+	context: { topology?: TeamTopology; selfDomain?: string | null } = {},
+): string | null {
+	if (typeof args !== "object" || args === null) return null;
+	const rec = args as Record<string, unknown>;
+	const provider = typeof rec.provider === "string" ? rec.provider : "";
+	const parsed = parseRoleProvider(provider);
+	// Not a supervisor create_agent at all — every other Lead create_agent is
+	// governed by the lease gate and the cluster gate, not by this one.
+	if (!parsed || parsed.role !== "supervisor") return null;
+
+	const segments = provider.split("/").filter((part) => part.length > 0);
+	const minimum = parsed.family === "pi" ? 3 : 2;
+	if (segments.length < minimum) {
+		return `Refusing create_agent: a Supervisor seat must be routed explicitly — "${parsed.family}-supervisor/${parsed.family === "pi" ? "<pi-provider>/" : ""}<model-id>", never a bare "${parsed.family}-supervisor" that lets the daemon pick a default. The governance seat is the one whose reasoning quality decides what the Human never gets asked.`;
+	}
+	const labels =
+		typeof rec.labels === "object" && rec.labels !== null
+			? (rec.labels as Record<string, unknown>)
+			: null;
+	const purpose = labels?.purpose;
+	if (purpose !== "governance") {
+		return `Refusing create_agent: seating a Supervisor requires labels.purpose "governance" (got "${typeof purpose === "string" ? purpose : "<missing>"}"). It is what separates a governance seat from a supervisor-shaped Peer in "paseo agent ls" afterwards.`;
+	}
+	const thinking =
+		typeof rec.settings === "object" && rec.settings !== null
+			? (rec.settings as Record<string, unknown>).thinkingOptionId
+			: undefined;
+	if (typeof thinking !== "string" || thinking.trim() === "") {
+		return "Refusing create_agent: a Supervisor seat requires settings.thinkingOptionId, routed from cluster-routing.local.json. Never drop the thinking level and let the daemon choose it for the seat that decides on the Human's behalf.";
+	}
+	if ((context.topology ?? "single") === "multi") {
+		const own = normalizeDomain(context.selfDomain);
+		if (!own) {
+			return `BLOCKED: JURISDICTION_UNVERIFIABLE — this Lead carries no ${TEAM_DOMAIN_LABEL} of its own, so the domain a Supervisor it seats may govern cannot be bounded. Ask the Human to label this seat first.`;
+		}
+		const declared = normalizeDomain(labels?.[TEAM_DOMAIN_LABEL]);
+		if (!declared) {
+			return `Refusing create_agent: under PASEO_TEAM_TOPOLOGY=multi a Supervisor seat must carry labels["${TEAM_DOMAIN_LABEL}"] — an unlabelled Supervisor may not decide or recover anything, so it would be governance in name only. Set it to "${own}" or a domain inside it.`;
+		}
+		if (!domainCovers(own, declared)) {
+			return `Refusing create_agent: labels["${TEAM_DOMAIN_LABEL}"] is "${declared}", which is not inside this Lead's own domain "${own}". A Lead may seat a Supervisor over its own jurisdiction or a part of it, never a wider one — that would manufacture authority over Leads this seat does not own. Ask the Human to seat a Supervisor for "${declared}".`;
+		}
+	}
+	return null;
+}
+
+/** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
+export function leadCreateSupervisorBlockReason(
+	input: unknown,
+	context: { topology?: TeamTopology; selfDomain?: string | null } = {},
+): string | null {
+	return leadCreateSupervisorArgsBlockReason(extractMcpArgs(input), context);
+}
+
+// ---------------------------------------------------------------------------
 // Ownership — who may prompt whom
 // ---------------------------------------------------------------------------
 
@@ -2429,6 +3029,16 @@ export function mcpBlockReason(
 		const argBlock = supervisorCreateAgentBlockReason(input, context);
 		if (argBlock) return argBlock;
 	}
+	if (role === "lead" && matchesPaseoToolName(target, ["create_agent"])) {
+		// A Lead seating its own governance seat (PR-H). Only fires when the
+		// provider actually names the supervisor role, so every other Lead
+		// create_agent reaches the lease gate exactly as before.
+		const supervisorBlock = leadCreateSupervisorBlockReason(input, {
+			topology: context.topology,
+			selfDomain: context.selfDomain,
+		});
+		if (supervisorBlock) return supervisorBlock;
+	}
 	if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 		const argBlock = leadCreateWorkspaceBlockReason(input);
 		if (argBlock) return argBlock;
@@ -3024,6 +3634,8 @@ export function teamToolBlockReason(
 	}
 	const forkReason = teamForkToolBlockReason(role, toolName);
 	if (forkReason) return forkReason;
+	const consultReason = leadConsultToolBlockReason(role, toolName);
+	if (consultReason) return consultReason;
 	return null;
 }
 

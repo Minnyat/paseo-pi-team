@@ -182,6 +182,11 @@ for (const installer of ["install.sh", "install.ps1"]) {
     "remote-paseo.mjs",
     "model-routing.mjs",
     "reliability.mjs",
+    // team-communication.mjs joined it when the Lead -> Supervisor consult
+    // (PR-H) started resolving policy-core to find the Supervisor seat. Same
+    // lazy shape as remote-paseo.mjs `run`: only that one command touches the
+    // core, and only at runtime.
+    "team-communication.mjs",
   ]) {
     cpSync(join(source, file), join(scriptsDir, file));
   }
@@ -233,7 +238,14 @@ for (const installer of ["install.sh", "install.ps1"]) {
     },
   );
   const tools = JSON.parse(handshake).result.tools.map((tool) => tool.name);
-  assert.deepEqual(tools.sort(), ["peer_ask_lead", "team_chat", "team_fork", "team_lease", "team_watchdog"]);
+  assert.deepEqual(tools.sort(), [
+    "lead_ask_supervisor",
+    "peer_ask_lead",
+    "team_chat",
+    "team_fork",
+    "team_lease",
+    "team_watchdog",
+  ]);
 
   // Each core-dependent script must at least LOAD from the installed layout.
   // Running with no arguments is enough: the usage error proves the module
@@ -291,6 +303,45 @@ for (const installer of ["install.sh", "install.ps1"]) {
       runOutput,
       /ERR_MODULE_NOT_FOUND/,
       "remote-paseo.mjs could not resolve the policy core for the cluster-label auto-fill",
+    );
+  }
+
+  // team-communication.mjs resolves policy-core the same lazy way, and only on
+  // the `ask-supervisor` path — the Peer's `ask-lead` must not pay for, or fail
+  // on, a module it never touches. That split is precisely the PR-C shape
+  // again: if the lazy path cannot resolve the core from an installed tree, a
+  // Lead's consult dies at IMPORT time and the Lead reads it as "there is no
+  // Supervisor" — then asks the Human, which is the behaviour the channel
+  // exists to remove. So this drives `ask-supervisor` specifically, with no
+  // PASEO_AGENT_ID: the run must get far enough to fail on the MISSING AGENT
+  // ID rather than on a missing module.
+  {
+    let consultOutput = "";
+    try {
+      consultOutput = execFileSync(
+        process.execPath,
+        [join(scriptsDir, "team-communication.mjs"), "ask-supervisor", JSON.stringify({
+          kind: "decision",
+          question: "q",
+          options: "a or b",
+          evidence: "e",
+          scope: "src/x.ts",
+          reversibility: "reversible",
+        })],
+        { cwd: unrelatedCwd, env: { ...hookEnv, PASEO_AGENT_ID: "" }, encoding: "utf8" },
+      );
+    } catch (error) {
+      consultOutput = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    }
+    assert.doesNotMatch(
+      consultOutput,
+      /ERR_MODULE_NOT_FOUND/,
+      "team-communication.mjs could not resolve the policy core for the consult path",
+    );
+    assert.match(
+      consultOutput,
+      /"code":"AGENT_ID_MISSING"/,
+      "the consult path must reach its own validation, proving the core loaded",
     );
   }
 }

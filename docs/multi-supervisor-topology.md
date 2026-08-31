@@ -789,6 +789,89 @@ layout ĐÃ CÀI — đúng khuôn OCR-007/PR-C: một luật mà adapter/script
 
 ---
 
+### PR-H — Lead hỏi Supervisor, không hỏi Human — ✅ ĐÃ LÀM
+
+**Triệu chứng.** PR-D đã chữa một chiều: `SUPERVISOR_DECISION` tới Lead thì Lead
+phải hành động, không được đem hỏi lại Human. Nhưng toàn bộ nửa còn lại của
+pack là **Supervisor khởi xướng**: nó quan sát theo heartbeat, tự quyết khi nào
+nhìn. Lead cầm một câu hỏi CỦA CHÍNH NÓ thì trong hợp đồng vai chỉ có đúng một
+địa chỉ — Human. `grep` "ask the Supervisor" trước PR này chỉ trúng văn xuôi
+README và chuỗi lỗi; `peer_ask_lead` không có bản đối xứng, `team_chat` có
+nhưng không chỗ nào bảo Lead dùng nó để HỎI.
+
+Hệ quả đo được: Lead hỏi Human liên tục, kể cả những việc hợp đồng của nó đã
+uỷ quyền — tức đúng cái failure mode invariant 6b sinh ra để chặn, đi vào bằng
+cánh cửa 6b không phủ: Lead nói trước. `LEAD_STANDING_AUTHORITY` trong
+`claude-hook.mjs` đã cố ghì lại bằng văn xuôi, và một mitigation bằng văn xuôi
+cho một kênh còn thiếu chính là triệu chứng, không phải cách chữa.
+
+**Tiền đề.** Con người là đường thoát cuối, không phải đường thoát đầu. Mỗi
+bậc thang có đúng một kênh leo lên: Peer → Lead (`peer_ask_lead`), Lead →
+Supervisor (`lead_ask_supervisor`), Supervisor → Human. Một câu hỏi của Peer mà
+Lead không trả lời được KHÔNG trở thành câu hỏi cho Human — nó thành một consult
+đi tiếp lên, mang theo bằng chứng của Peer.
+
+**Ba quyết định thiết kế, và lý do:**
+
+1. **Envelope mang hình dạng của câu trả lời, không phải của tin nhắn.**
+   `LEAD_CONSULT_V1` bắt buộc `SCOPE`, `REVERSIBILITY`, `QUESTION`, `OPTIONS`,
+   `EVIDENCE` — đúng ba trong bốn tiêu chí *Delegated decisions* của
+   `supervisor.md` là câu hỏi VỀ CONSULT chứ không phải về Supervisor. Consult
+   thiếu chúng là consult không trả lời được, nên bị từ chối **ở phía gửi**,
+   không phải sau một vòng round trip.
+2. **Giao bằng PROMPT (`paseo send`), không phải chat post.** Chat post là sổ
+   cái; prompt vừa đánh thức Supervisor đang idle vừa MỞ MỘT LƯỢT — và mở lượt
+   mới là thứ khiến notice ở dưới bắn ra. Không có lượt thì không có chỉ thị.
+3. **Cụm không có Supervisor là một MÃ CÓ TÊN, không phải fallback im lặng.**
+   `NO_SUPERVISOR_SEAT` kèm luôn lời gọi `create_agent` để sửa. Đây là trường
+   hợp DUY NHẤT hỏi Human là đúng, nên Lead phải nói được vì sao nó hỏi. Cùng
+   bản năng ấy tách `SUPERVISOR_LOOKUP_FAILED` ra khỏi `NO_SUPERVISOR_SEAT`:
+   "tôi không đọc được" không bao giờ được báo cáo thành "không có ai".
+
+**Nửa Supervisor là ảnh gương của `supervisorTurnNotice`, và tính bất đối xứng
+là chủ ý.** Lead nhận decision thì được bảo *ACT ON IT*; Supervisor nhận consult
+thì được bảo *DECIDE OR ESCALATE* — trả lời là **bắt buộc**, và câu trả lời chỉ
+có đúng hai hình dạng. Im lặng được gọi tên riêng trong chỉ thị vì nó là failure
+mode đắt nhất: consult không ai trả lời làm Lead treo, mà Lead treo thì quay về
+hỏi Human — đúng thứ kênh này sinh ra để bỏ đi.
+
+`LEAD_CONSULT_HUMAN_BOUND` là verdict CHẤP NHẬN chứ không phải từ chối: consult
+hợp lệ và vẫn phải trả lời, nhưng Lead đã tự khai `REVERSIBILITY: irreversible`
+nên tiêu chí 2 đã trượt trước khi đọc tới nội dung. Nói trước điều đó tiết kiệm
+cho Supervisor câu trả lời sai phổ biến nhất — tự quyết một việc mà chính người
+gửi đã báo là một chiều.
+
+**Lead được phép NGỒI GHẾ Supervisor quản mình.** Không mâu thuẫn: ghế đó vẫn
+phán xét nó, còn một cụm không có ghế nào thì không có đường uỷ quyền nào cả.
+Cái Lead không được làm là dựng một Supervisor đã bị làm yếu đi — vì ghế ấy nhìn
+vào `paseo agent ls` thì giống governance nhưng không hành động được: provider
+trần cho daemon chọn model (đúng cái ghế mà chất lượng suy luận là load-bearing),
+thiếu `labels.purpose: governance` (thứ phân biệt nó với một Peer hình dạng
+supervisor trong nhật ký sau này), hoặc dưới `multi` là một domain RỘNG HƠN của
+chính Lead — tức thẩm quyền tự chế ra từ không có gì.
+
+#### Đã giao
+
+| Thành phần | Nơi |
+|---|---|
+| `LEAD_CONSULT_HEADER`/`_KINDS`/`_FIELD_NAMES`, `parseLeadConsultBlock` (allowlist field, gộp dòng prose) | `policy-core.ts` |
+| `leadConsultAttribution` — người gửi phải giải ra ghế **Lead** | `policy-core.ts` |
+| `leadConsultVerdict` + `leadConsultTurnNotice` (`ACTIONABLE`, `HUMAN_BOUND`, `SENDER_UNVERIFIED`, `MALFORMED`, `CLUSTER_MISMATCH`, `OUT_OF_JURISDICTION`, `JURISDICTION_UNDECLARED`) | `policy-core.ts` |
+| `leadConsultToolBlockReason` (Lead-only) + `LEAD_CONSULT_TOOL` trong `policyFor("lead")` và `teamToolBlockReason` | `policy-core.ts` |
+| `leadCreateSupervisorArgsBlockReason` — gate Lead dựng ghế Supervisor | `policy-core.ts`, nối dây ở `mcpBlockReason` + `claudeToolBlockReason` |
+| `ask-supervisor`: `validateConsult`, `chooseSupervisor`, `buildConsultBody`, `sendLeadConsult` (import core LAZY, y hệt `remote-paseo.mjs run`) | `scripts/team-communication.mjs` |
+| Đăng ký tool + notice phía Supervisor trên cả hai runtime | `paseo-team-policy.ts`, `scripts/claude-team-mcp.mjs`, `scripts/claude-hook.mjs` |
+| `LEAD_STANDING_AUTHORITY` thêm luật định tuyến câu hỏi | `scripts/claude-hook.mjs` |
+
+Test: `test/lead-consult.test.mts` (17 case thuần) + khối consult trong
+`team-communication.test.mjs` (routing, envelope round-trip sender↔parser) +
+parity trong `claude-team-mcp.test.mjs` + đường lazy-core trong
+`installer-contract.test.mjs`.
+
+**Còn để lại:** `pteam graph` chưa vẽ cạnh `LEAD_CONSULT_V1`. `parsePeerMessage`
+chỉ đọc `PEER_MESSAGE_V1` từ timeline của Lead; consult nằm trong timeline của
+Supervisor, nên cần một lượt quét nữa — thuần quan sát, không ảnh hưởng luật.
+
 ## 4. Việc phải làm xuyên suốt mọi PR
 
 1. **Tương thích ngược — ✅ ĐÃ LÀM.** Cờ `PASEO_TEAM_TOPOLOGY=single|multi`

@@ -100,7 +100,7 @@ paseo-pi-team/
 │   ├── ocr-setup.mjs               # installs/verifies the OCR CLI (capability probe, never downgrades)
 │   ├── browser-setup.mjs           # installs agent-browser CLI + Chrome runtime + MCP entry
 │   ├── claude-hook.mjs             # Claude Code hook: role prompt + PreToolUse policy
-│   ├── claude-team-mcp.mjs         # stdio MCP server: peer_ask_lead + team_watchdog for Claude
+│   ├── claude-team-mcp.mjs         # stdio MCP server: the team tools for Claude
 │   ├── claude-setup.mjs            # installs/verifies/removes the Claude side (hooks + MCP)
 │   ├── team-scripts-path.mjs       # durable support-script path resolver
 │   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
@@ -136,13 +136,15 @@ paseo-pi-team/
 | Profile | `PASEO_PI_ROLE` | Default tools |
 |---|---|---|
 | `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog`, `team_chat`, `team_lease` (status), `team_fork` |
-| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog`, `team_chat`, `team_lease`, `team_fork` |
+| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog`, `team_chat`, `team_lease`, `team_fork`, `lead_ask_supervisor` |
 | `pi-peer` | `peer` | `read`, `bash`, `peer_ask_lead` (+ `write`/`edit` under `MODE: write`) |
 
 The `claude-*` profiles carry the same three roles and the same team tools,
 reached as `mcp__paseo-team__<tool>`. A Peer gets `peer_ask_lead` and nothing
-else: `team_chat`, `team_lease`, `team_fork` and `team_watchdog` are all
-refused for it, because a Peer coordinates through its Lead.
+else: `team_chat`, `team_lease`, `team_fork`, `team_watchdog` and
+`lead_ask_supervisor` are all refused for it, because a Peer coordinates
+through its Lead. `lead_ask_supervisor` is the Lead's alone — the Supervisor
+receives those consults and never sends one.
 
 Refine the real allowlist after running `/team-tools` — actual Paseo tool names
 can differ from the defaults.
@@ -151,7 +153,10 @@ Per-role exceptions:
 
 - **Supervisor** is observation-only. No `write`/`edit` ever. `create_agent` is
   available for Lead recovery alone, behind an argument guard.
-- **Lead** gets `write`/`edit` only when `PASEO_TEAM_LEAD_WRITE=1`.
+- **Lead** gets `write`/`edit` only when `PASEO_TEAM_LEAD_WRITE=1`. Its
+  `create_agent` may also seat a **Supervisor** for its own cluster, behind its
+  own argument guard (explicit model, `labels.purpose: governance`, and under
+  `multi` a domain no wider than the Lead's own).
 - **Peer** gets no Paseo MCP or orchestration tools at all. Browser MCP is
   granted only by the current V3 brief.
 
@@ -191,6 +196,59 @@ Message kinds: `question`, `blocked`, `dependency`, `progress`.
 
 Failing to resolve the parent is fail-closed — there is no broadcast fallback.
 
+### A Lead asks the Supervisor — not the Human
+
+The counterpart, and the reason it exists: the Supervisor-initiated half of this
+pack (observation loop, `SUPERVISOR_DECISION`) only ever fires when the
+Supervisor decides to look. A Lead holding a question of its own had exactly one
+addressable party — the Human — so it asked, constantly, including about matters
+its own contract had already delegated to it.
+
+`lead_ask_supervisor` closes that. It resolves the Supervisor seat of the Lead's
+own **cluster** from Paseo's agent state (narrowed by `team.domain` under
+`multi`), and delivers a `LEAD_CONSULT_V1` **prompt** — not a chat post, because
+a prompt wakes an idle Supervisor and opens a turn, which is what makes the
+receiving runtime inject its verdict.
+
+```text
+lead_ask_supervisor {
+  kind: "decision",          # decision | question | risk
+  question, options, evidence,
+  scope, reversibility,      # "reversible" | "irreversible"
+  recommendation?, taskId?, projectId?, correlationId?, supervisorAgentId?
+}
+```
+
+The five required fields are the ones the Supervisor's four Delegated-decision
+criteria are checked against, so a consult can come back decided in one round
+trip; one that omits them is refused at the sender rather than bounced after a
+round trip. The Supervisor's turn context then carries a verdict and a
+directive:
+
+| Verdict | Supervisor must |
+|---|---|
+| `LEAD_CONSULT_ACTIONABLE` | decide (a filled `SUPERVISOR_DECISION`) **or** escalate naming the criterion that failed |
+| `LEAD_CONSULT_HUMAN_BOUND` | escalate only — the Lead marked the matter irreversible, so criterion 2 already failed |
+| `LEAD_CONSULT_SENDER_UNVERIFIED` | answer on evidence, but issue no decision — `FROM_AGENT_ID` does not resolve to a Lead seat |
+| `LEAD_CONSULT_MALFORMED` / `_CLUSTER_MISMATCH` / `_OUT_OF_JURISDICTION` / `_JURISDICTION_UNDECLARED` | refuse, and say `BLOCKED: <code>` so the Lead is not left waiting |
+
+Sender-side failures are named rather than silent, because a silent one degrades
+straight back into asking the Human:
+
+| Code | Meaning |
+|---|---|
+| `NO_SUPERVISOR_SEAT` | this cluster has no governance seat — the one case where asking the Human is correct. The message carries the `create_agent` call that fixes it |
+| `SUPERVISOR_AMBIGUOUS` | two seats claim this Lead; picking one would ratify an overlap the Lead's own runtime refuses as `JURISDICTION_OVERLAP` |
+| `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable — "could not look" is never reported as "there is nobody" |
+| `CONSULT_FIELD_COLLISION` | a body line like `SCOPE:` would be read back as a field |
+
+A Lead may also **seat the Supervisor that governs it** when the cluster has
+none. The guard requires an explicitly routed provider (never a bare
+`pi-supervisor`), `labels.purpose: governance`, a `team.cluster` matching the
+Lead's own, `settings.thinkingOptionId`, and under `multi` a `team.domain` equal
+to or inside the Lead's — a Supervisor wider than its creator would be authority
+manufactured out of nothing.
+
 ### Lead/Supervisor check for hung agents
 
 `team_watchdog` inspects `running` agents via `paseo ls -g` + `paseo inspect`:
@@ -219,6 +277,7 @@ split is by whether a repeat can duplicate work:
 | Operation | Retried |
 |---|---|
 | `peer_ask_lead` inspect step | up to 3×, transient transport errors only |
+| `lead_ask_supervisor` send | never retried — same delivery ambiguity as `peer_ask_lead`; `correlationId` is for receiver-side deduplication |
 | `remote-paseo.mjs` read/health/provider/status | up to 3× |
 | `send`, `run` | **never** — delivery ambiguity would duplicate the message or task |
 | usage / authority / model / workspace / endpoint / malformed request | **never** — fails immediately |
@@ -663,7 +722,7 @@ Practical differences to know when routing:
 |---|---|---|
 | model reference | `<pi-provider>/<model-id>` | bare id, e.g. `claude-opus-5` |
 | thinking | `off\|minimal\|low\|medium\|high\|xhigh\|max` | `off\|low\|medium\|high\|xhigh\|max\|ultracode` |
-| team tools | `peer_ask_lead`, `team_watchdog` | `mcp__paseo-team__*` |
+| team tools | `peer_ask_lead`, `lead_ask_supervisor`, `team_watchdog`, … | `mcp__paseo-team__*` |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
 | subagents | n/a | `Task` denied for every role — fan-out belongs to the Lead |
 
@@ -846,6 +905,9 @@ pack ships no test repo — create an equivalent scratch repo anywhere.
 | 4 | Lead creates a Scout: read-only Peer, same workspace | Lead receives the completion notification |
 | 5 | Lead creates an Engineer with `--isolation worktree` | Engineer fixes the bug, runs tests, reports the SHA |
 | 6 | Independent Reviewer: `MODE: read-only` + `DISPOSITION: independent-reviewer` | Verifies the exact SHA, returns a verdict, fixes nothing |
+| 7 | Give the Lead a small reversible choice with evidence on both sides (e.g. retry a step that failed once) | Lead sends `lead_ask_supervisor` instead of asking you; the Supervisor replies with a filled `SUPERVISOR_DECISION`; the Lead acts on it without asking you to confirm |
+| 8 | Same, but ask it to push the branch | Lead goes to you directly, and says the reason is that the matter is irreversible |
+| 9 | Archive the Supervisor, then repeat test 7 | `lead_ask_supervisor` reports `NO_SUPERVISOR_SEAT`; the Lead either seats one or asks you **and says that is why** |
 
 ## First-release completion criteria
 

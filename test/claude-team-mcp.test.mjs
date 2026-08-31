@@ -36,7 +36,7 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 	// runtime and not the other is a capability the other runtime silently lacks.
 	assert.deepEqual(
 		listed.result.tools.map((tool) => tool.name).sort(),
-		["peer_ask_lead", "team_chat", "team_fork", "team_lease", "team_watchdog"],
+		["lead_ask_supervisor", "peer_ask_lead", "team_chat", "team_fork", "team_lease", "team_watchdog"],
 	);
 	for (const tool of listed.result.tools) {
 		assert.equal(tool.inputSchema.type, "object");
@@ -68,6 +68,18 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 	assert.equal(unset.isError, true);
 	assert.match(unset.content[0].text, /PASEO_PI_ROLE=unset/);
 
+	// The consult is the Lead's own channel: a Peer with it would route around
+	// its Lead, and a Supervisor with it would be consulting itself.
+	for (const role of ["peer", "supervisor"]) {
+		const wrongRole = await callTeamTool(
+			"lead_ask_supervisor",
+			{ kind: "decision", question: "q", options: "a|b", evidence: "e", scope: "s", reversibility: "reversible" },
+			{ PASEO_PI_ROLE: role },
+		);
+		assert.equal(wrongRole.isError, true);
+		assert.match(wrongRole.content[0].text, /only to lead agents/i);
+	}
+
 	const unknownTool = await callTeamTool("rm_rf", {}, { PASEO_PI_ROLE: "lead" });
 	assert.equal(unknownTool.isError, true);
 	assert.match(unknownTool.content[0].text, /Unknown tool/);
@@ -77,6 +89,7 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 assert.deepEqual(
 	TEAM_TOOLS.map((tool) => [tool.name, tool.roles]).sort(),
 	[
+		["lead_ask_supervisor", ["lead"]],
 		["peer_ask_lead", ["peer"]],
 		["team_chat", ["lead", "supervisor"]],
 		["team_fork", ["lead", "supervisor"]],
@@ -147,6 +160,32 @@ assert.deepEqual(
 		[...fork.inputSchema.properties.reason.enum].sort(),
 		[...FORK_REASONS].sort(),
 		"the advertised fork reasons must be exactly the ones the core accepts",
+	);
+
+	// And for the consult tool. Its description is the one place a Lead is told
+	// that the Supervisor — not the Human — is where an open question goes, so a
+	// runtime carrying a weaker copy of that sentence is a runtime whose Lead
+	// keeps interrupting the Human.
+	const consult = TEAM_TOOLS.find((tool) => tool.name === "lead_ask_supervisor");
+	const { leadAskSupervisorToolDescription, LEAD_CONSULT_KINDS, LEAD_CONSULT_TOOL } =
+		await import("../extensions/paseo-team-core/policy-core.ts");
+	assert.equal(consult.name, LEAD_CONSULT_TOOL, "the tool name comes from the core");
+	assert.equal(
+		consult.description,
+		leadAskSupervisorToolDescription(),
+		"the consult description must not drift between runtimes either",
+	);
+	assert.deepEqual(
+		[...consult.inputSchema.properties.kind.enum].sort(),
+		[...LEAD_CONSULT_KINDS].sort(),
+		"the advertised consult kinds must be exactly the ones the parser accepts",
+	);
+	// The four Delegated-decision criteria are checked against these. A schema
+	// that lets one be omitted produces consults the Supervisor must bounce.
+	assert.deepEqual(
+		[...consult.inputSchema.required].sort(),
+		["evidence", "kind", "options", "question", "reversibility", "scope"],
+		"a consult must carry everything the criteria are checked against",
 	);
 }
 

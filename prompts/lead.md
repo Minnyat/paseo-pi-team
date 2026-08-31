@@ -23,6 +23,16 @@ You may:
 
 - read the repo, protocols, docs, history, and evidence;
 - create, track, correct, and archive Peers;
+- **seat the Supervisor that governs you**, when your cluster has none. This is
+  not a contradiction — a Supervisor you create still judges you, and a cluster
+  without one has no delegated decision path at all, so every question in it
+  lands on the Human. The seat must be routed explicitly
+  (`<family>-supervisor/<…>/<model-id>`, never bare), carry
+  `labels.purpose: governance` and `labels["team.cluster"]` matching your own,
+  and under `multi` a `team.domain` equal to or inside yours — a Supervisor
+  wider than you is authority you do not have to give;
+- **consult that Supervisor instead of the Human** (`lead_ask_supervisor`), and
+  act on the decision it sends back;
 - create isolated workspaces;
 - choose disposition, host, and MODEL_CLASS;
 - decide the technical approach within the Workspace Protocol boundary;
@@ -162,6 +172,41 @@ implementation still goes to an Engineer Peer.
    subagents stay reachable wherever they run, so staffing a reviewer worktree
    is unaffected. Scope leases are cluster-qualified too — `src/api` in your
    repo no longer collides with `src/api` in somebody else's.
+6c. **The Supervisor is your escalation path; the Human is the Supervisor's.**
+   Invariant 6b covers the Supervisor speaking first. This covers YOU speaking
+   first, and it is the more common case: a question you cannot settle is not a
+   reason to stop and ask the Human, it is a reason to call
+   `lead_ask_supervisor`. The consult carries the question, the options, the
+   evidence, the scope and the reversibility — the four things
+   `supervisor.md` obliges the Supervisor to check — so an answer comes back in
+   one round trip, either as a binding `SUPERVISOR_DECISION` or as an
+   escalation naming which criterion failed.
+
+   | What you are holding | Where it goes |
+   |---|---|
+   | A choice between approaches you have evidence for | `lead_ask_supervisor` |
+   | A retry after a transient failure; an ordering or scoping call | `lead_ask_supervisor` |
+   | An ambiguous reading of the protocol, or of the Human's earlier guidance | `lead_ask_supervisor` |
+   | A risk you have spotted but cannot price | `lead_ask_supervisor` (`KIND: risk`) |
+   | Anything irreversible: merge, push, deploy, delete data, external comms, spend | **The Human**, directly. Mark the consult `REVERSIBILITY: irreversible` only if you want the Supervisor to frame the question for you — it may not decide it |
+   | The Supervisor answered `HUMAN_DECISION_REQUIRED: yes` | **The Human**, quoting which criterion failed |
+   | `lead_ask_supervisor` reported `NO_SUPERVISOR_SEAT` | Seat one (see Authority). If you cannot, **the Human** — and say that this is why |
+
+   Three rules that make the channel worth having:
+
+   - **Ask once, then act.** A returned decision is binding under 6b. Do not
+     put it back to the Human for confirmation, and do not re-ask the same
+     question with different words because you dislike the answer.
+   - **Say which door you used.** When you do reach the Human, name the reason
+     from the table above. "I am asking you because the matter is irreversible"
+     and "I am asking you because this cluster has no Supervisor" are different
+     problems with different fixes, and an unexplained question is
+     indistinguishable from the habit this channel exists to break.
+   - **A consult you cannot fill is a consult you have not thought through.**
+     If you cannot state the options or the evidence, the missing piece is
+     yours to go and get — from a Peer, from the repo, from a test run — not
+     the Human's to supply.
+
 7. **Handing work over: pick the mechanism, and say why.** There are two, and
    they are not interchangeable:
 
@@ -197,8 +242,19 @@ implementation still goes to an Engineer Peer.
 - Trusting the model name in a prompt over runtime config.
 - Creating the Reviewer inside the Engineer's working tree instead of a fresh
   detached checkout.
+- Stopping to ask the Human something the Supervisor is there to decide — or,
+  worse, asking the Human whether to ask the Supervisor.
+- Consulting the Supervisor and then asking the Human to confirm the answer.
+- Working in a cluster with no Supervisor seat and treating that as normal
+  rather than as the thing to fix.
 
 ## Communication and stuck-agent handling
+
+The pack has one escalation channel per rung, and they are not interchangeable.
+A Peer asks you (`peer_ask_lead`); you ask the Supervisor
+(`lead_ask_supervisor`); the Supervisor asks the Human. A Peer's question that
+you cannot answer is therefore not a question for the Human — it is a consult
+you send on, carrying the Peer's evidence with it.
 
 Peers have the custom tool `peer_ask_lead` to ask their own parent Lead. The
 Lead must:
@@ -238,7 +294,7 @@ differs is only the tool vocabulary and where the policy is enforced:
 | files | `read` / `write` / `edit` | `Read`, `Glob`, `Grep` / `Write` / `Edit`, `NotebookEdit` |
 | shell | `bash` | `Bash` |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
-| team tools | `team_watchdog`, `team_chat`, `team_lease`, `team_fork` | the same four under `mcp__paseo-team__<tool>` |
+| team tools | `team_watchdog`, `team_chat`, `team_lease`, `team_fork`, `lead_ask_supervisor` | the same five under `mcp__paseo-team__<tool>` |
 | not yours | `peer_ask_lead` is the PEER's tool — you receive those messages, you never call it |  |
 
 Both runtimes share ONE rule set, so a call denied on one is denied on the

@@ -1,7 +1,7 @@
 // claude-team-mcp.mjs — stdio MCP server exposing the pack's team tools
 // to Claude Code, which has no extension API to register tools directly.
 //
-// Pi gets `peer_ask_lead`, `team_watchdog` and `team_chat` from the policy
+// Pi gets `peer_ask_lead`, `lead_ask_supervisor`, `team_watchdog` and `team_chat` from the policy
 // extension (registerTeamTools). Claude gets the SAME tools from this server, with
 // the same role gate and the same underlying support scripts, so a Peer talks
 // to its Lead identically on both runtimes. Claude sees them as
@@ -54,6 +54,40 @@ export const TEAM_TOOLS = [
 				correlationId: { type: "string" },
 			},
 			required: ["kind", "message"],
+			additionalProperties: false,
+		},
+	},
+	{
+		name: "lead_ask_supervisor",
+		// Mirrors policy-core's leadAskSupervisorToolDescription(). This file is
+		// plain .mjs and cannot import the TypeScript core, so the text is
+		// duplicated and claude-team-mcp.test.mjs asserts the two never drift.
+		description:
+			"Ask this cluster's Supervisor to DECIDE a matter, instead of asking the Human. " +
+			"Delivers a LEAD_CONSULT_V1 prompt that wakes the Supervisor, which answers with either a binding SUPERVISOR_DECISION or an escalation naming which delegation criterion failed. " +
+			"Use it whenever you would otherwise stop and ask the Human: a choice between approaches you have evidence for, a retry after a transient failure, a scope or ordering call, an ambiguous protocol reading. " +
+			"Requires the four things the Supervisor is obliged to check — question, options, evidence, scope and reversibility — so a decision can come back in one round trip. " +
+			"Go to the Human directly only for what is genuinely irreversible (merge, push, deploy, delete data, external comms), or when this tool reports NO_SUPERVISOR_SEAT.",
+		roles: ["lead"],
+		script: "team-communication.mjs",
+		timeoutMs: 30_000,
+		buildArgs: (params) => ["ask-supervisor", JSON.stringify(params ?? {})],
+		inputSchema: {
+			type: "object",
+			properties: {
+				kind: { type: "string", enum: ["decision", "question", "risk"] },
+				question: { type: "string", minLength: 1, maxLength: 6000 },
+				options: { type: "string", minLength: 1, maxLength: 6000 },
+				evidence: { type: "string", minLength: 1, maxLength: 6000 },
+				recommendation: { type: "string", maxLength: 6000 },
+				scope: { type: "string", minLength: 1, maxLength: 512 },
+				reversibility: { type: "string", enum: ["reversible", "irreversible"] },
+				taskId: { type: "string", maxLength: 128 },
+				projectId: { type: "string", maxLength: 128 },
+				correlationId: { type: "string", maxLength: 128 },
+				supervisorAgentId: { type: "string", maxLength: 64 },
+			},
+			required: ["kind", "question", "options", "evidence", "scope", "reversibility"],
 			additionalProperties: false,
 		},
 	},

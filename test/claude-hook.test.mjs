@@ -569,6 +569,13 @@ rmSync(home, { recursive: true, force: true });
 		);
 		const ordinaryContext = String(ordinary?.hookSpecificOutput?.additionalContext);
 		assert.match(ordinaryContext, /Paseo Team Authority \(standing\)/);
+		// PR-H: the standing line is the only per-turn place a Claude Lead is told
+		// WHERE an open question goes. Without this sentence the model's default
+		// posture — check with the human before anything consequential — is the
+		// only guidance it has by turn fifty, which is the behaviour the consult
+		// channel exists to replace.
+		assert.match(ordinaryContext, /lead_ask_supervisor/);
+		assert.match(ordinaryContext, /NO_SUPERVISOR_SEAT/);
 		assert.ok(!/supervisor message \(this turn\)/.test(ordinaryContext));
 		assert.ok(
 			!/Paseo Team Role/.test(ordinaryContext),
