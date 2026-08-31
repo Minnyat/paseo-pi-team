@@ -589,9 +589,36 @@ function fakeRunner(overrides = {}) {
 }
 
 {
-	// A Supervisor and a Lead genuinely in different clusters: the board must
-	// name the exact consequence (CLUSTER_MISMATCH on every SUPERVISOR_DECISION)
-	// and the exact fix (team.cluster / PASEO_TEAM_CLUSTER on both seats).
+	// THE bug pinned here: a Supervisor and a Lead in different clusters with
+	// NO edge between them (no spawn, no fork, no message — i.e. two entirely
+	// unrelated projects sharing a host) must NOT warn. This is the ordinary
+	// state of every multi-project machine; `clustersSeparate` alone cannot
+	// distinguish it from a real split team, so it must never fire by itself.
+	const graph = buildGraph({
+		agents: [
+			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		],
+		parents: { sup: null, lead: null },
+		states: {
+			sup: { agentId: "sup", labels: { "team.cluster": "pod-product" } },
+			lead: { agentId: "lead", labels: { "team.cluster": "wonderquest" } },
+		},
+		now: 0,
+	});
+	assert.equal(graph.edges.length, 0, "sanity check: this fixture really has no edge between them");
+	assert.deepEqual(
+		graph.clusterMismatches,
+		[],
+		"two unrelated projects on one host are the normal case, not a mismatch",
+	);
+}
+
+{
+	// A Supervisor and a Lead already connected by a spawn edge, but genuinely
+	// in different clusters: the board must name the exact consequence
+	// (CLUSTER_MISMATCH on every SUPERVISOR_DECISION) and the exact fix
+	// (team.cluster / PASEO_TEAM_CLUSTER on both seats).
 	const graph = buildGraph({
 		agents: [
 			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
@@ -599,10 +626,13 @@ function fakeRunner(overrides = {}) {
 		],
 		states: {
 			sup: { agentId: "sup", labels: { "team.cluster": "shop" } },
-			lead: { agentId: "lead", labels: { "team.cluster": "blog" } },
+			// The spawn edge (sup -> lead) is the positive evidence these two are
+			// meant to be one team.
+			lead: { agentId: "lead", labels: { "team.cluster": "blog" }, parentAgentId: "sup" },
 		},
 		now: 0,
 	});
+	assert.ok(graph.edges.some((e) => e.type === "spawn" && e.from === "sup" && e.to === "lead"));
 	assert.equal(graph.clusterMismatches.length, 1);
 	const mismatch = graph.clusterMismatches[0];
 	assert.equal(mismatch.supervisor.id, "sup");
@@ -616,10 +646,47 @@ function fakeRunner(overrides = {}) {
 }
 
 {
-	// An unprovable cluster on EITHER side must not warn: a false warning
-	// teaches an operator to ignore warnings. This mirrors clustersSeparate's
-	// own null-is-"not separate" rule exactly — that predicate is reused here,
-	// not re-implemented.
+	// A message edge is just as much evidence of a team as a spawn edge.
+	const graph = buildGraph({
+		agents: [
+			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		],
+		parents: { sup: null, lead: null },
+		states: {
+			sup: { agentId: "sup", labels: { "team.cluster": "shop" } },
+			lead: { agentId: "lead", labels: { "team.cluster": "blog" } },
+		},
+		messages: [{ from: "sup", to: "lead", kind: "observation", correlationId: "c1", confidence: "confirmed" }],
+		now: 0,
+	});
+	assert.equal(graph.clusterMismatches.length, 1, "a message edge is enough to prove relatedness");
+}
+
+{
+	// Direction must not decide relatedness: a Lead replying to its own
+	// Supervisor (edge lead -> sup) is exactly as much evidence as sup -> lead.
+	const graph = buildGraph({
+		agents: [
+			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		],
+		parents: { sup: null, lead: null },
+		states: {
+			sup: { agentId: "sup", labels: { "team.cluster": "shop" } },
+			lead: { agentId: "lead", labels: { "team.cluster": "blog" } },
+		},
+		messages: [{ from: "lead", to: "sup", kind: "observation", correlationId: "c1", confidence: "confirmed" }],
+		now: 0,
+	});
+	assert.equal(graph.clusterMismatches.length, 1, "the edge still counts in reverse");
+}
+
+{
+	// An unprovable cluster on EITHER side must not warn even when a real edge
+	// connects them: a false warning teaches an operator to ignore warnings.
+	// This mirrors clustersSeparate's own null-is-"not separate" rule exactly
+	// — that predicate is reused here, not re-implemented.
 	const graph = buildGraph({
 		agents: [
 			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
@@ -628,9 +695,12 @@ function fakeRunner(overrides = {}) {
 		states: {
 			sup: { agentId: "sup", labels: { "team.cluster": "shop" } },
 			// lead has no state file at all: cluster is null, not "different".
+			// The spawn edge still exists (inspect answered it directly).
 		},
+		parents: { sup: null, lead: "sup" },
 		now: 0,
 	});
+	assert.ok(graph.edges.some((e) => e.type === "spawn" && e.to === "lead"), "sanity check: the edge is really there");
 	assert.deepEqual(graph.clusterMismatches, []);
 }
 
@@ -643,7 +713,7 @@ function fakeRunner(overrides = {}) {
 		],
 		states: {
 			sup: { agentId: "sup", labels: { "team.cluster": "Shop" } },
-			lead: { agentId: "lead", labels: { "team.cluster": "shop/" } },
+			lead: { agentId: "lead", labels: { "team.cluster": "shop/" }, parentAgentId: "sup" },
 		},
 		now: 0,
 	});
@@ -664,16 +734,25 @@ function fakeRunner(overrides = {}) {
 }
 
 {
-	// describeClusterMismatches is exported directly so a caller (or a future
-	// CLI surface) can run it over an already-built node list without paying
-	// for buildGraph again.
+	// describeClusterMismatches takes the SAME edges buildGraph already built
+	// — it must not re-derive relatedness from parentId itself.
 	const nodes = [
 		{ id: "sup", role: "supervisor", shortId: "sup", cluster: "a" },
 		{ id: "lead", role: "lead", shortId: "lead", cluster: "b" },
 		{ id: "peer", role: "peer", shortId: "peer", cluster: "c" },
 	];
-	const mismatches = describeClusterMismatches(nodes);
-	assert.equal(mismatches.length, 1, "only supervisor/lead pairs are checked, never peers");
+	const edges = [{ type: "spawn", from: "sup", to: "lead", confidence: "confirmed" }];
+	assert.equal(
+		describeClusterMismatches(nodes, edges).length,
+		1,
+		"only supervisor/lead pairs with a real edge are checked, never peers",
+	);
+	assert.equal(
+		describeClusterMismatches(nodes, []).length,
+		0,
+		"no edges at all means no warning, even though the clusters differ",
+	);
+	assert.deepEqual(describeClusterMismatches(nodes), [], "edges defaults to empty, not a crash");
 }
 
 // --- PR-E: a fork is lineage the board must show ---------------------------
