@@ -10,7 +10,12 @@ description: Coordinate research, implementation, correction, and independent re
 1. Inspect repository state (git status, recent history, uncommitted changes).
 2. Read relevant project instructions (`AGENTS.md`, `WORKSPACE_PROTOCOL.md` if present).
 3. Identify objective, success boundary and risks.
-4. Do not begin implementation yet.
+4. **Check that this cluster has a Supervisor.** `lead_ask_supervisor` reports
+   `NO_SUPERVISOR_SEAT` when it does not, and a cluster without one has no
+   delegated decision path — every question in it lands on the Human. Seating
+   one is a Lead act (see "Asking instead of interrupting" below); do it now,
+   at intake, not the first time you are stuck.
+5. Do not begin implementation yet.
 
 ## Research
 
@@ -399,12 +404,84 @@ Use `send_agent_prompt` only for:
 
 Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the current Peer’s `paseo.parent-agent-id` and sends a structured `PEER_MESSAGE_V1`. It cannot target an arbitrary agent. Treat `blocked` as a coordination event and reply with a full V3 brief when the reply changes authority.
 
+## Asking instead of interrupting (`lead_ask_supervisor`)
+
+The Human is not your first line of support; the Supervisor is. When you hit a
+question you cannot settle on evidence — which of two approaches, whether to
+retry a step that just failed, how to read an ambiguous line of the protocol —
+send a consult, not a question upward:
+
+```text
+lead_ask_supervisor {
+  kind: "decision",                    # decision | question | risk
+  question: "Retry the token refresh once, or fail the step?",
+  options: "a) retry once with backoff\nb) fail and report to the Human",
+  evidence: "run 1 failed with ECONNRESET after 30s; manual rerun passed; no code change between them",
+  scope: "src/auth/token.ts, step 3 of T-9",
+  reversibility: "reversible",
+  recommendation: "a — the failure signature is transient, not logic",
+  taskId: "T-9"
+}
+```
+
+The five required fields are not ceremony: `SCOPE`, `REVERSIBILITY`, `OPTIONS`
+and `EVIDENCE` are what the Supervisor's four Delegated-decision criteria are
+checked against, so a consult carrying them can come back decided in ONE round
+trip. One that omits them would be bounced, which is why the tool refuses it at
+your end instead.
+
+What comes back is one of two things, and both are actionable:
+
+- a `SUPERVISOR_DECISION` — binding under invariant 6b of `lead.md`. **Carry it
+  out. Do not ask the Human to confirm it.**
+- `HUMAN_DECISION_REQUIRED: yes` naming the criterion that failed — now you go
+  to the Human, quoting that reason.
+
+Failure answers from the tool itself, and what each one means:
+
+| Code | What it means | What to do |
+|---|---|---|
+| `NO_SUPERVISOR_SEAT` | this cluster has no governance seat | seat one (below); if you cannot, ask the Human **and say this is why** |
+| `SUPERVISOR_AMBIGUOUS` | two seats claim you | do not pick — a guessed answer is refused on arrival as `JURISDICTION_OVERLAP`. Raise the overlap with the Human |
+| `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable | a real blocker: "I could not look" is not "there is nobody". Fix the read, do not route around it |
+| `CONSULT_FIELD_COLLISION` | pasted evidence contains a line like `SCOPE:` | reword or quote that line; it would have been read back as a field |
+
+### Seating the Supervisor that governs you
+
+Not a contradiction — the seat you create still judges you, and it is better
+than having no delegation path at all. Same routing cycle as any other
+`create_agent` (steps 1–4 above for `MODEL_CLASS`/`HOST_ID`), plus four things
+the policy enforces:
+
+```text
+create_agent {
+  provider: "<family>-supervisor/<…>/<model-id>",   # never a bare "pi-supervisor"
+  labels: {
+    "purpose": "governance",
+    "team.cluster": "<your own cluster>",
+    "team.domain": "<your own domain, or one inside it>"   # required under multi
+  },
+  settings: { thinkingOptionId: "<routed level>" },
+  initialPrompt: "<brief it on the project, the Workspace Protocol, and what it governs>"
+}
+```
+
+A bare provider is refused because the governance seat is the one whose
+reasoning quality decides what the Human never gets asked. A domain wider than
+your own is refused because that is authority you do not have to give — ask the
+Human to seat that one.
+
+Give the new Supervisor a `create_heartbeat` cadence in its briefing so it
+observes as well as answers; a Supervisor that only ever replies to consults is
+half a seat.
+
 ## Coordinating with the other seats (`team_chat`)
 
-`peer_ask_lead` is how a Peer reaches YOU. It is one-way and parent-scoped, so
-it cannot reach another Lead. The channel between coordinating seats —
-Lead ↔ Lead, Supervisor ↔ Lead — is `team_chat`, a many-to-many bus built on
-Paseo chat rooms:
+`peer_ask_lead` is how a Peer reaches YOU, and `lead_ask_supervisor` is how you
+reach the Supervisor — both are one-way, addressed, and expect an answer. Use
+the consult for a question you need DECIDED; use the room below for everything
+else. The channel between coordinating seats — Lead ↔ Lead, Supervisor ↔ Lead —
+is `team_chat`, a many-to-many bus built on Paseo chat rooms:
 
 ```text
 team_chat { action: "post", room: "<room>", recipients: ["<agent-id|short-id|domain:<name>>"], body: "<text>" }
@@ -565,7 +642,11 @@ Report:
 - test results;
 - reviewer verdict;
 - unresolved risks;
-- Human action required.
+- Human action required — and for each item, WHY it is the Human's: it is
+  irreversible, the Supervisor escalated it (quote the criterion), or the
+  cluster has no Supervisor seat. An unexplained "needs Human input" is the
+  habit this pack exists to break;
+- delegated decisions taken this cycle, each with its `ROLLBACK_PATH`.
 
 Never merge or deploy yourself — that decision belongs to Human.
 

@@ -70,6 +70,14 @@ import {
 	TEAM_CHAT_TOOL,
 	TEAM_LEASE_TOOL,
 	TEAM_FORK_TOOL,
+	LEAD_CONSULT_TOOL,
+	LEAD_CONSULT_KINDS,
+	leadAskSupervisorToolDescription,
+	leadConsultAttribution,
+	leadConsultToolBlockReason,
+	leadConsultTurnNotice,
+	leadConsultVerdict,
+	parseLeadConsultBlock,
 	FORK_REASONS,
 	teamForkToolBlockReason,
 	teamForkToolDescription,
@@ -266,6 +274,32 @@ function supervisorNotice(prompt: string): string | null {
 	return supervisorTurnNotice({ block, verdict, attribution });
 }
 
+/**
+ * The Supervisor's half of the same idea (PR-H).
+ *
+ * `supervisorNotice` above tells a Lead what a supervisor message obliges it to
+ * do. This tells a Supervisor what a LEAD_CONSULT obliges it to do — and the
+ * obligation is the load-bearing part. A Supervisor that reads a consult as
+ * ordinary prose answers it with a recommendation, or with nothing, and either
+ * way the Lead is left holding a question it must then take to the Human. Which
+ * is the exact behaviour the consult channel exists to remove.
+ */
+function leadConsultNotice(prompt: string): string | null {
+	const block = parseLeadConsultBlock(prompt);
+	if (!block) return null;
+	const attribution = leadConsultAttribution(
+		block.fields.get("FROM_AGENT_ID") ?? null,
+	);
+	const verdict = leadConsultVerdict({
+		block,
+		attribution,
+		supervisorDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
+		supervisorCluster: selfCluster(),
+		topology: teamTopology(),
+	});
+	return leadConsultTurnNotice({ block, verdict, attribution });
+}
+
 function extractCreateAgentArgs(input: unknown): unknown {
 	if (!input || typeof input !== "object") return null;
 	const args = (input as Record<string, unknown>).args;
@@ -299,6 +333,35 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 		async execute(_id, params, signal, _onUpdate, _ctx) {
 			if (r !== "peer") return { content: [{ type: "text", text: "peer_ask_lead is available only to Peer agents." }], details: undefined, isError: true };
 			const result = await runSupportScript("team-communication.mjs", ["ask-lead", JSON.stringify(params)], signal);
+			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
+		},
+	});
+	pi.registerTool({
+		name: LEAD_CONSULT_TOOL,
+		label: "lead_ask_supervisor",
+		description: leadAskSupervisorToolDescription(),
+		parameters: {
+			type: "object",
+			properties: {
+				kind: { type: "string", enum: [...LEAD_CONSULT_KINDS] },
+				question: { type: "string", minLength: 1, maxLength: 6000 },
+				options: { type: "string", minLength: 1, maxLength: 6000 },
+				evidence: { type: "string", minLength: 1, maxLength: 6000 },
+				recommendation: { type: "string", maxLength: 6000 },
+				scope: { type: "string", minLength: 1, maxLength: 512 },
+				reversibility: { type: "string", enum: ["reversible", "irreversible"] },
+				taskId: { type: "string", maxLength: 128 },
+				projectId: { type: "string", maxLength: 128 },
+				correlationId: { type: "string", maxLength: 128 },
+				supervisorAgentId: { type: "string", maxLength: 64 },
+			},
+			required: ["kind", "question", "options", "evidence", "scope", "reversibility"],
+			additionalProperties: false,
+		} as any,
+		async execute(_id, params, signal, _onUpdate, _ctx) {
+			const blocked = leadConsultToolBlockReason(r, LEAD_CONSULT_TOOL);
+			if (blocked) return { content: [{ type: "text", text: blocked }], details: undefined, isError: true };
+			const result = await runSupportScript("team-communication.mjs", ["ask-supervisor", JSON.stringify(params ?? {})], signal);
 			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
 		},
 	});
@@ -531,7 +594,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		applyPolicy(pi, r);
 		const rolePrompt = loadRolePrompt(r);
-		const notice = r === "lead" ? supervisorNotice(event.prompt) : null;
+		const notice =
+			r === "lead"
+				? supervisorNotice(event.prompt)
+				: r === "supervisor"
+					? leadConsultNotice(event.prompt)
+					: null;
 		if (!rolePrompt && !notice) return;
 		const sections = [
 			event.systemPrompt,

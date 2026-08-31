@@ -1,7 +1,24 @@
 #!/usr/bin/env node
-// Reliable, parent-scoped Peer -> Lead communication.
+// Reliable, parent-scoped Peer -> Lead communication, and the Lead -> Supervisor
+// consult that keeps a Lead's own question off the Human's desk (PR-H).
+//
+// The two directions share this file because they share the one thing that is
+// hard about either: delivery. Both resolve a recipient from Paseo's own state
+// rather than from the sender's belief, both wrap the payload in a versioned
+// envelope so the receiving runtime can judge it, and both send with
+// `--no-wait` and never retry, because `paseo send` has delivery ambiguity and
+// no idempotency contract.
+//
+// What differs is how the recipient is found, and that difference is the whole
+// design. A Peer has exactly one legitimate recipient — its parent — so
+// `ParentAgentId` IS the routing table. A Lead has no parent; its Supervisor is
+// a sibling seat found by role and cluster. That search can come back empty,
+// and an empty answer is the interesting one: a cluster with no Supervisor is
+// the only case where asking the Human is the correct behaviour, so it gets a
+// named code (NO_SUPERVISOR_SEAT) carrying the exact call that fixes it,
+// instead of a silent fallback the Lead cannot explain.
 import { execFileSync } from "node:child_process";
-import { isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
+import { importPolicyCore, isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const MESSAGE_KINDS = Object.freeze(["question", "blocked", "dependency", "progress"]);
@@ -83,16 +100,230 @@ export async function sendPeerMessage(input, options = {}) {
   return { ok: true, recipient: parent, correlationId: message.correlationId, response: sent.data };
 }
 
+export const CONSULT_KINDS = Object.freeze(["decision", "question", "risk"]);
+export const REVERSIBILITY_VALUES = Object.freeze(["reversible", "irreversible"]);
+
+/** Free-text sections of the envelope, in the order they are written. */
+const CONSULT_SECTIONS = Object.freeze([
+  ["question", "QUESTION"],
+  ["options", "OPTIONS"],
+  ["evidence", "EVIDENCE"],
+  ["recommendation", "RECOMMENDATION"],
+]);
+
+/**
+ * A body line that would be read back as a field.
+ *
+ * The parser's allowlist already makes an unknown `WORD:` line prose, so this
+ * only fires on the dozen names that ARE fields. Refusing here rather than at
+ * the receiver is deliberate: a stray `SCOPE:` inside pasted evidence would
+ * otherwise become a duplicate field, the consult would be refused as
+ * malformed, and the Lead would learn about it one round trip away from the
+ * text it could actually fix.
+ */
+function assertNoFieldLines(name, value, fieldNames) {
+  const known = new Set(fieldNames);
+  for (const line of value.split(/\r?\n/)) {
+    const match = /^([A-Z][A-Z0-9_]*):/.exec(line.trim());
+    if (match && known.has(match[1])) {
+      throw Object.assign(
+        new Error(
+          `${name} contains a line starting with "${match[1]}:", which the consult parser reads as a field. Reword it or quote it, e.g. "> ${match[1]}: ...".`,
+        ),
+        { code: "CONSULT_FIELD_COLLISION" },
+      );
+    }
+  }
+}
+
+export function validateConsult(input, fieldNames) {
+  if (!input || typeof input !== "object") throw new Error("consult must be an object");
+  const { kind, scope, reversibility, taskId, projectId, correlationId, supervisorAgentId } = input;
+  if (!CONSULT_KINDS.includes(kind)) throw new Error(`kind must be one of: ${CONSULT_KINDS.join(", ")}`);
+  if (!REVERSIBILITY_VALUES.includes(reversibility)) {
+    throw new Error(`reversibility must be one of: ${REVERSIBILITY_VALUES.join(", ")}`);
+  }
+  const text = {};
+  for (const [key, field] of CONSULT_SECTIONS) {
+    const raw = input[key];
+    // RECOMMENDATION is the one optional section: a Lead with no preference
+    // between two equivalent options is asking an honest question, and forcing
+    // it to invent a lean would bias the answer it came for.
+    const required = key !== "recommendation";
+    if (raw === undefined || raw === null || String(raw).trim() === "") {
+      if (required) {
+        throw new Error(`${key} is required — the Supervisor checks the delegation criteria against it`);
+      }
+      continue;
+    }
+    const value = String(raw).trim();
+    if (value.length > 6000) throw new Error(`${key} exceeds 6000 characters`);
+    assertNoFieldLines(key, value, fieldNames);
+    text[field] = value;
+  }
+  const scopeText = typeof scope === "string" ? scope.trim() : "";
+  if (scopeText === "") {
+    throw new Error("scope is required — 'small scope' is the first delegation criterion and cannot be inferred");
+  }
+  if (scopeText.length > 512) throw new Error("scope exceeds 512 characters");
+  assertNoFieldLines("scope", scopeText, fieldNames);
+  return {
+    kind,
+    reversibility,
+    scope: scopeText,
+    text,
+    taskId: taskId === undefined ? "unknown" : metadataToken("taskId", taskId),
+    projectId: projectId === undefined ? null : metadataToken("projectId", projectId),
+    supervisorAgentId:
+      supervisorAgentId === undefined ? null : metadataToken("supervisorAgentId", supervisorAgentId),
+    correlationId: correlationId === undefined
+      ? `consult-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      : metadataToken("correlationId", correlationId),
+  };
+}
+
+/**
+ * Which Supervisor seat this consult belongs to.
+ *
+ * Cluster first, always: `supervisorSeats` is already cluster-scoped, so a
+ * Supervisor in another project on the same host is never a candidate. Under
+ * `multi` the survivors are narrowed to seats whose domain actually covers this
+ * Lead — a Supervisor that could not issue a binding decision here is not an
+ * address, it is a detour.
+ *
+ * Both failure directions are named rather than guessed. Zero seats is the one
+ * case that legitimises asking the Human, and it says so. More than one is a
+ * governance question — which of them speaks for me? — that a sender must not
+ * settle by picking the first, because the Lead's own runtime refuses BOTH
+ * claimants in that situation (JURISDICTION_OVERLAP) and the answer would be
+ * thrown away on arrival.
+ */
+export function chooseSupervisor({ seats, topology, leadDomain, domainCovers, requested }) {
+  const candidates = topology === "multi"
+    ? seats.filter((seat) => seat.domain && leadDomain && domainCovers(seat.domain, leadDomain))
+    : seats;
+  if (requested) {
+    const match = candidates.find((seat) => seat.agentId === requested);
+    if (match) return match;
+    const known = candidates.length
+      ? ` (eligible: ${candidates.map((seat) => seat.agentId).join(", ")})`
+      : " (this cluster has none)";
+    throw Object.assign(
+      new Error(`SUPERVISOR_NOT_ELIGIBLE: ${requested} is not a Supervisor seat that governs this Lead${known}`),
+      { code: "SUPERVISOR_NOT_ELIGIBLE" },
+    );
+  }
+  if (candidates.length === 0) {
+    const reason = topology === "multi" && seats.length > 0
+      ? `this cluster has ${seats.length} Supervisor seat(s), but none carries a team.domain covering "${leadDomain ?? "<this Lead has no team.domain>"}". Ask the Human to label the seats, or seat a Supervisor for your own domain.`
+      : 'this cluster has no Supervisor seat, so it has no delegated decision path at all. Seat one with create_agent (provider "<family>-supervisor/<...>/<model-id>", labels.purpose "governance", labels["team.cluster"] set to your own cluster, settings.thinkingOptionId routed from cluster-routing.local.json), then consult it. If seating one is not possible, this is the reason you may put the question to the Human — say so explicitly.';
+    throw Object.assign(new Error(`NO_SUPERVISOR_SEAT: ${reason}`), { code: "NO_SUPERVISOR_SEAT" });
+  }
+  if (candidates.length > 1) {
+    const named = candidates
+      .map((seat) => `${seat.agentId}${seat.domain ? ` [${seat.domain}]` : ""}`)
+      .join(", ");
+    throw Object.assign(
+      new Error(
+        `SUPERVISOR_AMBIGUOUS: ${candidates.length} Supervisor seats claim this Lead (${named}). Choosing one would ratify a governance overlap nobody resolved, and the answer would be refused on arrival anyway. Name one with supervisorAgentId only once the Human has resolved it.`,
+      ),
+      { code: "SUPERVISOR_AMBIGUOUS" },
+    );
+  }
+  return candidates[0];
+}
+
+export function buildConsultBody(consult, { self, domain, header }) {
+  const head = [
+    header,
+    `KIND: ${consult.kind}`,
+    `CORRELATION_ID: ${consult.correlationId}`,
+    `TASK_ID: ${consult.taskId}`,
+    consult.projectId ? `PROJECT_ID: ${consult.projectId}` : null,
+    `FROM_AGENT_ID: ${self}`,
+    domain ? `DOMAIN: ${domain}` : null,
+    `SCOPE: ${consult.scope}`,
+    `REVERSIBILITY: ${consult.reversibility}`,
+  ].filter(Boolean);
+  const sections = [];
+  for (const [, field] of CONSULT_SECTIONS) {
+    const value = consult.text[field];
+    if (value === undefined) continue;
+    sections.push("", `${field}:`, value);
+  }
+  return [...head, ...sections].join("\n");
+}
+
+/**
+ * Send one consult. Mirrors sendPeerMessage: resolve, envelope, send once.
+ *
+ * `core` is injected so routing can be tested without a Paseo install;
+ * production loads it lazily on this path only, so a Peer sending an ordinary
+ * `ask-lead` never pays for a module it does not use and never fails on one it
+ * does not need.
+ */
+export async function sendLeadConsult(input, options = {}) {
+  const core = options.core ?? (await importPolicyCore());
+  const env = options.env ?? process.env;
+  const consult = validateConsult(input, core.LEAD_CONSULT_FIELD_NAMES);
+  const rawSelf = env.PASEO_AGENT_ID?.trim();
+  if (!rawSelf) throw Object.assign(new Error("PASEO_AGENT_ID is missing"), { code: "AGENT_ID_MISSING" });
+  const self = metadataToken("fromAgentId", rawSelf);
+  const topology = core.teamTopology(env);
+  const cluster = core.selfCluster(env);
+  const leadDomain = core.normalizeDomain(env.PASEO_TEAM_DOMAIN ?? null);
+  let seats;
+  try {
+    seats = core.supervisorSeats(env, { cluster });
+  } catch (error) {
+    // Fail-closed, and say which half failed: "I could not look" must never be
+    // reported as "there is nobody", or the Lead concludes it may ask the Human.
+    throw Object.assign(
+      new Error(
+        `SUPERVISOR_LOOKUP_FAILED: Paseo agent state could not be read, so whether this cluster has a Supervisor is unknown: ${String(error?.message ?? error)}`,
+      ),
+      { code: "SUPERVISOR_LOOKUP_FAILED" },
+    );
+  }
+  const supervisor = chooseSupervisor({
+    seats,
+    topology,
+    leadDomain,
+    domainCovers: core.domainCovers,
+    requested: consult.supervisorAgentId,
+  });
+  const body = buildConsultBody(consult, { self, domain: leadDomain, header: core.LEAD_CONSULT_HEADER });
+  const paseo = options.runPaseo ?? runPaseo;
+  // Same one-shot rule as sendPeerMessage: `send` is a mutation with delivery
+  // ambiguity and no idempotency contract, so correlationId is for receiver-side
+  // deduplication, never a licence to retry.
+  const sent = await paseo(
+    ["send", supervisor.agentId, "--prompt", body, "--no-wait"],
+    options.sendTimeoutMs ?? 20_000,
+  );
+  return {
+    ok: true,
+    recipient: supervisor.agentId,
+    supervisorDomain: supervisor.domain ?? null,
+    correlationId: consult.correlationId,
+    awaiting: "SUPERVISOR_DECISION, or HUMAN_DECISION_REQUIRED: yes naming the criterion that failed",
+    response: sent.data,
+  };
+}
+
 async function main() {
   const command = process.argv[2];
-  if (command !== "ask-lead") throw new Error("usage: team-communication.mjs ask-lead '<json>'");
+  if (command !== "ask-lead" && command !== "ask-supervisor") {
+    throw new Error("usage: team-communication.mjs ask-lead|ask-supervisor '<json>'");
+  }
   let input;
   try {
     input = JSON.parse(process.argv[3] ?? "{}");
   } catch (error) {
     throw new Error(`invalid JSON message: ${String(error?.message ?? error)}`);
   }
-  console.log(JSON.stringify(await sendPeerMessage(input), null, 2));
+  const result = command === "ask-lead" ? await sendPeerMessage(input) : await sendLeadConsult(input);
+  console.log(JSON.stringify(result, null, 2));
 }
 
 export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.url) {
@@ -101,7 +332,7 @@ export function isMainModule(entry = process.argv[1], moduleUrl = import.meta.ur
 
 if (isMainModule()) {
   main().catch((error) => {
-    console.error(JSON.stringify({ ok: false, code: error.code ?? "PEER_MESSAGE_FAILED", message: error.message }));
+    console.error(JSON.stringify({ ok: false, code: error.code ?? "TEAM_MESSAGE_FAILED", message: error.message }));
     process.exit(2);
   });
 }

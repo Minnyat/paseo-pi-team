@@ -146,7 +146,7 @@ The notice is context, not a deny: nothing here blocks a tool.
 | Bash | no | yes | yes, guarded |
 | Write/Edit | no | only with `PASEO_TEAM_LEAD_WRITE=1` | only with `MODE: write` + `EDIT_AUTHORITY: allowed` |
 | `mcp__paseo__*` | monitoring + `create_heartbeat`/`delete_heartbeat` + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
-| `mcp__paseo-team__*` | `team_watchdog`, `team_chat`, `team_fork`, `team_lease` (`status` only) | all four, `team_lease` unrestricted | `peer_ask_lead` only |
+| `mcp__paseo-team__*` | `team_watchdog`, `team_chat`, `team_fork`, `team_lease` (`status` only) — it RECEIVES `lead_ask_supervisor` consults, never sends one | those four with `team_lease` unrestricted, plus `lead_ask_supervisor` | `peer_ask_lead` only |
 | `mcp__agent-browser__*` | no | yes | only with `BROWSER_MCP_AUTHORITY: allowed` |
 | `Task` (Claude subagents) | no | no | no |
 

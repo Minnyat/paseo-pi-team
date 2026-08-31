@@ -9,7 +9,7 @@
 //                            → scripts/claude-hook.mjs (role prompt + policy)
 //   ~/.claude.json           mcpServers["paseo-team"]
 //                            → scripts/claude-team-mcp.mjs (peer_ask_lead,
-//                              team_watchdog)
+//                              lead_ask_supervisor, team_watchdog, …)
 //                            mcpServers["agent-browser"]
 //                            → the same stdio server browser-setup.mjs gives
 //                              pi. The Lead may drive a browser and a granted
@@ -401,7 +401,8 @@ export async function install(env = process.env, { cdpPort = null } = {}) {
 		// A browser conflict must NOT take the team server down with it. The two
 		// entries are independent — `agent-browser` is a general-purpose tool the
 		// user may already run on their own port, `paseo-team` is ours and is the
-		// only way a Lead or Peer reaches team_chat, team_lease or peer_ask_lead.
+		// only way a Lead or Peer reaches team_chat, team_lease, lead_ask_supervisor
+		// or peer_ask_lead.
 		// Skipping both left hooks ALREADY written (mergeHooks runs first) beside
 		// a fleet with no team tools at all: the seats come up governed and
 		// mute. So the conflict skips exactly the entry it is about.

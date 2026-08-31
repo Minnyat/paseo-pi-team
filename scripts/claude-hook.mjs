@@ -253,6 +253,30 @@ export function supervisorBlockNotice(core, role, block, env = process.env) {
 }
 
 /**
+ * The Claude half of the Supervisor-side consult notice (PR-H).
+ *
+ * Same shape and same reason as `supervisorBlockNotice` above, one role over:
+ * a Supervisor on Claude must be told the same thing about the same consult as
+ * a Supervisor on Pi, or "a Lead is asking me to decide, and what am I obliged
+ * to do about it" becomes a per-runtime answer. Both call the same core.
+ */
+export function leadConsultBlockNotice(core, role, block, env = process.env) {
+	if (role !== "supervisor" || !block) return null;
+	const attribution = core.leadConsultAttribution(
+		block.fields.get("FROM_AGENT_ID") ?? null,
+		env,
+	);
+	const verdict = core.leadConsultVerdict({
+		block,
+		attribution,
+		supervisorDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
+		supervisorCluster: core.selfCluster(env),
+		topology: core.teamTopology(env),
+	});
+	return core.leadConsultTurnNotice({ block, verdict, attribution });
+}
+
+/**
  * The standing half of the Lead's authority, repeated every turn.
  *
  * The Pi extension rebuilds the system prompt on every `before_agent_start`, so
@@ -273,6 +297,15 @@ const LEAD_STANDING_AUTHORITY = [
 	"decision your role contract already gives you. A supervisor message that this",
 	"turn's notice marks binding IS a decision: act on it. Only merge, push, deploy",
 	"and other irreversible or outward-facing steps go to the Human.",
+	"",
+	"When a call is genuinely NOT yours — an open question, a choice you cannot",
+	"settle on evidence, an ambiguous reading of the protocol — your escalation path",
+	"is the Supervisor, not the Human: call lead_ask_supervisor with the question,",
+	"the options, the evidence, the scope and the reversibility, and it comes back",
+	"as a decision you may act on. Reach for the Human only when the matter is",
+	"itself irreversible, when the Supervisor answered HUMAN_DECISION_REQUIRED: yes,",
+	"or when lead_ask_supervisor reports NO_SUPERVISOR_SEAT — and when you do, say",
+	"which of those three it was.",
 ].join("\n");
 
 function authorityBlock(describe, role, brief) {
@@ -395,6 +428,12 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		);
 		const supervisorTurn =
 			role === "lead" ? core.parseSupervisorBlock(prompt) : null;
+		// The mirror image, and it earns a role-prompt re-injection for the same
+		// reason the supervisor block does: this is the turn where the
+		// Delegated-decision criteria decide the answer, and the session-start
+		// copy of the contract carrying them is furthest away.
+		const consultTurn =
+			role === "supervisor" ? core.parseLeadConsultBlock(prompt) : null;
 		const blocks = [];
 		// SessionStart is not guaranteed to have run (a resumed or imported
 		// session may start at the first prompt), so the role prompt is injected
@@ -402,7 +441,7 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		// opens with a supervisor message, which is precisely the turn where the
 		// Lead's authority contract decides the answer and the session-start copy
 		// is furthest away.
-		if (!injected || supervisorTurn) {
+		if (!injected || supervisorTurn || consultTurn) {
 			const rolePrompt = core.loadRolePrompt(role);
 			if (rolePrompt) blocks.push(roleContextBlock(rolePrompt, role));
 		} else if (role === "lead") {
@@ -413,6 +452,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		}
 		const notice = supervisorBlockNotice(core, role, supervisorTurn, env);
 		if (notice) blocks.push(notice);
+		const consultNotice = leadConsultBlockNotice(core, role, consultTurn, env);
+		if (consultNotice) blocks.push(consultNotice);
 		if (blocks.length === 0) return null;
 		return {
 			hookSpecificOutput: {
