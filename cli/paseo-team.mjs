@@ -753,8 +753,8 @@ async function cmdWeb(argv) {
 // Help + dispatch
 // ---------------------------------------------------------------------------
 
-function help() {
-	process.stdout.write(`pteam ${su.currentVersion()} — role pack CLI (Paseo + Pi)   (alias: paseo-team)
+function helpText() {
+	return `pteam ${su.currentVersion()} — role pack CLI (Paseo + Pi)   (alias: paseo-team)
 
 usage:
   pteam status
@@ -791,11 +791,57 @@ live plane (talks to the Paseo daemon):
 sections: ${Object.keys(CONFIG_SECTIONS).join(", ")}
 roles:    ${cw.ROLE_PROMPTS.join(", ")}
 documentation: docs/webui-architecture.md
-`);
+`;
+}
+
+function help() {
+	process.stdout.write(helpText());
+}
+
+/**
+ * Usage for ONE subcommand, filtered out of the same text `help()` prints.
+ *
+ * Filtered rather than stored separately on purpose: a second copy of the usage
+ * lines is a copy that drifts, and a help text that lies is worse than one that
+ * is terse. A continuation line (claude-setup wraps onto a second line) is
+ * indented and carries no `pteam`, so it rides along with the entry above it.
+ *
+ * Falls back to the full help when nothing matches, because a reader who asked
+ * a question must never get silence.
+ */
+function subcommandHelp(cmd) {
+	const prefix = `  pteam ${cmd}`;
+	const lines = helpText().split("\n");
+	const picked = [];
+	let inEntry = false;
+	for (const line of lines) {
+		if (line === prefix || line.startsWith(`${prefix} `)) {
+			picked.push(line);
+			inEntry = true;
+			continue;
+		}
+		if (inEntry && line.startsWith("    ") && !line.startsWith("  pteam ")) {
+			picked.push(line);
+			continue;
+		}
+		inEntry = false;
+	}
+	if (picked.length === 0) return help();
+	process.stdout.write(`${picked.join("\n")}\n`);
 }
 
 async function main() {
 	const [cmd, ...argv] = process.argv.slice(2);
+	// `--help` used to be a TOP-LEVEL case only, so the flag fell through into
+	// the subcommand's own case and the command RAN: `pteam install --help`
+	// installed, and `pteam uninstall --help` removed the installed pack. The
+	// person typing --help is the one who does not yet know what the command
+	// does — answering with the command itself is the worst available reply,
+	// and for a destructive one it costs them their install. Intercepted before
+	// dispatch so it can never reach a handler, read stdin, or touch a daemon.
+	if (cmd && !cmd.startsWith("-") && argv.some((arg) => arg === "--help" || arg === "-h")) {
+		return subcommandHelp(cmd);
+	}
 	switch (cmd) {
 		case "status": return cmdStatus();
 		case "preflight": return cmdPreflight(argv);

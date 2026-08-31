@@ -442,6 +442,58 @@ try {
 		assert.equal(dead.json.inventory.degraded.length, 1);
 		assert.ok(dead.json.schema, "the form still renders without any suggestions");
 	}
+
+	// --- `<subcommand> --help` must ANSWER, never ACT -----------------------
+	// Regression: `--help` was only a TOP-LEVEL case in the dispatch switch, so
+	// the flag fell straight through into the subcommand's own case. `pteam
+	// install --help` ran the installer, and `pteam uninstall --help` REMOVED
+	// the installed pack. The person typing --help is the one who does not yet
+	// know what the command does; answering with the command itself is the
+	// worst possible reply, and for `uninstall` it costs them their install.
+	{
+		const installHelp = run(["install", "--help"]);
+		assert.equal(installHelp.status, 0, installHelp.stderr);
+		assert.match(installHelp.stdout, /pteam install/);
+		assert.ok(
+			!installHelp.stdout.includes("Installed:"),
+			"install --help must not run the installer",
+		);
+
+		const uninstallHelp = run(["uninstall", "--help"]);
+		assert.equal(uninstallHelp.status, 0, uninstallHelp.stderr);
+		assert.match(uninstallHelp.stdout, /pteam uninstall/);
+		assert.equal(
+			uninstallHelp.json?.targets,
+			undefined,
+			"uninstall --help must not remove anything",
+		);
+
+		// -h is the same question asked shorter.
+		const shortForm = run(["uninstall", "-h"]);
+		assert.equal(shortForm.status, 0);
+		assert.match(shortForm.stdout, /pteam uninstall/);
+		assert.equal(shortForm.json?.targets, undefined);
+
+		// Scoped: it answers about THAT command, filtered from the same usage
+		// text the top-level help prints, so there is no second copy to drift.
+		const configHelp = run(["config", "--help"]);
+		assert.equal(configHelp.status, 0);
+		assert.match(configHelp.stdout, /pteam config read/);
+		assert.match(configHelp.stdout, /pteam config write/);
+		assert.ok(
+			!configHelp.stdout.includes("pteam graph"),
+			"scoped help does not dump the whole CLI back at the reader",
+		);
+
+		// A daemon-facing command must not reach the daemon just to print help.
+		const graphHelp = run(["graph", "--help"]);
+		assert.equal(graphHelp.status, 0);
+		assert.match(graphHelp.stdout, /pteam graph/);
+
+		// The interception must not swallow an ordinary run.
+		const stillWorks = run(["agents"]);
+		assert.equal(stillWorks.status, 0, stillWorks.stderr);
+	}
 } finally {
 	rmSync(sandbox, { recursive: true, force: true });
 }
