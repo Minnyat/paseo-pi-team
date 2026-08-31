@@ -136,8 +136,14 @@ export const ROUTES = {
 		invalidates: ["permits", "graph", "agents", "status"],
 	},
 
+	// A routing/cluster read now also asks the daemon which models each role
+	// provider offers, so the answer costs a `paseo` round trip instead of a
+	// file read. A short TTL keeps re-opening the tab cheap; the POST below
+	// already invalidates the "config" tag, so a save is never served stale.
 	"GET /api/config": {
 		build: (q) => ({ args: ["config", "read", pick(q.section, CONFIG_SECTIONS, "section")] }),
+		cacheMs: 5_000,
+		tag: "config",
 	},
 	"POST /api/config": {
 		build: (q, body, raw) => ({

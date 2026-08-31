@@ -51,6 +51,7 @@ import {
 	cmdPercentExpansionRisk,
 	MODEL_CLASSES,
 	PROVIDER_OK_STATUSES,
+	providerFamily,
 } from "./model-routing.mjs";
 
 const PINNED = Object.freeze({
@@ -607,14 +608,17 @@ if (routing && daemonUp && !skipModels) {
 				strict: wantStrict,
 			});
 			// Per-model thinkingLevelMap guard (Paseo's list does not reflect it).
-			const { provider: piProvider, model: modelId } = (() => {
-				const i = resolved.model.indexOf("/");
-				return {
-					provider: resolved.model.slice(0, i),
-					model: resolved.model.slice(i + 1),
-				};
-			})();
-			if (piModelLevelUnreachable(piProvider, modelId, route.thinking)) {
+			// pi ONLY: the map lives in ~/.pi/agent/models.json, and a Claude model
+			// id is a single segment — splitting one at indexOf("/") === -1 yielded
+			// a truncated provider name ("claude-opus-") and looked it up anyway.
+			const clamped =
+				providerFamily(route.paseoProvider) === "pi" &&
+				piModelLevelUnreachable(
+					resolved.model.slice(0, resolved.model.indexOf("/")),
+					resolved.model.slice(resolved.model.indexOf("/") + 1),
+					route.thinking,
+				);
+			if (clamped) {
 				strictCheck(
 					`route:${modelClass}`,
 					`model ${route.model} has thinkingLevelMap.${route.thinking}=null in ~/.pi/agent/models.json — pi will CLAMP the level silently; pick a supported level or another model`,

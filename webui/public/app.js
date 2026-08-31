@@ -20,6 +20,8 @@ import {
 	clone,
 	deepMerge,
 	deletePath,
+	dependentOptionProblems,
+	dependentOptions,
 	getPath,
 	numberRangeProblems,
 	parseLines,
@@ -923,6 +925,10 @@ const configState = {
 	schema: null,
 	doc: {},
 	mode: "form",
+	// Repaint callbacks for fields whose options follow a sibling field.
+	// Rebuilt from scratch on every render — a stale closure would write into
+	// a detached node and leak the previous section's form.
+	dependents: [],
 };
 
 function joinPath(prefix, path) {
@@ -935,7 +941,26 @@ function defaultValueLabel(field) {
 	return `mặc định: ${shown}`;
 }
 
-function stringControl(field, path) {
+/**
+ * Wrap a repaint so it only runs when the value it depends on actually
+ * changed. refreshDependents fires on every keystroke anywhere in the form, and
+ * rebuilding a <datalist> under an input the user is typing into closes the
+ * browser's suggestion popup — the list would flicker away exactly while it was
+ * being used.
+ */
+function whenDependencyChanges(spec, prefix, paint) {
+	let last = null;
+	let primed = false;
+	return () => {
+		const key = String(getPath(configState.doc, joinPath(prefix, spec.path)) ?? "");
+		if (primed && key === last) return;
+		primed = true;
+		last = key;
+		paint();
+	};
+}
+
+function textInput(field, path) {
 	const input = el("input", { type: "text", class: "cfg-input" });
 	input.placeholder = field.default !== undefined ? String(field.default) : "";
 	input.value = String(getPath(configState.doc, path) ?? "");
@@ -944,6 +969,10 @@ function stringControl(field, path) {
 		else setPath(configState.doc, path, input.value);
 	});
 	return input;
+}
+
+function stringControl(field, path) {
+	return textInput(field, path);
 }
 
 function boolControl(field, path) {
@@ -975,24 +1004,65 @@ function numberControl(field, path) {
 	return input;
 }
 
-function enumControl(field, path) {
+/**
+ * A dropdown whose options may follow a sibling field.
+ *
+ * Two lists can feed it. `enum` is the static one the schema always carries.
+ * `optionsBy` narrows that to what the sibling allows — a claude-* route must
+ * not be offered pi's `minimal`, and its model list is the chosen provider's
+ * own catalogue.
+ *
+ * When a RUNTIME-sourced list (`optionsBy.source`) comes back empty, the
+ * daemon could not tell us what exists — which is not the same as "nothing
+ * exists". Gating the field behind an empty dropdown would make the form a
+ * dead end on a machine whose daemon is down, so the control swaps itself for
+ * a text box until the list arrives. Both halves live in one wrapper and write
+ * to the same path, so the swap is a visibility toggle, not a re-render.
+ */
+function enumControl(field, path, prefix) {
 	const select = el("select", { class: "cfg-input" });
-	select.appendChild(
-		el("option", { value: "", text: field.default !== undefined ? `— mặc định (${field.default}) —` : "— mặc định —" }),
-	);
-	for (const value of field.enum ?? []) select.appendChild(el("option", { value, text: value }));
-	const current = getPath(configState.doc, path);
-	select.value = current === undefined ? "" : String(current);
-	if (current !== undefined && ![...select.options].some((option) => option.value === select.value)) {
-		// A value outside the enum (hand-written, or from a newer version) stays
-		// visible instead of silently snapping back to the default.
-		select.appendChild(el("option", { value: String(current), text: `${String(current)} (ngoài danh sách)` }));
-	}
+	const runtimeSourced = Boolean(field.optionsBy?.source);
+	const fallback = runtimeSourced ? textInput(field, path) : null;
+
+	const paintSelect = (values) => {
+		clear(select);
+		select.appendChild(
+			el("option", { value: "", text: field.default !== undefined ? `— mặc định (${field.default}) —` : "— mặc định —" }),
+		);
+		for (const value of values) select.appendChild(el("option", { value, text: value }));
+		const current = getPath(configState.doc, path);
+		select.value = current === undefined ? "" : String(current);
+		if (current !== undefined && ![...select.options].some((option) => option.value === select.value)) {
+			// A value outside the list (hand-written, from a newer version, or left
+			// over after switching family) stays visible instead of silently
+			// snapping back to the default — losing it would rewrite the config.
+			select.appendChild(el("option", { value: String(current), text: `${String(current)} (ngoài danh sách)` }));
+			select.value = String(current);
+		}
+	};
+
+	const paint = () => {
+		const dependent = field.optionsBy ? dependentOptions(field.optionsBy, configState.doc, prefix) : null;
+		const values = dependent !== null && dependent.length > 0 ? dependent : (field.enum ?? []);
+		if (fallback) {
+			const usable = values.length > 0;
+			select.classList.toggle("hidden", !usable);
+			fallback.classList.toggle("hidden", usable);
+			if (!usable) {
+				fallback.value = String(getPath(configState.doc, path) ?? "");
+				return;
+			}
+		}
+		paintSelect(values);
+	};
+
+	paint();
 	select.addEventListener("change", () => {
 		if (select.value === "") deletePath(configState.doc, path);
 		else setPath(configState.doc, path, select.value);
 	});
-	return select;
+	if (field.optionsBy) configState.dependents.push(whenDependencyChanges(field.optionsBy, prefix, paint));
+	return fallback ? el("div", { class: "cfg-swap" }, [select, fallback]) : select;
 }
 
 function linesControl(field, path) {
@@ -1114,14 +1184,14 @@ function mapControl(field, path) {
 	return wrap;
 }
 
-function fieldControl(field, path) {
+function fieldControl(field, path, prefix) {
 	if (field.type === "bool") return boolControl(field, path);
 	if (field.type === "number") return numberControl(field, path);
-	if (field.type === "enum") return enumControl(field, path);
+	if (field.type === "enum") return enumControl(field, path, prefix);
 	if (field.type === "lines") return linesControl(field, path);
 	if (field.type === "kv") return kvControl(field, path);
 	if (field.type === "map") return mapControl(field, path);
-	return stringControl(field, path);
+	return stringControl(field, path, prefix);
 }
 
 function fieldRow(field, prefix) {
@@ -1134,7 +1204,7 @@ function fieldRow(field, prefix) {
 		]),
 	);
 	if (field.hint && field.type !== "map") row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
-	row.appendChild(fieldControl(field, path));
+	row.appendChild(fieldControl(field, path, prefix));
 	if (field.type === "map" && field.hint) row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
 	if (field.showIf) {
 		row.dataset.showIfPath = joinPath(prefix, field.showIf.path);
@@ -1143,18 +1213,36 @@ function fieldRow(field, prefix) {
 	return row;
 }
 
-/** showIf rows hide and show as the field they depend on changes. */
-function refreshShowIf() {
+/**
+ * Re-evaluate everything that depends on another field's current value:
+ * `showIf` visibility, and the option lists of `optionsBy` fields.
+ *
+ * This used to run exactly once, at the end of the first render, so a row was
+ * frozen at whatever the document said when the form was built — switching a
+ * host to `remote` never revealed its endpoint field. It now runs after every
+ * edit, via one delegated listener (below) instead of a call in each control.
+ */
+function refreshDependents() {
 	for (const row of $("config-form").querySelectorAll(".cfg-field[data-show-if-path]")) {
 		const current = getPath(configState.doc, row.dataset.showIfPath);
 		row.classList.toggle("hidden", String(current) !== row.dataset.showIfEquals);
 	}
+	for (const paint of configState.dependents) paint();
 }
 
 function renderConfigForm() {
 	const schema = configState.schema;
 	const form = clear($("config-form"));
+	configState.dependents = [];
 	clear($("config-presets"));
+	if (!form.dataset.dependentsBound) {
+		// One delegated listener instead of a refresh call inside every control:
+		// it fires in the bubble phase, after the control has already written the
+		// edit into configState.doc, so the repaint always sees the new value.
+		form.dataset.dependentsBound = "1";
+		form.addEventListener("input", refreshDependents);
+		form.addEventListener("change", refreshDependents);
+	}
 	$("config-intro").textContent = schema?.intro ?? "";
 	if (!schema) return;
 
@@ -1183,7 +1271,7 @@ function renderConfigForm() {
 		for (const field of group.fields ?? []) fieldset.appendChild(fieldRow(field, ""));
 		form.appendChild(fieldset);
 	}
-	refreshShowIf();
+	refreshDependents();
 }
 
 /** Flip visibility only. `loadConfig` uses this directly: the freshly loaded
@@ -1241,7 +1329,10 @@ $("config-save").addEventListener("click", async () => {
 	if (configState.mode === "raw") {
 		text = $("config-editor").value;
 	} else {
-		const problems = numberRangeProblems(configState.schema, configState.doc);
+		const problems = [
+			...numberRangeProblems(configState.schema, configState.doc),
+			...dependentOptionProblems(configState.schema, configState.doc),
+		];
 		if (problems.length > 0) {
 			toast(problems.join(" · "), true);
 			return;

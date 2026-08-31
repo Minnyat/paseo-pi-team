@@ -547,7 +547,13 @@ export function composeProviderModel(paseoProvider, model) {
 // Route resolution against a real inventory
 // ---------------------------------------------------------------------------
 
-function normalizeModelEntry(entry) {
+/**
+ * Normalize one model entry from either inventory shape. Exported so the
+ * `paseo-team` CLI (which feeds the routing form its model suggestions) reads
+ * an inventory through the SAME parser as the route resolver — a second,
+ * hand-rolled reader is how the form and preflight would drift apart again.
+ */
+export function normalizeModelEntry(entry) {
 	if (typeof entry !== "object" || entry === null) return null;
 	const id = entry.id ?? entry.model;
 	if (typeof id !== "string" || id.trim() === "") return null;

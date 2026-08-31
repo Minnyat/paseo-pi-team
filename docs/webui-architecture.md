@@ -85,12 +85,26 @@ một-JSON-object-mỗi-lệnh):
 paseo-team config read|write pi-settings       -> ~/.pi/agent/settings.json (file riêng của Pi; ghi nguyên file + backup)
                                                -> response kem `schema`: bang field (label/hint/default/enum/min/max)
                                                   de WebUI render form; field nao CLI khong mo ta thi UI khong hien thi
+paseo-team config read routing|cluster [--no-discovery]
+                                               -> schema kem inventory that. Hai loai `optionsBy`:
+                                                  `source: "models"` = danh sach model cua tung role provider, do
+                                                  CLI do daemon roi bom vao luc read; khong co `source` = bang tinh
+                                                  (muc thinking theo family). Trinh duyet van chi render nhung gi
+                                                  CLI mo ta. Danh sach runtime rong (daemon chet) -> o do lui ve
+                                                  nhap tay, khong bao gio thanh dropdown trong.
+                                                  --no-discovery: bo qua daemon, doc thuan file
 paseo-team agents [--all]                      -> node list chuan hoa + role suy ra tu provider
 paseo-team agent inspect <ref>                 -> inspect + pending permit + parent
 paseo-team agent send <ref>                    -> prompt qua stdin -> file -> paseo send --prompt-file
 paseo-team permits list                        -> pending permit + hang khong phan loai duoc
 paseo-team permits allow|deny <agent> <reqId>  -> ghi audit roi delegate
 paseo-team chat list|read <room>|post <room>   -> delegate paseo chat
+paseo-team models [--provider <role-provider>] -> model that su co cua tung role provider (ca hai family).
+                                               Khong co --provider: 1 lan `provider ls` + 1 lan `provider models`
+                                               MOI FAMILY (dai dien = role provider dau tien dang bat va khoe),
+                                               ket qua trai deu cho ca 3 vai tro cua family do.
+                                               Co --provider: doc dung provider ay, kem thinkingOptionIds.
+                                               Khong bao gio nem loi: daemon chet -> providers rong + degraded[]
 paseo-team graph [--all] [--max-inspect <n>] [--refresh]  -> { nodes, edges, permits, degraded[] }
 paseo-team watchdog [--stale-after <ms>]       -> delegate scripts/watchdog.mjs
 paseo-team web [--port <n>] [--open] [--no-token]         -> khoi dong webui/server.mjs
@@ -134,6 +148,7 @@ Con số này quyết định gần như mọi lựa chọn ở trên, nên nó 
 | `paseo-team graph` lần đầu (cache lạnh, 21 agent) | ~12s |
 | `paseo-team graph` khi cache đã ấm | ~3.8s |
 | `paseo-team preflight --json` | ~25-30s |
+| `paseo-team models` / `config read routing` | ~7-11s (1 + so family lan spawn `paseo`) |
 
 Chi phí nằm ở **khởi động tiến trình**, không phải ở truy vấn daemon: chạy
 thẳng `node dist/index.js` thay vì shim `.cmd` không nhanh hơn. Hệ quả:

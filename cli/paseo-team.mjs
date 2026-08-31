@@ -30,8 +30,16 @@ import { existsSync, readFileSync, readdirSync, appendFileSync, unlinkSync, writ
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cw from "./lib/config-walker.mjs";
-import { schemaForSection } from "./lib/config-schema.mjs";
+import { schemaForSection, withModelInventory, ROUTING_SECTIONS } from "./lib/config-schema.mjs";
 import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
+import {
+	ROLE_PROVIDERS,
+	RUNTIME_FAMILIES,
+	PROVIDER_OK_STATUSES,
+	buildProviderInventory,
+	normalizeModelEntry,
+	providerFamily,
+} from "../scripts/model-routing.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, normalizePermits } from "./lib/graph.mjs";
 import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
@@ -88,7 +96,10 @@ function cmdStatus() {
 				cw.ROLE_PROMPTS.map((r) => [r, existsSync(cw.rolePromptPath(r))])
 			),
 		},
-		roleProfiles: Object.keys(providers).filter((k) => providers[k]?.extends === "pi"),
+		// The pack owns exactly ROLE_PROVIDERS. Filtering by `extends === "pi"`
+		// hid every claude-* role profile even when the daemon had it registered,
+		// which made a mixed-runtime install look like a pi-only one.
+		roleProfiles: ROLE_PROVIDERS.filter((name) => providers[name] !== undefined),
 		docs: "docs/webui-architecture.md",
 	});
 }
@@ -107,6 +118,143 @@ function cmdPreflight(argv) {
 	if (res.stderr) process.stderr.write(res.stderr);
 	if (res.stdout) process.stdout.write(res.stdout);
 	process.exit(res.status ?? 1);
+}
+
+// ---------------------------------------------------------------------------
+// live model inventory (feeds the routing/cluster forms and `pteam models`)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Paseo CLI reports some daemon failures as a *successful* JSON body
+ * `{ "error": { code, message } }` rather than a non-zero exit, so
+ * runPaseoJson resolves instead of rejecting. Every inventory read goes
+ * through here: an error envelope that reached a caller as data would be
+ * counted as "zero models available", which is a silent wrong answer.
+ */
+function paseoErrorEnvelope(payload) {
+	if (Array.isArray(payload) || payload === null || typeof payload !== "object") {
+		return null;
+	}
+	const error = payload.error;
+	if (error === undefined || error === null) return null;
+	if (typeof error === "string") return { code: "CLI_ERROR", message: error };
+	return {
+		code: typeof error.code === "string" ? error.code : "CLI_ERROR",
+		message: String(error.message ?? "paseo reported an error"),
+	};
+}
+
+/** Model ids of one role provider, or a structured fault. Never throws. */
+async function listProviderModels(roleProvider, timeoutMs) {
+	try {
+		const payload = await runPaseoJson(["provider", "models", roleProvider], { timeoutMs });
+		const envelope = paseoErrorEnvelope(payload);
+		if (envelope) return { ok: false, provider: roleProvider, ...envelope };
+		const models = (Array.isArray(payload) ? payload : [])
+			.map(normalizeModelEntry)
+			.filter(Boolean);
+		return { ok: true, provider: roleProvider, models };
+	} catch (error) {
+		return {
+			ok: false,
+			provider: roleProvider,
+			code: error instanceof PaseoError ? error.code : "PASEO_FAILED",
+			message: String(error?.message ?? error),
+		};
+	}
+}
+
+/**
+ * Discover which models each role provider can actually be routed to.
+ *
+ * Cost discipline (see paseo-bridge.mjs): one `paseo` invocation costs ~3s of
+ * process startup, so this issues at most 1 + RUNTIME_FAMILIES.length calls —
+ * `provider ls` once, then `provider models` once per family, using the first
+ * REGISTERED, ENABLED and HEALTHY role provider of that family as the
+ * representative. The three role profiles of a family extend the same base
+ * runtime, so their model lists agree; where they might not, the per-provider
+ * truth is still enforced later by preflight's resolveRoute, which fails
+ * closed. These lists are a typing aid, never an authority.
+ *
+ * Never throws and never blocks a form: a daemon that is down yields an empty
+ * map plus a `degraded` entry, and the model field stays the free-text box it
+ * has always been.
+ */
+async function discoverModels(options = {}) {
+	const timeoutMs = options.timeoutMs ?? 8000;
+	const degraded = [];
+	let listed;
+	try {
+		listed = await runPaseoJson(["provider", "ls"], { timeoutMs });
+	} catch (error) {
+		return {
+			byProvider: {},
+			degraded: [{
+				step: "provider ls",
+				code: error instanceof PaseoError ? error.code : "PASEO_FAILED",
+				message: String(error?.message ?? error),
+			}],
+		};
+	}
+	const envelope = paseoErrorEnvelope(listed);
+	if (envelope) return { byProvider: {}, degraded: [{ step: "provider ls", ...envelope }] };
+
+	// Same health predicate as the route resolver: enabled AND, when a status is
+	// reported, a healthy one. Suggesting models from a provider that preflight
+	// will reject is worse than suggesting nothing.
+	const healthy = new Set(
+		buildProviderInventory(Array.isArray(listed) ? listed : [])
+			.filter((p) => p.enabled && (p.status === undefined || PROVIDER_OK_STATUSES.has(p.status)))
+			.map((p) => p.id),
+	);
+
+	const byProvider = {};
+	for (const family of RUNTIME_FAMILIES) {
+		const members = ROLE_PROVIDERS.filter((name) => providerFamily(name) === family);
+		const representative = members.find((name) => healthy.has(name));
+		if (representative === undefined) {
+			degraded.push({
+				step: `family ${family}`,
+				code: "NO_HEALTHY_ROLE_PROVIDER",
+				message: `no enabled role provider for family "${family}" (looked for ${members.join(", ")}) — run 'pteam preflight' or 'pteam claude-setup --install'`,
+			});
+			continue;
+		}
+		const result = await listProviderModels(representative, timeoutMs);
+		if (!result.ok) {
+			degraded.push({ step: `provider models ${representative}`, code: result.code, message: result.message });
+			continue;
+		}
+		const ids = [...new Set(result.models.map((m) => m.id))].sort();
+		for (const member of members) byProvider[member] = ids;
+	}
+	return { byProvider, degraded };
+}
+
+async function cmdModels(argv) {
+	rejectUnknownFlags(argv, ["--provider"]);
+	const provider = flagValue(argv, "--provider");
+	if (provider !== undefined) {
+		if (!ROLE_PROVIDERS.includes(provider)) {
+			fail(`models: --provider must be one of ${ROLE_PROVIDERS.join(", ")} (got '${provider}')`);
+		}
+		// One named provider is the authoritative read: full entries, including
+		// the thinking options a route must match.
+		const result = await listProviderModels(provider, 20000);
+		if (!result.ok) {
+			json({ ok: false, code: result.code, command: "models", provider, message: result.message });
+			process.exit(3);
+		}
+		json({ ok: true, provider, family: providerFamily(provider), count: result.models.length, models: result.models });
+		return;
+	}
+	const { byProvider, degraded } = await discoverModels({ timeoutMs: 20000 });
+	json({
+		ok: true,
+		providers: byProvider,
+		count: Object.fromEntries(Object.entries(byProvider).map(([k, v]) => [k, v.length])),
+		degraded,
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -129,17 +277,31 @@ function resolveSection(section) {
 	return CONFIG_SECTIONS[section]();
 }
 
-function cmdConfigRead(section) {
+async function cmdConfigRead(section, rest = []) {
+	rejectUnknownFlags(rest, ["--no-discovery"]);
 	const path = resolveSection(section);
 	const data = cw.readJsonOrNull(path);
 	// The form schema rides along with the data: the WebUI renders fields the
 	// CLI described and nothing else, so a form is reproducible from a terminal.
-	const schema = schemaForSection(section);
+	let schema = schemaForSection(section);
+	// Routing forms get the live model inventory folded into that same schema,
+	// so the browser still renders only what the CLI described. --no-discovery
+	// skips the daemon round trip for scripted reads and for a machine whose
+	// daemon is known to be down (the read otherwise costs one `provider ls`).
+	let inventory = null;
+	if (schema && ROUTING_SECTIONS.includes(section) && !flag(rest, "--no-discovery")) {
+		inventory = await discoverModels();
+		schema = withModelInventory(schema, inventory.byProvider);
+	}
+	const extras = {
+		...(schema ? { schema } : {}),
+		...(inventory ? { inventory: { providers: Object.keys(inventory.byProvider), degraded: inventory.degraded } } : {}),
+	};
 	if (data === null) {
-		json({ exists: false, path, data: {}, ...(schema ? { schema } : {}) });
+		json({ exists: false, path, data: {}, ...extras });
 		return;
 	}
-	json({ exists: true, path, data, ...(schema ? { schema } : {}) });
+	json({ exists: true, path, data, ...extras });
 }
 
 function cmdConfigWrite(section) {
@@ -599,7 +761,7 @@ usage:
   pteam preflight [--strict] [--json] [--skip-models] [--runtime pi|claude|both] [--host-id <id>] [--cluster <path>] [--routes <path>]
   pteam claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
                      [--attach-cdp-port <port>]   (with --install)
-  pteam config read  <section>
+  pteam config read  <section> [--no-discovery]
   pteam config write <section>             (JSON body on stdin)
   pteam prompts read <role>                (supervisor|lead|peer)
   pteam prompts write <role>               (markdown body on stdin)
@@ -621,6 +783,7 @@ live plane (talks to the Paseo daemon):
   pteam chat list
   pteam chat read <room> [--limit <n>]
   pteam chat post <room>                   (message on stdin)
+  pteam models [--provider <role-provider>]
   pteam graph [--all] [--max-inspect <n>] [--refresh] [--with-chat <room[,room]>]
   pteam watchdog [--stale-after <ms>]
   pteam web [--port <n>] [--open] [--no-token]
@@ -646,6 +809,7 @@ async function main() {
 		case "agent": return dispatchAgent(argv);
 		case "permits": return dispatchPermits(argv);
 		case "chat": return dispatchChat(argv);
+		case "models": return cmdModels(argv);
 		case "graph": return cmdGraph(argv);
 		case "watchdog": return cmdWatchdog(argv);
 		case "web": return cmdWeb(argv);
@@ -700,7 +864,9 @@ function dispatchTwo(parent, argv, handlers) {
 	const fn = handlers[sub];
 	if (!fn) fail(`${parent}: unknown subcommand '${sub}' (expected ${Object.keys(handlers).join("|")})`);
 	if (!arg) fail(`${parent} ${sub}: missing argument`);
-	return fn(arg);
+	// Trailing flags reach the handler; each one declares what it accepts and
+	// rejects the rest, so a typo can never be silently dropped here.
+	return fn(arg, argv.slice(2));
 }
 
 function dispatchSkills(argv) {

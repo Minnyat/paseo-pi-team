@@ -413,6 +413,10 @@ button.preset:hover:not(:disabled) { background: color-mix(in srgb, var(--accent
 	font-family: inherit;
 }
 input[type="number"].cfg-input { font-family: var(--mono); max-width: 230px; }
+/* A field whose dropdown falls back to a text box holds both controls and
+   shows one. `display: contents` keeps whichever is visible in the parent grid
+   cell, exactly where an unwrapped control sat. */
+.cfg-swap { display: contents; }
 textarea.cfg-lines {
 	min-height: 72px;
 	font-family: var(--mono);

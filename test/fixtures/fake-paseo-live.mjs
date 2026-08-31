@@ -50,6 +50,41 @@ if (argv[0] === "permit" && (argv[1] === "allow" || argv[1] === "deny")) {
 	say({ decided: argv[1], agent: argv[2], request: argv[3] });
 }
 
+// Provider/model inventory. FAKE_PROVIDER_LS steers the shapes the discovery
+// path has to survive: a disabled provider, an unhealthy one, and the
+// error-envelope-with-exit-0 that the real paseo CLI emits when the daemon is
+// unreachable.
+if (argv[0] === "provider" && argv[1] === "ls") {
+	if (process.env.FAKE_PROVIDER_LS === "envelope") {
+		say({ error: { code: "UNKNOWN_ERROR", message: "Connection timed out" } });
+	}
+	const claudeEntry =
+		process.env.FAKE_PROVIDER_LS === "claude-disabled"
+			? { provider: "claude-peer", status: "available", enabled: "Disabled" }
+			: process.env.FAKE_PROVIDER_LS === "claude-unhealthy"
+				? { provider: "claude-peer", status: "error", enabled: "Enabled" }
+				: { provider: "claude-peer", status: "available", enabled: "Enabled" };
+	say([
+		{ provider: "pi-supervisor", status: "available", enabled: "Enabled" },
+		{ provider: "pi-peer", status: "available", enabled: "Enabled" },
+		claudeEntry,
+	]);
+}
+
+if (argv[0] === "provider" && argv[1] === "models") {
+	const provider = argv[2];
+	if (provider.startsWith("claude-")) {
+		say([
+			{ id: "claude-opus-5", thinkingOptionIds: ["off", "high", "ultracode"] },
+			{ id: "claude-sonnet-5", thinkingOptionIds: ["off", "high"] },
+		]);
+	}
+	say([
+		{ id: "testprov/fast-small", thinkingOptionIds: ["off", "low", "minimal"] },
+		{ id: "testprov/deep-large", thinkingOptionIds: ["off", "low", "high", "max"] },
+	]);
+}
+
 if (argv[0] === "chat" && argv[1] === "ls") say([{ id: "room_1", name: "team" }]);
 if (argv[0] === "chat" && argv[1] === "read") say([{ agentId: "peer", body: "hello", createdAt: "2026-08-21T00:00:00.000Z" }]);
 if (argv[0] === "chat" && argv[1] === "post") say({ posted: true, room: argv[2], body: argv[3] });

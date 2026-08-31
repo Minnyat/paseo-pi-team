@@ -12,16 +12,30 @@ Lớp 1  Pi model inventory (per host, KHÔNG commit)
          pi install, ~/.pi/agent/auth.json, credential env,
          ~/.pi/agent/models.json (custom provider/model), extension/package
               │
-Lớp 2  Paseo role profiles (commit template) — ĐÚNG 3 profile:
-         pi-supervisor / pi-lead / pi-peer (extends "pi", chỉ env PASEO_PI_ROLE)
+Lớp 2  Paseo role profiles (commit template) — ĐÚNG 6 profile,
+       một cho mỗi (family, vai trò):
+         pi-supervisor / pi-lead / pi-peer          (extends "pi")
+         claude-supervisor / claude-lead / claude-peer (extends "claude")
+       cả sáu chỉ khác nhau ở env PASEO_PI_ROLE (+ disallowedTools bên claude)
               │
 Lớp 3  Logical model classes (commit, trong repo):
          MONITOR_ECONOMY | FAST_READ | CODING_MEDIUM | REASONING_HIGH | REVIEW_HIGH
               │
 Lớp 4  Host-local route (KHÔNG commit):
          ~/.paseo-pi-team/model-routing.local.json
-         CLASS → { paseoProvider, model: <pi-provider>/<model-id>, thinking }
+         CLASS → { paseoProvider, model, thinking }
+         model và thinking theo family của paseoProvider:
+           pi     → "<pi-provider>/<model-id>", off|minimal|low|medium|high|xhigh|max
+           claude → "<model-id>" (một đoạn),    off|low|medium|high|xhigh|max|ultracode
+         Một route có thể ở family này, route kế bên ở family kia, trên cùng máy.
 ```
+
+Danh sách model của từng role provider đọc bằng `pteam models` (một lần
+`provider ls` + một lần `provider models` mỗi family) hoặc
+`pteam models --provider <role-provider>` để thấy kèm `thinkingOptionIds`.
+Form định tuyến trong WebUI gợi ý đúng danh sách đó và giới hạn mức thinking
+theo family — nhưng gợi ý không phải thẩm quyền: `resolveRoute` lúc preflight
+mới là chỗ fail-closed.
 
 **Quyết định có chủ đích:** không pin danh sách model vào Paseo provider
 profile (dù `ProviderOverrideSchema.models` của Paseo 0.2.5 hỗ trợ). Lý do:
