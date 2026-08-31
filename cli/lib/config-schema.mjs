@@ -19,9 +19,37 @@
  * absent — the default applies", which is why defaults double as placeholders.
  */
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const MODEL_CLASSES = ["MONITOR_ECONOMY", "FAST_READ", "CODING_MEDIUM", "REASONING_HIGH", "REVIEW_HIGH"];
-const ROLE_PROVIDERS = ["pi-supervisor", "pi-lead", "pi-peer"];
+// Routing vocabulary has exactly ONE definition: scripts/model-routing.mjs.
+// It used to be re-typed here, and that copy silently stayed pi-only when the
+// Claude runtime family landed — so the routing form could not select any
+// claude-* role provider even though the daemon had them registered. Import,
+// never re-type; test/config-schema.test.mjs locks the two together.
+import {
+	MODEL_CLASSES,
+	ROLE_PROVIDERS,
+	THINKING_LEVELS_BY_FAMILY,
+	providerFamily,
+} from "../../scripts/model-routing.mjs";
+
+/**
+ * Fallback list for `thinking`: the union of every family's levels. A renderer
+ * that cannot resolve `optionsBy` still shows a usable set, and enumControl
+ * measures a hand-written value against this instead of flagging a valid
+ * claude-only level as "outside the list".
+ */
+const ALL_THINKING_LEVELS = [
+	...new Set(Object.values(THINKING_LEVELS_BY_FAMILY).flat()),
+];
+
+/** Thinking levels keyed by role provider — the `optionsBy` map for `thinking`. */
+function thinkingByProvider() {
+	return Object.fromEntries(
+		ROLE_PROVIDERS.map((name) => [
+			name,
+			[...THINKING_LEVELS_BY_FAMILY[providerFamily(name)]],
+		]),
+	);
+}
 
 /** Shared shape of one route card inside routing and every cluster host. */
 function routeFields() {
@@ -29,22 +57,29 @@ function routeFields() {
 		{
 			path: "paseoProvider",
 			type: "enum",
-			enum: ROLE_PROVIDERS,
+			enum: [...ROLE_PROVIDERS],
 			label: "Provider Paseo",
-			hint: "Chọn theo vai trò: giám sát / trưởng nhóm / thành viên.",
+			hint: "Family + vai trò. pi-* chạy trên Pi, claude-* chạy trên Claude Code. Ô mô hình và mức suy nghĩ bên dưới đổi theo ô này.",
 		},
 		{
 			path: "model",
-			type: "string",
+			type: "enum",
 			label: "Mô hình",
-			hint: "Dạng <pi-provider>/<model-id>, ví dụ Minnyat/deepseek-v4-flash.",
+			hint: "Danh sách model của chính provider đã chọn, đọc từ daemon. Daemon không trả về được thì ô này lùi về nhập tay — pi: <pi-provider>/<model-id>, claude: id trần.",
+			// `source: "models"` marks this map as filled at read time from the live
+			// inventory (withModelInventory). An empty map therefore means "the
+			// daemon could not tell us", never "no model is valid" — which is why
+			// the control falls back to a text box instead of an empty dropdown,
+			// and why the pre-save check leaves a runtime-sourced list alone.
+			optionsBy: { path: "paseoProvider", source: "models", map: {} },
 		},
 		{
 			path: "thinking",
 			type: "enum",
-			enum: THINKING_LEVELS,
+			enum: ALL_THINKING_LEVELS,
 			label: "Mức suy nghĩ",
-			hint: "Phải là mức mô hình hỗ trợ, nếu không sẽ bị ép về mức thấp hơn.",
+			hint: "Danh sách đổi theo family: minimal chỉ có ở pi, ultracode chỉ có ở claude. Mức mô hình không hỗ trợ sẽ bị ép xuống âm thầm — chạy preflight để chắc.",
+			optionsBy: { path: "paseoProvider", map: thinkingByProvider() },
 		},
 	];
 }
@@ -141,7 +176,9 @@ export const CONFIG_SCHEMAS = {
 					{
 						path: "defaultThinkingLevel",
 						type: "enum",
-						enum: THINKING_LEVELS,
+						// pi's OWN settings file: the pi levels, not the union — a
+						// claude-only level here is meaningless to the Pi agent.
+						enum: [...THINKING_LEVELS_BY_FAMILY.pi],
 						label: "Mức suy nghĩ mặc định",
 					},
 					{
@@ -344,7 +381,7 @@ export const CONFIG_SCHEMAS = {
 	routing: {
 		label: "Định tuyến mô hình",
 		intro:
-			"Chọn mô hình cho từng lớp việc trên máy này. Lấy tên mô hình chính xác bằng lệnh: paseo provider models pi-peer --json",
+			"Chọn mô hình cho từng lớp việc trên máy này. Ô mô hình tự gợi ý theo danh sách daemon đang có; xem đầy đủ bằng: pteam models --provider <role-provider>.",
 		seed: { version: 1, routes: {} },
 		groups: [
 			{
@@ -361,7 +398,7 @@ export const CONFIG_SCHEMAS = {
 						path: "routes",
 						type: "map",
 						keyLabel: "Lớp việc",
-						fixedKeys: MODEL_CLASSES,
+						fixedKeys: [...MODEL_CLASSES],
 						item: { fields: routeFields() },
 					},
 				],
@@ -434,7 +471,7 @@ export const CONFIG_SCHEMAS = {
 									path: "routes",
 									type: "map",
 									keyLabel: "Lớp việc",
-									fixedKeys: MODEL_CLASSES,
+									fixedKeys: [...MODEL_CLASSES],
 									item: { fields: routeFields() },
 								},
 							],
@@ -445,6 +482,51 @@ export const CONFIG_SCHEMAS = {
 		],
 	},
 };
+
+/**
+ * Return a copy of `schema` with every runtime-sourced option map
+ * (`optionsBy.source === "models"`) filled from a live model inventory
+ * (`{ "<role-provider>": ["<model-id>", ...] }`).
+ *
+ * Only `source`-marked maps are touched: the thinking levels are an
+ * `optionsBy` too, but theirs is a static per-family table that the daemon has
+ * no say in and must survive untouched.
+ *
+ * Walks nested map items, so the cluster section — whose route cards sit two
+ * levels down, one set per host — gets the same lists as the single-host
+ * routing section.
+ *
+ * The input schema is never mutated: `schemaForSection` hands out the module's
+ * own tables, and filling them in place would leak one command's daemon
+ * snapshot into the next call within the same process.
+ */
+export function withModelInventory(schema, modelsByProvider = {}) {
+	if (schema === null || typeof schema !== "object") return schema;
+	const byProvider =
+		modelsByProvider !== null && typeof modelsByProvider === "object"
+			? modelsByProvider
+			: {};
+	const fillField = (field) => {
+		const next = { ...field };
+		if (next.optionsBy?.source === "models") {
+			next.optionsBy = { ...next.optionsBy, map: byProvider };
+		}
+		if (next.item && Array.isArray(next.item.fields)) {
+			next.item = { ...next.item, fields: next.item.fields.map(fillField) };
+		}
+		return next;
+	};
+	return {
+		...schema,
+		groups: (schema.groups ?? []).map((group) => ({
+			...group,
+			fields: (group.fields ?? []).map(fillField),
+		})),
+	};
+}
+
+/** Sections whose forms carry a live model inventory. */
+export const ROUTING_SECTIONS = ["routing", "cluster"];
 
 /** Sections sharing one file share one schema: `providers` and `paseo`. */
 export function schemaForSection(section) {

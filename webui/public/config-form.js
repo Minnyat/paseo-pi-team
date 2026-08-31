@@ -103,6 +103,74 @@ export function numberRangeProblems(schema, doc, prefix = "") {
 	return problems;
 }
 
+/**
+ * The options a dependent field offers right now.
+ *
+ * `optionsBy` names a SIBLING field inside the same map item, so the
+ * list follows whatever that sibling currently holds — a route's model and
+ * thinking level follow its `paseoProvider`. An unset or unrecognised sibling
+ * yields an empty list, never another family's values: offering pi's `minimal`
+ * for a Claude route is exactly the confusion this replaced.
+ *
+ * `prefix` is the path of the item the field lives in ("routes.REVIEW_HIGH"),
+ * or "" for a top-level field.
+ */
+export function dependentOptions(spec, doc, prefix = "") {
+	if (spec === null || typeof spec !== "object") return null;
+	const current = getPath(doc, prefix ? `${prefix}.${spec.path}` : spec.path);
+	if (current === undefined || current === null) return [];
+	const options = (spec.map ?? {})[String(current)];
+	return Array.isArray(options) ? options : [];
+}
+
+/**
+ * One entry per `optionsBy` field holding a value its sibling does not allow.
+ *
+ * The routing form's thinking levels are family-specific (`minimal` is pi-only,
+ * `ultracode` claude-only), so switching a route's provider can strand a level
+ * the target runtime would clamp away without saying so. Catching it here means
+ * the form refuses to write a config that loadRoutingConfig would reject at the
+ * next preflight, instead of the user finding out one run later.
+ *
+ * A RUNTIME-sourced list (`optionsBy.source`, i.e. the models a daemon
+ * reported) is skipped: a value missing from it is routinely legitimate — a
+ * brand-new model id, or a daemon that was down when the form loaded — and the
+ * control already degrades to a text box in that case. Only the static tables
+ * the schema itself declares are enforced here.
+ */
+export function dependentOptionProblems(schema, doc, prefix = "") {
+	const problems = [];
+	for (const group of schema?.groups ?? []) {
+		for (const field of group.fields ?? []) collectField(field, prefix);
+	}
+	function collectField(field, base) {
+		const path = base ? `${base}.${field.path}` : field.path;
+		if (field.optionsBy && field.optionsBy.source === undefined) {
+			const value = getPath(doc, path);
+			const on = getPath(doc, base ? `${base}.${field.optionsBy.path}` : field.optionsBy.path);
+			// Same resolver the control paints from: what the form refuses to save
+			// must be exactly what it refused to offer.
+			const allowed = dependentOptions(field.optionsBy, doc, base);
+			if (
+				value !== undefined &&
+				value !== null &&
+				value !== "" &&
+				allowed.length > 0 &&
+				!allowed.includes(value)
+			) {
+				problems.push(`${base || field.path}: ${field.label} "${value}" không hợp lệ với ${on} (chỉ nhận: ${allowed.join(", ")})`);
+			}
+		}
+		if (field.type === "map" && field.item) {
+			const object = getPath(doc, path);
+			for (const key of Object.keys(object ?? {})) {
+				for (const child of field.item.fields ?? []) collectField(child, `${path}.${key}`);
+			}
+		}
+	}
+	return problems;
+}
+
 /** Split a textarea into argv-style lines: trimmed, blanks dropped. */
 export function parseLines(text) {
 	return String(text ?? "")

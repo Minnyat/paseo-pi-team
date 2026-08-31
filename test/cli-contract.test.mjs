@@ -47,7 +47,7 @@ try {
 	{
 		const help = run(["--help"]);
 		assert.equal(help.status, 0);
-		for (const command of ["agents", "permits list", "graph", "web", "chat read", "update", "uninstall"]) {
+		for (const command of ["agents", "permits list", "graph", "web", "chat read", "update", "uninstall", "models"]) {
 			assert.ok(help.stdout.includes(command), `help documents '${command}'`);
 		}
 
@@ -348,6 +348,99 @@ try {
 
 		const badUninstallFlag = run(["uninstall", "--force"]);
 		assert.notEqual(badUninstallFlag.status, 0);
+	}
+	// --- model inventory feeds the routing form ------------------------------
+	{
+		const listed = run(["models"]);
+		assert.equal(listed.status, 0, listed.stderr);
+		assert.deepEqual(listed.json.degraded, [], "a healthy daemon degrades nothing");
+		// One `provider models` call per FAMILY, spread to that family's roles:
+		// the three role profiles of a family extend the same base runtime.
+		assert.deepEqual(listed.json.providers["pi-peer"], ["testprov/deep-large", "testprov/fast-small"]);
+		assert.deepEqual(listed.json.providers["pi-lead"], listed.json.providers["pi-peer"]);
+		assert.deepEqual(listed.json.providers["claude-peer"], ["claude-opus-5", "claude-sonnet-5"]);
+		assert.deepEqual(
+			listed.json.providers["claude-lead"],
+			listed.json.providers["claude-peer"],
+			"a family's model list reaches every role of that family, not just the one queried",
+		);
+
+		const named = run(["models", "--provider", "claude-peer"]);
+		assert.equal(named.status, 0, named.stderr);
+		assert.equal(named.json.family, "claude");
+		assert.deepEqual(
+			named.json.models.find((m) => m.id === "claude-opus-5").thinkingOptionIds,
+			["off", "high", "ultracode"],
+			"a named read carries the thinking options a route has to match",
+		);
+
+		const notARole = run(["models", "--provider", "pi"]);
+		assert.notEqual(notARole.status, 0, "only the pack's role providers are addressable");
+		assert.match(notARole.stderr, /--provider must be one of/);
+
+		// A provider the resolver would reject must not be advertised by the form.
+		for (const mode of ["claude-disabled", "claude-unhealthy"]) {
+			const partial = run(["models"], { FAKE_PROVIDER_LS: mode });
+			assert.equal(partial.status, 0, partial.stderr);
+			assert.equal(partial.json.providers["claude-peer"], undefined, `${mode}: no suggestions from a provider preflight would reject`);
+			assert.deepEqual(partial.json.providers["pi-peer"], ["testprov/deep-large", "testprov/fast-small"], `${mode}: the healthy family is unaffected`);
+			assert.equal(partial.json.degraded.length, 1, `${mode}: the gap is reported, not hidden`);
+			assert.match(partial.json.degraded[0].message, /claude/);
+		}
+
+		// paseo reports some daemon failures as a SUCCESSFUL body {"error": ...}.
+		// Counting that as "zero models" would be a silent wrong answer.
+		const envelope = run(["models"], { FAKE_PROVIDER_LS: "envelope" });
+		assert.equal(envelope.status, 0, envelope.stderr);
+		assert.deepEqual(envelope.json.providers, {});
+		assert.equal(envelope.json.degraded[0].code, "UNKNOWN_ERROR");
+		assert.match(envelope.json.degraded[0].message, /Connection timed out/);
+	}
+
+	// --- config read folds that inventory into the routing schema ------------
+	{
+		const routing = run(["config", "read", "routing"]);
+		assert.equal(routing.status, 0, routing.stderr);
+		const card = routing.json.schema.groups
+			.flatMap((group) => group.fields)
+			.find((field) => field.type === "map" && field.fixedKeys?.includes("REVIEW_HIGH"));
+		const model = card.item.fields.find((field) => field.path === "model");
+		assert.deepEqual(model.optionsBy.map["claude-peer"], ["claude-opus-5", "claude-sonnet-5"]);
+		assert.equal(model.type, "enum", "the model field is a picker fed by the daemon");
+		assert.deepEqual(
+			card.item.fields.find((field) => field.path === "paseoProvider").enum,
+			["pi-supervisor", "pi-lead", "pi-peer", "claude-supervisor", "claude-lead", "claude-peer"],
+			"the form offers both runtime families, not pi alone",
+		);
+		assert.deepEqual(routing.json.inventory.degraded, []);
+
+		// A section with no inventory must not pay for a daemon round trip.
+		const mcp = run(["config", "read", "mcp"]);
+		assert.equal(mcp.status, 0, mcp.stderr);
+		assert.equal(mcp.json.inventory, undefined);
+
+		// --no-discovery keeps a scripted read file-only.
+		const offline = run(["config", "read", "routing", "--no-discovery"]);
+		assert.equal(offline.status, 0, offline.stderr);
+		assert.equal(offline.json.inventory, undefined);
+		assert.deepEqual(
+			offline.json.schema.groups
+				.flatMap((group) => group.fields)
+				.find((field) => field.type === "map" && field.fixedKeys?.includes("REVIEW_HIGH"))
+				.item.fields.find((field) => field.path === "model").optionsBy.map,
+			{},
+		);
+
+		const badFlag = run(["config", "read", "routing", "--nope"]);
+		assert.notEqual(badFlag.status, 0, "a typo'd flag is never silently dropped");
+		assert.match(badFlag.stderr, /unknown flag/);
+
+		// A dead daemon degrades the form; it must never fail the read.
+		const dead = run(["config", "read", "routing"], { FAKE_PROVIDER_LS: "envelope" });
+		assert.equal(dead.status, 0, dead.stderr);
+		assert.deepEqual(dead.json.inventory.providers, []);
+		assert.equal(dead.json.inventory.degraded.length, 1);
+		assert.ok(dead.json.schema, "the form still renders without any suggestions");
 	}
 } finally {
 	rmSync(sandbox, { recursive: true, force: true });

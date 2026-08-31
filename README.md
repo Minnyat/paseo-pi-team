@@ -662,9 +662,12 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
    when using a custom provider.
 2. Copy `config/model-routing.example.json` →
    `~/.paseo-pi-team/model-routing.local.json` and fill in the host's REAL model
-   IDs from `paseo provider models pi-peer --json` (5 classes:
-   `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`, `REASONING_HIGH`,
-   `REVIEW_HIGH`).
+   IDs (5 classes: `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`,
+   `REASONING_HIGH`, `REVIEW_HIGH`). `pteam models` lists what every role
+   provider on the host actually offers, both runtime families at once;
+   `pteam models --provider <role-provider>` adds each model's thinking
+   options. The WebUI routing form suggests the same list inline and narrows
+   the thinking levels to the family of the provider you picked.
 3. Cross-host: copy `config/cluster-routing.example.json` →
    `~/.paseo-pi-team/cluster-routing.local.json` on the CONTROLLER — a single
    file describing connection/required/capabilities/limits/routes for every
