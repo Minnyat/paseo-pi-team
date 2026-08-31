@@ -259,6 +259,10 @@ test("fork imports the copy and stops before the model is set", async () => {
 		assert.ok(args.includes("--cwd"), "the source cwd travels with the fork");
 		assert.ok(args.includes(`team.fork-of=${SOURCE}`), "the lineage is a label, so `paseo ls` shows it");
 		assert.ok(args.includes("team.domain=backend"));
+		// §PR-G follow-up: no code path stamped team.cluster at creation before
+		// this, and a fork is a creation path too. Derived from the SOURCE's own
+		// state (cwd "D:\\repo" → "d:/repo"), the same way team.fork-of is.
+		assert.ok(args.includes("team.cluster=d:/repo"), "the source's cluster travels with the fork too");
 
 		// §1.3: the CLI cannot route the model, so the caller is handed the exact
 		// MCP call and told to verify afterwards.
@@ -266,6 +270,83 @@ test("fork imports the copy and stops before the model is set", async () => {
 		assert.deepEqual(result.nextAction.args.settings, { model: "claude-opus-5", thinkingOptionId: "high" });
 		assert.equal(result.then, "verify");
 		assert.ok(result.seedPrompt.includes(`You are NOT ${SOURCE}`));
+	});
+});
+
+test("the fork's cluster is the SOURCE's own, not whatever the caller passed", async () => {
+	// Like team.fork-of/team.fork-reason, this is a derived fact about the fork
+	// operation, not a caller-settable label — a fork claiming a different
+	// cluster than its source would be the escalation clusterLabelBlockReason
+	// exists to catch on the create_agent path, reached here through import.
+	await withState(async ({ agentsRoot }) => {
+		const calls = [];
+		await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "change-host",
+				disposition: "lead",
+				provider: "pi-lead/anthropic/claude-opus-5",
+				labels: { "team.cluster": "some-other-cluster" },
+			},
+			{
+				role: "lead",
+				agentsRoot,
+				runPaseo: async (args) => {
+					calls.push(args);
+					return { id: FORKED };
+				},
+			},
+		);
+		const [args] = calls;
+		assert.ok(args.includes("team.cluster=d:/repo"));
+		assert.ok(!args.includes("team.cluster=some-other-cluster"));
+	});
+});
+
+test("an underivable source cluster omits the label rather than lying about it", async () => {
+	await withState(async ({ agentsRoot, write }) => {
+		// No cwd, no workspaceId, no team.cluster label on the SOURCE's own state:
+		// agentCluster(state) has nothing to derive from. --cwd still travels on
+		// the request itself (forkAgent requires it independently — FORK_CWD_UNKNOWN
+		// otherwise), which is a different value from the state's own cwd on
+		// purpose: proof that the label comes from the source's STATE, not from
+		// whatever cwd the request happens to carry.
+		write(SOURCE, { cwd: undefined });
+		const calls = [];
+		await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "change-host",
+				disposition: "lead",
+				provider: "pi-lead/anthropic/claude-opus-5",
+				cwd: "D:\\elsewhere",
+			},
+			{
+				role: "lead",
+				agentsRoot,
+				runPaseo: async (args) => {
+					calls.push(args);
+					return { id: FORKED };
+				},
+			},
+		);
+		const [args] = calls;
+		assert.ok(!args.some((a) => typeof a === "string" && a.startsWith("team.cluster=")));
+
+		// A caller-supplied label survives when the source cannot override it.
+		calls.length = 0;
+		await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "change-host",
+				disposition: "lead",
+				provider: "pi-lead/anthropic/claude-opus-5",
+				cwd: "D:\\elsewhere",
+				labels: { "team.cluster": "caller-supplied" },
+			},
+			{ role: "lead", agentsRoot, runPaseo: async (args) => { calls.push(args); return { id: FORKED }; } },
+		);
+		assert.ok(calls[0].includes("team.cluster=caller-supplied"));
 	});
 });
 

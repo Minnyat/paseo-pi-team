@@ -2219,6 +2219,73 @@ export function supervisorCreateAgentArgsBlockReason(
 }
 
 /**
+ * The create_agent side of the cluster axis (§PR-G follow-up).
+ *
+ * `agentCluster`/`selfCluster` answer "where does a seat live" from whatever
+ * Paseo already recorded — but nothing ever WROTE `team.cluster` at creation
+ * time. The routing cycle in skills/paseo-team-lead/SKILL.md passed only
+ * `settings`, never `labels`, so every seat it created fell back to
+ * `workspaceId`/`cwd` — which is exactly wrong for the one seat that most
+ * needs the label: an independent-reviewer workspace is a LINKED WORKTREE
+ * (`leadCreateWorkspaceBlockReason` mandates it), so it has a different
+ * `workspaceId` AND a different `cwd` from the Lead that owns it. Unlabelled,
+ * that Peer reads as a foreign cluster to every cluster-scoped rule
+ * (`supervisorTurnVerdict`, `team_chat` fan-out, the lease board).
+ *
+ * Applies to the only two create_agent paths a role in this pack has: a
+ * Lead's own create_agent, and a Supervisor's gated lead-recovery create_agent
+ * (`supervisorCreateAgentArgsBlockReason`). Both are checked here rather than
+ * inside that function so the two concerns — "is this a valid lead-recovery
+ * call at all" and "which cluster is it landing in" — stay independently
+ * readable and independently testable.
+ *
+ * - Missing `labels["team.cluster"]` → refuse, naming the exact value to
+ *   fill in (this creator's own resolved cluster).
+ * - Present but different from the creator's own cluster (compared through
+ *   `normalizeCluster`, never as raw strings — see its own docs on why a
+ *   cluster id needs folding) → refuse. A Lead stamping a new seat into
+ *   another project's cluster is an escalation: that seat's future Peers
+ *   would then appear inside a cluster this Lead does not own, and a
+ *   Supervisor there would treat SUPERVISOR_DECISION from it as binding.
+ * - The creator's OWN cluster unresolved (`cluster` null/undefined) → no
+ *   gate. This function cannot demand a value the creator itself cannot
+ *   determine; see `selfCluster`'s own cwd fallback, which almost always
+ *   resolves anyway.
+ *
+ * Deliberately a CREATE-time gate only. An agent created before this guard
+ * shipped carries no `team.cluster` label and is read back through the
+ * `workspaceId`/`cwd` fallback in `agentCluster`, exactly as before — this
+ * function never touches a read path, so there is nothing to migrate.
+ */
+export function clusterLabelBlockReason({
+	role,
+	args,
+	cluster,
+}: {
+	role: TeamRole;
+	args: unknown;
+	/** The creator's OWN cluster; see selfCluster. Null/undefined disables the gate. */
+	cluster?: string | null;
+}): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	const own = normalizeCluster(cluster);
+	if (!own) return null;
+	const rec = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {};
+	const labels =
+		typeof rec.labels === "object" && rec.labels !== null
+			? (rec.labels as Record<string, unknown>)
+			: {};
+	const declared = normalizeCluster(labels[TEAM_CLUSTER_LABEL]);
+	if (!declared) {
+		return `Refusing create_agent: labels["${TEAM_CLUSTER_LABEL}"] is required and must be "${own}" — this seat's own cluster. Without it the new seat cannot be told apart from one in another workspace, and every cluster-scoped rule (SUPERVISOR_DECISION, team_chat, scope lease) will silently treat it as foreign.`;
+	}
+	if (declared !== own) {
+		return `Refusing create_agent: labels["${TEAM_CLUSTER_LABEL}"] is "${declared}", but this seat's own cluster is "${own}". Stamping a new agent into a different cluster is an escalation — its future Peers would appear inside that other cluster's authority. Set it to "${own}", or create the agent from a seat that actually belongs to cluster "${declared}".`;
+	}
+	return null;
+}
+
+/**
  * Argument-level gate for Lead create_workspace through the MCP proxy —
  * Layer 1 of the reviewer isolation invariant (Layer 2 is the runtime
  * assertLinkedWorktree gate in ocr-review.mjs, which rejects any
@@ -2345,6 +2412,18 @@ export function mcpBlockReason(
 			return `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`;
 		}
 		return `"${target}" is not in the ${role} MCP allowlist (discovery, workspace, monitoring, orchestration, permissions).`;
+	}
+	if (matchesPaseoToolName(target, ["create_agent"]) && (role === "lead" || role === "supervisor")) {
+		// Checked BEFORE the role-specific argument gate below: a Supervisor's
+		// lead-recovery call must land in its own cluster just as much as a
+		// Lead's own create_agent does, and this way both paths run the SAME
+		// cluster check rather than a second reading of it.
+		const clusterBlock = clusterLabelBlockReason({
+			role,
+			args: extractMcpArgs(input),
+			cluster: context.cluster,
+		});
+		if (clusterBlock) return clusterBlock;
 	}
 	if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
 		const argBlock = supervisorCreateAgentBlockReason(input, context);

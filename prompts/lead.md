@@ -126,9 +126,15 @@ implementation still goes to an Engineer Peer.
      carries no weight. Reply `BLOCKED: CLUSTER_MISMATCH` and refer it to your
      own cluster's Supervisor. This code is NOT gated on the topology flag: it
      asks a question prior to jurisdiction — whether the message is addressed to
-     your project at all. If the two seats genuinely are one cluster (a Lead and
-     its reviewer **worktree** derive different clusters by construction), ask
-     the Human to set the same `team.cluster` on both; never relabel your own
+     your project at all. A false positive here should be rare now: every
+     `create_agent` you call is REQUIRED to carry
+     `labels: { "team.cluster": "<your own cluster>" }` (refused otherwise), so
+     a Peer you create — including a reviewer **worktree**, which has a
+     different `workspaceId` and `cwd` from you by construction — already
+     shares your cluster by construction, not by a follow-up step. If the
+     mismatch is instead with a Supervisor or another Lead — a seat you did NOT
+     create, and cannot relabel — and the two genuinely belong together, ask
+     the Human to set the same `team.cluster` on both. Never relabel your own
      seat to make a refusal go away.
    The remaining codes exist only under `PASEO_TEAM_TOPOLOGY=multi`, where every
    block carries `DOMAIN:` and your own seat carries `team.domain` /

@@ -830,6 +830,96 @@ assert.match(
 	"prefixed target + string args are gated the same way",
 );
 
+// create_agent: the cluster-label gate (§PR-G follow-up). No code path ever
+// stamped team.cluster at creation time, so a Lead's routing cycle produced
+// seats that fell back to workspaceId/cwd — wrong for exactly the seat that
+// needs the label most, a reviewer worktree. `context.cluster` is undefined
+// in every call above (no 3rd arg passed), which is why none of them tripped
+// this gate; these calls pass it explicitly to exercise it.
+assert.match(
+	mcpBlockReason(
+		"lead",
+		{ tool: "create_agent", args: { initialPrompt: "hello" } },
+		{ cluster: "d:/code/shop" },
+	) ?? "",
+	/labels\["team\.cluster"\] is required and must be "d:\/code\/shop"/,
+	"a Lead creating an agent without a cluster label is refused, and told the exact value",
+);
+assert.match(
+	mcpBlockReason(
+		"lead",
+		{
+			tool: "create_agent",
+			args: { initialPrompt: "hello", labels: { "team.cluster": "d:/code/blog" } },
+		},
+		{ cluster: "d:/code/shop" },
+	) ?? "",
+	/is "d:\/code\/blog", but this seat's own cluster is "d:\/code\/shop"/,
+	"a label naming a DIFFERENT cluster is refused — stamping into another project's cluster is escalation",
+);
+assert.equal(
+	mcpBlockReason(
+		"lead",
+		{
+			tool: "create_agent",
+			args: { initialPrompt: "hello", labels: { "team.cluster": "D:\\Code\\Shop" } },
+		},
+		{ cluster: "d:/code/shop" },
+	),
+	null,
+	"a matching label passes — compared through normalizeCluster, not as raw strings",
+);
+assert.equal(
+	mcpBlockReason(
+		"lead",
+		{ tool: "create_agent", args: { initialPrompt: "hello" } },
+		{ cluster: null },
+	),
+	null,
+	"this Lead's own cluster is unresolvable, so the gate cannot demand a value it cannot itself determine",
+);
+assert.equal(
+	mcpBlockReason("lead", { tool: "create_agent", args: { initialPrompt: "hello" } }),
+	null,
+	"a caller that never resolved a cluster at all (no context) keeps the pre-gate behaviour",
+);
+// create_workspace is a DIFFERENT target — the cluster-label requirement must
+// not leak onto it even when this seat's own cluster is known.
+assert.equal(
+	mcpBlockReason(
+		"lead",
+		{ tool: "create_workspace", args: { path: "/repo", isolation: "local" } },
+		{ cluster: "d:/code/shop" },
+	),
+	null,
+	"create_workspace carries no team.cluster requirement",
+);
+
+// Same gate on the Supervisor's gated lead-recovery create_agent. Checked
+// BEFORE the recovery-specific argument gate, so a call that is otherwise a
+// perfectly valid recovery still needs the label.
+assert.match(
+	mcpBlockReason(
+		"supervisor",
+		{ tool: "create_agent", args: recoveryCreateArgs },
+		{ cluster: "d:/code/shop" },
+	) ?? "",
+	/labels\["team\.cluster"\] is required/,
+	"a Supervisor's lead-recovery create_agent needs the cluster label too",
+);
+assert.equal(
+	mcpBlockReason(
+		"supervisor",
+		{
+			tool: "create_agent",
+			args: { ...recoveryCreateArgs, labels: { ...recoveryCreateArgs.labels, "team.cluster": "d:/code/shop" } },
+		},
+		{ cluster: "d:/code/shop" },
+	),
+	null,
+	"a gated recovery create_agent with a matching cluster label passes both gates",
+);
+
 // Peer is fully blocked (handled by caller always blocking mcp for peer).
 
 // --- mcpScriptBlockReason (lead heuristic backstop) ---------------------------
@@ -1568,8 +1658,10 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 	const prevRole = process.env.PASEO_PI_ROLE;
 	const prevSelf = process.env.PASEO_AGENT_ID;
 	const prevScripts = process.env.PASEO_TEAM_SCRIPTS_DIR;
+	const prevCluster = process.env.PASEO_TEAM_CLUSTER;
 	const LEAD_A = "aaaaaaaa-1111-4111-8111-111111111111";
 	const LEAD_B = "bbbbbbbb-2222-4222-8222-222222222222";
+	const CLUSTER = "pst-lease-stub";
 
 	// A stub support-script directory whose team-lease.mjs prints a ledger in
 	// which LEAD_B holds src/auth.
@@ -1589,6 +1681,11 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 	process.env.PASEO_PI_ROLE = "lead";
 	process.env.PASEO_AGENT_ID = LEAD_A;
 	process.env.PASEO_TEAM_SCRIPTS_DIR = stubDir;
+	// selfCluster() falls back to cwd when there is no state file for LEAD_A, so
+	// without a declared cluster this would resolve to the checkout's own path —
+	// a real, non-null value that would make every create_agent below trip the
+	// cluster-label gate before it ever reaches the lease check under test.
+	process.env.PASEO_TEAM_CLUSTER = CLUSTER;
 	try {
 		const createExtension = await loadFreshExtension("lifecycle=lease");
 		createExtension(piStub);
@@ -1605,7 +1702,10 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		const create = async (prompt: string) =>
 			(await toolCall({
 				toolName: "mcp",
-				input: { tool: "create_agent", args: { initialPrompt: prompt } },
+				input: {
+					tool: "create_agent",
+					args: { initialPrompt: prompt, labels: { "team.cluster": CLUSTER } },
+				},
 			})) as { block?: boolean; reason?: string } | undefined;
 
 		const blocked = await create(writerBrief);
@@ -1643,6 +1743,8 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 		else process.env.PASEO_AGENT_ID = prevSelf;
 		if (prevScripts === undefined) delete process.env.PASEO_TEAM_SCRIPTS_DIR;
 		else process.env.PASEO_TEAM_SCRIPTS_DIR = prevScripts;
+		if (prevCluster === undefined) delete process.env.PASEO_TEAM_CLUSTER;
+		else process.env.PASEO_TEAM_CLUSTER = prevCluster;
 	}
 }
 

@@ -271,6 +271,96 @@ assert.match(
 	"never rely on a daemon default",
 );
 
+// --- create_agent: the cluster-label gate, parity with policy.test.mts -------
+// `decide()` never passes `cluster`, so none of the calls above trip this gate
+// (same reasoning as the Pi suite: an unresolved own cluster disables it). The
+// calls below pass it explicitly, exactly as claude-hook.mjs's pre-tool-use
+// handler always does via `core.selfCluster(env)`.
+assert.match(
+	claudeToolBlockReason({
+		role: "lead",
+		toolName: "mcp__paseo__create_agent",
+		toolInput: { provider: "x" },
+		brief: null,
+		cluster: "d:/code/shop",
+	}) ?? "",
+	/labels\["team\.cluster"\] is required and must be "d:\/code\/shop"/,
+	"a Lead creating an agent without a cluster label is refused on Claude too",
+);
+assert.match(
+	claudeToolBlockReason({
+		role: "lead",
+		toolName: "mcp__paseo__create_agent",
+		toolInput: { provider: "x", labels: { "team.cluster": "d:/code/blog" } },
+		brief: null,
+		cluster: "d:/code/shop",
+	}) ?? "",
+	/is "d:\/code\/blog", but this seat's own cluster is "d:\/code\/shop"/,
+	"a label naming a different cluster is refused",
+);
+assert.equal(
+	claudeToolBlockReason({
+		role: "lead",
+		toolName: "mcp__paseo__create_agent",
+		toolInput: { provider: "x", labels: { "team.cluster": "D:\\Code\\Shop" } },
+		brief: null,
+		cluster: "d:/code/shop",
+	}),
+	null,
+	"a matching label passes — compared through normalizeCluster",
+);
+assert.equal(
+	claudeToolBlockReason({
+		role: "lead",
+		toolName: "mcp__paseo__create_agent",
+		toolInput: { provider: "x" },
+		brief: null,
+		cluster: null,
+	}),
+	null,
+	"an unresolvable own cluster disables the gate on this runtime too",
+);
+assert.equal(
+	claudeToolBlockReason({
+		role: "lead",
+		toolName: "mcp__paseo__create_workspace",
+		toolInput: { isolation: "local" },
+		brief: null,
+		cluster: "d:/code/shop",
+	}),
+	null,
+	"create_workspace carries no team.cluster requirement",
+);
+{
+	const recovery = {
+		provider: "claude-lead/claude-opus-5",
+		labels: { purpose: "recovery", recovery_for: "content-analysis" },
+		settings: { thinkingOptionId: "high" },
+	};
+	assert.match(
+		claudeToolBlockReason({
+			role: "supervisor",
+			toolName: "mcp__paseo__create_agent",
+			toolInput: recovery,
+			brief: null,
+			cluster: "d:/code/shop",
+		}) ?? "",
+		/labels\["team\.cluster"\] is required/,
+		"a Supervisor's lead-recovery create_agent needs the cluster label too, on Claude",
+	);
+	assert.equal(
+		claudeToolBlockReason({
+			role: "supervisor",
+			toolName: "mcp__paseo__create_agent",
+			toolInput: { ...recovery, labels: { ...recovery.labels, "team.cluster": "d:/code/shop" } },
+			brief: null,
+			cluster: "d:/code/shop",
+		}),
+		null,
+		"a gated recovery create_agent with a matching cluster label passes both gates",
+	);
+}
+
 // --- env-driven surfaces ------------------------------------------------------
 
 {

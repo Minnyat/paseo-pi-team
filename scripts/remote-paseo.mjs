@@ -29,7 +29,15 @@
 //   agents           --host-id <id> [--all]             paseo ls -g
 //   run              --host-id <id> --provider <role-provider>/<model-ref>
 //                    --thinking <level> [--mode <m>] [--workspace <wks>] [--title <t>]
-//                    [--prompt <text> | --brief <file>] [--wait-timeout <dur>]
+//                    [--label <key>=<value> ...] [--prompt <text> | --brief <file>]
+//                    [--wait-timeout <dur>]
+//                    A "team.cluster" label is required on every remotely-created
+//                    agent (§PR-G) — every cluster-scoped rule (SUPERVISOR_DECISION,
+//                    team_chat fan-out, the scope-lease board) reads it from the
+//                    agent's own state. main() fills it in automatically from this
+//                    seat's own cluster (selfCluster()) when --label does not
+//                    already set one; buildArgv() refuses the run if it is still
+//                    missing when the paseo CLI would be invoked.
 //   status           --agent-ref <host-id>/<agent-id>   paseo inspect
 //   cancel           --agent-ref <host-id>/<agent-id>   paseo stop
 //   archive          --agent-ref <host-id>/<agent-id>   paseo archive
@@ -56,6 +64,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	PASEO_CONVENTIONAL_ENTRIES,
+	importPolicyCore,
 	isEntrypoint,
 	resolveCmdEntry as resolveCmdEntryFromShim,
 	resolvePaseoExec as resolvePaseoExecShared,
@@ -144,6 +153,10 @@ function toCamelCase(flag) {
  * in `_`. A flag whose value is missing (or that is followed by another flag)
  * is recorded as boolean `true` — validateFlags() then rejects it when the
  * flag requires a value, so a typo can never silently drop an option.
+ *
+ * `--label` is the one flag that REPEATS (`--label a=b --label c=d`) and is
+ * always accumulated into an array under `out.label`, even when passed once,
+ * so buildArgv never has to distinguish "one label" from "one of several".
  */
 export function parseArgs(argv) {
 	const out = { _: [] };
@@ -151,6 +164,14 @@ export function parseArgs(argv) {
 		const arg = argv[i];
 		if (arg === "-h" || arg === "--help") {
 			out.help = true;
+			continue;
+		}
+		if (arg === "--label") {
+			const next = argv[i + 1];
+			const hasValue = next !== undefined && !next.startsWith("--");
+			out.label = Array.isArray(out.label) ? out.label : [];
+			out.label.push(hasValue ? next : true);
+			if (hasValue) i++;
 			continue;
 		}
 		if (arg.startsWith("--")) {
@@ -199,6 +220,7 @@ const COMMAND_FLAG_KEYS = {
 		"waitTimeout",
 		"startupTimeout",
 		"background",
+		"label",
 	],
 	status: ["agentRef"],
 	cancel: ["agentRef"],
@@ -394,6 +416,49 @@ export function validateThinking(thinking, family = "pi") {
 		);
 	}
 	return thinking;
+}
+
+/**
+ * Same string as `TEAM_CLUSTER_LABEL` in policy-core.ts, kept as a LOCAL
+ * literal rather than an import: `run` needs it to validate an already-parsed
+ * argv, which is pure and must stay usable from `--help`/read commands with no
+ * policy-core dependency at all (installer-contract.test.mjs proves those
+ * still work when the core is not even shipped alongside this file). `main()`
+ * asserts the two spellings match wherever it DOES load the core, below, so a
+ * drift is a loud CI failure rather than a silent divergence between the two
+ * checks a Lead's create_agent goes through.
+ */
+export const TEAM_CLUSTER_LABEL = "team.cluster";
+
+/**
+ * Parse repeated `--label key=value` flags (as accumulated by parseArgs) into
+ * `{ key, value }` pairs. Fail-closed: a flag with no value, a value missing
+ * "=", or a key repeated across two `--label` flags is a config error that
+ * must not silently drop or overwrite a label on the agent about to be
+ * created on a REMOTE host — there is no create_agent argument guard out
+ * there to catch it afterwards.
+ */
+export function parseRunLabels(raw) {
+	const list = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+	const seen = new Set();
+	return list.map((entry) => {
+		if (typeof entry !== "string" || entry.trim() === "") {
+			throw usageError(
+				`--label requires a value in the form <key>=<value> (got ${JSON.stringify(entry)})`,
+			);
+		}
+		const eq = entry.indexOf("=");
+		if (eq <= 0) {
+			throw usageError(`--label must be <key>=<value> (got "${entry}")`);
+		}
+		const key = entry.slice(0, eq).trim();
+		const value = entry.slice(eq + 1);
+		if (seen.has(key)) {
+			throw usageError(`--label "${key}" was passed more than once`);
+		}
+		seen.add(key);
+		return { key, value };
+	});
 }
 
 /** Max prompt length for a single argv element (Windows CreateProcess limit). */
@@ -636,6 +701,20 @@ export function buildArgv(command, opts, endpoint) {
 					"run requires --workspace <id> — the remote workspace id from `workspaces`/`workspace-create` (a remote agent without a workspace would run in the controller's cwd)",
 				);
 			}
+			// §PR-G follow-up: no code path ever stamped team.cluster at creation
+			// time, so a remotely-created seat fell back to workspaceId/cwd for its
+			// cluster — wrong the moment two projects share a host. main() fills
+			// this in automatically from this seat's own cluster (selfCluster())
+			// before calling buildArgv; this check is the fail-closed backstop for
+			// a caller that bypasses main() (a direct buildArgv call, or a future
+			// auto-fill that could not resolve one), symmetric with the --mode
+			// refusal above.
+			const labels = parseRunLabels(opts.label);
+			if (!labels.some((entry) => entry.key === TEAM_CLUSTER_LABEL)) {
+				throw usageError(
+					`run requires a "${TEAM_CLUSTER_LABEL}" label — pass --label ${TEAM_CLUSTER_LABEL}=<value> (this seat's own cluster). Every cluster-scoped rule (SUPERVISOR_DECISION, team_chat fan-out, the scope-lease board) reads it from the created agent's state; without it the new seat is orphaned from its own Lead's cluster the moment workspaceId/cwd diverge (e.g. a reviewer worktree).`,
+				);
+			}
 			const prompt = readPrompt(opts);
 			const argv = [
 				"run",
@@ -651,6 +730,9 @@ export function buildArgv(command, opts, endpoint) {
 			}
 			if (typeof opts.title === "string" && opts.title.trim() !== "") {
 				argv.push("--title", opts.title.trim());
+			}
+			for (const { key, value } of labels) {
+				argv.push("--label", `${key}=${value}`);
 			}
 			const waitTimeout =
 				typeof opts.waitTimeout === "string" && opts.waitTimeout.trim() !== "";
@@ -820,8 +902,10 @@ Commands:
   agents           --host-id <id> [--all]
   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
                    --thinking <level> --workspace <wks-id> [--title <t>]
-                   [--prompt <text> | --brief <file>] [--wait-timeout <dur>]
-                   [--startup-timeout <dur>]
+                   [--label <key>=<value> ...] [--prompt <text> | --brief <file>]
+                   [--wait-timeout <dur>] [--startup-timeout <dur>]
+                   a team.cluster label is required; filled in automatically
+                   from this seat's own cluster when --label does not set one
   status           --agent-ref <host-id>/<agent-id>
   cancel           --agent-ref <host-id>/<agent-id>
   archive          --agent-ref <host-id>/<agent-id>
@@ -855,7 +939,7 @@ function basePayload(command, hostInfo) {
 	return payload;
 }
 
-function main() {
+async function main() {
 	let parsed;
 	try {
 		parsed = parseArgs(process.argv.slice(2));
@@ -898,6 +982,56 @@ function main() {
 			},
 			1,
 		);
+	}
+
+	// A run's team.cluster label is filled in HERE, not inside buildArgv: the
+	// value comes from this seat's own selfCluster() (policy-core), and
+	// buildArgv stays a pure function testable with plain literal opts, no
+	// policy-core dependency, so --help and every other command keep working in
+	// a layout where the core is not even shipped alongside this file (see
+	// installer-contract.test.mjs's flat-copy case). Loaded lazily and only for
+	// `run`, for the same reason.
+	if (command === "run") {
+		const existingLabels = Array.isArray(parsed.label)
+			? parsed.label
+			: parsed.label !== undefined
+				? [parsed.label]
+				: [];
+		const hasOwnClusterLabel = existingLabels.some((entry) => {
+			if (typeof entry !== "string") return false;
+			const eq = entry.indexOf("=");
+			return eq > 0 && entry.slice(0, eq).trim() === TEAM_CLUSTER_LABEL;
+		});
+		if (!hasOwnClusterLabel) {
+			// Import failure is soft: the core may not be shipped alongside this
+			// file in every layout, and a run that cannot auto-fill still gets
+			// buildArgv's own requirement below — one clear refusal naming
+			// --label, not a module-resolution error that says nothing about the
+			// fix.
+			let core = null;
+			try {
+				core = await importPolicyCore();
+			} catch {
+				core = null;
+			}
+			if (core) {
+				if (core.TEAM_CLUSTER_LABEL !== TEAM_CLUSTER_LABEL) {
+					// NOT caught below on purpose: two spellings of the same label
+					// silently splitting one axis into two is worse than a crashed
+					// run, and this is a packaging bug, not a user mistake.
+					throw new Error(
+						`remote-paseo.mjs's TEAM_CLUSTER_LABEL ("${TEAM_CLUSTER_LABEL}") has drifted from policy-core's ("${core.TEAM_CLUSTER_LABEL}")`,
+					);
+				}
+				let own = null;
+				try {
+					own = core.selfCluster();
+				} catch {
+					own = null;
+				}
+				if (own) parsed.label = [...existingLabels, `${TEAM_CLUSTER_LABEL}=${own}`];
+			}
+		}
 	}
 
 	let cluster;
@@ -1107,9 +1241,12 @@ function main() {
 }
 
 if (isMainModule()) {
-	try {
-		main();
-	} catch (error) {
+	// main() is async (the run command's cluster-label auto-fill loads
+	// policy-core lazily), so a synchronous try/catch around a bare call would
+	// no longer see errors thrown after the first await — including emit()'s
+	// own EmitExit, once a run reaches that point. Every throw, before or after
+	// an await, now surfaces as a rejection of the promise main() returns.
+	main().catch((error) => {
 		if (!(error instanceof EmitExit)) throw error;
-	}
+	});
 }

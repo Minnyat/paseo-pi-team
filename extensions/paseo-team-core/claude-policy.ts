@@ -28,6 +28,7 @@ import {
 	ALL_PASEO_TOOLS,
 	callsAgentBrowserCli,
 	callsPaseoCli,
+	clusterLabelBlockReason,
 	coordinationCliBlockReason,
 	leaseBlockReason,
 	sendAgentPromptBlockReason,
@@ -275,6 +276,18 @@ export function claudeToolBlockReason(
 			return role === "supervisor"
 				? `Supervisor may only call monitoring tools through MCP (${SUPERVISOR_ALLOWED_MCP_TARGETS.join(", ")}) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`
 				: `"${target}" is not in the ${role} MCP allowlist (discovery, workspace, monitoring, orchestration, permissions).`;
+		}
+		if (matchesPaseoToolName(target, ["create_agent"]) && (role === "lead" || role === "supervisor")) {
+			// Same cluster check the Pi adapter runs through mcpBlockReason, in the
+			// same order (before the supervisor-specific argument gate below): a
+			// call blocked on one runtime must be blocked on the other, or a
+			// Claude-hosted seat is the quiet way around it.
+			const clusterBlock = clusterLabelBlockReason({
+				role,
+				args: input.toolInput,
+				cluster: input.cluster,
+			});
+			if (clusterBlock) return clusterBlock;
 		}
 		if (role === "supervisor" && matchesPaseoToolName(target, ["create_agent"])) {
 			return supervisorCreateAgentArgsBlockReason(input.toolInput, {

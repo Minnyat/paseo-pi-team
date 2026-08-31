@@ -176,6 +176,12 @@ for (const installer of ["install.sh", "install.ps1"]) {
     "team-chat.mjs",
     "team-lease.mjs",
     "team-fork.mjs",
+    // remote-paseo.mjs joined this list when its `run` command started
+    // resolving policy-core (§PR-G, cluster-label auto-fill) — its own
+    // dependencies travel with it, same reasoning as every script above.
+    "remote-paseo.mjs",
+    "model-routing.mjs",
+    "reliability.mjs",
   ]) {
     cpSync(join(source, file), join(scriptsDir, file));
   }
@@ -246,6 +252,46 @@ for (const installer of ["install.sh", "install.ps1"]) {
     }
     assert.match(stdout, /"code":"USAGE"/, `${script} must load from the installed layout`);
     assert.doesNotMatch(stdout, /ERR_MODULE_NOT_FOUND/, `${script} could not resolve the policy core`);
+  }
+
+  // remote-paseo.mjs's `run` command lazily resolves policy-core (for the
+  // cluster-label auto-fill) ONLY at runtime, ONLY for `run` — the exact shape
+  // of bug PR-C shipped once already: an import path that is right in a
+  // checkout and wrong in an installed tree fails at IMPORT time, and the
+  // caller sees it as something unrelated (there, an unreadable lease ledger;
+  // here it would be every remote `run` refusing with a bare team.cluster
+  // message even though the Lead's own cluster resolves fine). `--help` alone
+  // would not exercise this path at all — it returns before `run` is even
+  // parsed — so this drives `run` specifically, in the REAL installed layout
+  // (paseo-team-scripts/ + paseo-team-core/ siblings), unlike the flat-copy
+  // `--help` check earlier in this file, which ships remote-paseo.mjs with NO
+  // policy core alongside it at all and must keep working for exactly that
+  // reason.
+  {
+    let runOutput = "";
+    try {
+      runOutput = execFileSync(process.execPath, [join(scriptsDir, "remote-paseo.mjs"), "run"], {
+        cwd: unrelatedCwd,
+        env: hookEnv,
+        encoding: "utf8",
+      });
+    } catch (error) {
+      // remote-paseo.mjs exits non-zero on every error path; its JSON envelope
+      // is still on stdout.
+      runOutput = error.stdout ?? "";
+    }
+    runOutput = runOutput.trim();
+    const parsed = JSON.parse(runOutput);
+    assert.equal(parsed.ok, false, "run with no other args cannot succeed");
+    assert.ok(
+      typeof parsed.code === "string" && parsed.code.length > 0,
+      "a clean structured error, not a crash",
+    );
+    assert.doesNotMatch(
+      runOutput,
+      /ERR_MODULE_NOT_FOUND/,
+      "remote-paseo.mjs could not resolve the policy core for the cluster-label auto-fill",
+    );
   }
 }
 

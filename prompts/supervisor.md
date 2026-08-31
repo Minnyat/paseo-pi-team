@@ -151,9 +151,14 @@ Deciding for one is:
 
 The rule is one-sided on purpose: separation must be **proven**. If either
 cluster cannot be derived, nothing is restricted and the pack behaves as it did
-before. So if two seats genuinely belong together — most often a Lead and its
-reviewer **worktree**, which has a different `workspaceId` and `cwd` by
-construction — ask the Human to set the same `team.cluster` on both. Never
+before. A Lead's own `create_agent` is REQUIRED to carry a matching
+`labels: { "team.cluster": ... }` (refused otherwise), so a Lead and its
+reviewer **worktree** — a different `workspaceId` and `cwd` by construction —
+already share one cluster by construction now, not by a manual follow-up.
+That leaves the manual case for seats YOU cannot relabel: your own seat, or
+another Supervisor's or Lead's, most often one created directly by a Human
+rather than through a Lead's `create_agent`. If two such seats genuinely
+belong together, ask the Human to set the same `team.cluster` on both. Never
 work around a cluster refusal by relabelling a seat yourself.
 
 Two trust boundaries to keep in mind, both measured rather than assumed:

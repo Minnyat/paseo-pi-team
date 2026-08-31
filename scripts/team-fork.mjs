@@ -38,6 +38,7 @@ import { importPolicyCore, isEntrypoint, resolvePaseoExec } from "./lib-common.m
 // checkout and installed layouts differ by one directory level, and a static
 // specifier can only be right in one of them.
 const {
+	agentCluster,
 	forkModelBlockReason,
 	forkRequestBlockReason,
 	forkSeedPrompt,
@@ -215,6 +216,15 @@ export async function forkAgent(input = {}, options = {}) {
 	const labels = { ...(input.labels && typeof input.labels === "object" ? input.labels : {}) };
 	labels["team.fork-of"] = agentId;
 	labels["team.fork-reason"] = String(input.reason);
+	// A fork is a continuation of the SOURCE seat's identity (§2 rule 5:
+	// "fork inherits belief, not authority" — but cluster membership is
+	// belief, not authority). Derived from the source's own state, the same
+	// way `team.fork-of`/`team.fork-reason` are: not left to whatever the
+	// caller happened to pass. Omitted when the source's cluster cannot be
+	// derived, matching LEASE_V1's own "absent field, not a lying one" rule —
+	// an empty CLUSTER label would be worse than none.
+	const sourceCluster = agentCluster(state);
+	if (sourceCluster) labels["team.cluster"] = sourceCluster;
 	const cwd = typeof input.cwd === "string" && input.cwd.trim() !== "" ? input.cwd : state.cwd;
 	if (!cwd) {
 		// Measured 2026-08-28: without --cwd the CLI notices the session belongs

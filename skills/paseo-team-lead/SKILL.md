@@ -186,11 +186,23 @@ This is the exact failure mode the cluster config exists to prevent.
    convention `title: "review:<TASK_ID>"` (or a `worktreeSlug` containing
    `review`) with `isolation: "worktree"` — the policy extension blocks a
    review-marked workspace that requests local isolation.
-9. Call `create_agent` with the exact provider string and the runtime settings
-   under `settings`: `{ thinkingOptionId, modeId }`. `modeId` is REQUIRED on
+9. Call `create_agent` with the exact provider string, the runtime settings
+   under `settings`: `{ thinkingOptionId, modeId }`, **and**
+   `labels: { "team.cluster": "<your own cluster>" }`. `modeId` is REQUIRED on
    every `claude-*` route and goes inside `settings` — a top-level `mode` is
    ignored (see "Every `claude-*` agent you create needs `settings.modeId`").
    NEVER omit the model to inherit a daemon default.
+   The `team.cluster` label is REQUIRED and is checked against YOUR OWN
+   cluster: omit it and `create_agent` is refused with
+   `Refusing create_agent: labels["team.cluster"] is required and must be
+   "<value>"` — the message names the exact value to pass. Get your own value
+   from `pteam env list` / `PASEO_TEAM_CLUSTER`, or read it off any Peer you
+   already created. Without this label a reviewer worktree Peer (different
+   `workspaceId` AND `cwd` from you by construction) reads as a FOREIGN
+   cluster to every cluster-scoped rule: `SUPERVISOR_DECISION` verdicts,
+   `team_chat` recipient resolution, the scope-lease board. A label naming a
+   DIFFERENT cluster than your own is refused too — that would be stamping a
+   new seat into another project's authority, not a typo to silently correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
     `runtimeInfo.thinkingOptionId` until startup identity is populated. Missing
     identity during the bounded startup window is
@@ -243,6 +255,14 @@ local one. In the commands below, `<id>` is the HOST_ID from
    `--wait-timeout <dur>` to wait for completion):
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
    The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
+   `run` requires a `team.cluster` label the same way the local `create_agent`
+   does. You do not need to pass `--label team.cluster=<value>` yourself in the
+   common case — the wrapper fills it in automatically from your own cluster
+   (`selfCluster()`) when `--label` does not already set one. Pass it
+   explicitly only when you want the remote seat in a DIFFERENT cluster than
+   your own (rare, and worth a `ROUTING_DECISION` note about why); a run that
+   still has no value after the auto-fill (your own cluster is itself
+   undetermined) is refused with a message naming `--label team.cluster=`.
 8. Verify the OBSERVED runtime identity on the remote daemon. The wrapper's
    `run` command performs a bounded startup poll; use `--startup-timeout <dur>`
    when the host needs a longer (still bounded) initialization window:
@@ -348,6 +368,7 @@ TASK_ID:
 DISPOSITION:
 MODEL_CLASS:
 HOST_ID:
+CLUSTER: <team.cluster value stamped on the new agent>
 MECHANISM: mcp | remote-cli        # local → mcp; remote → remote-paseo.mjs
 PASEO_PROVIDER:
 REQUESTED_MODEL:
@@ -450,9 +471,15 @@ this is gated on `PASEO_TEAM_TOPOLOGY`, for the same reason
 `PROMPT_TARGET_IS_PEER` is not — it asks a question prior to jurisdiction.
 
 Separation must be **proven**: if either cluster cannot be derived, nothing is
-restricted. Your own subagents are always reachable, so a reviewer worktree —
-which derives a different cluster by construction — still works. If two seats
-genuinely belong together, the Human sets the same `team.cluster` on both.
+restricted. Your own subagents are always reachable, and a reviewer worktree —
+which derives a different `workspaceId`/`cwd` by construction — is no
+exception: your own `create_agent` is REQUIRED to carry a matching
+`labels: { "team.cluster": ... }` (step 9 of LOCAL_CREATE_CYCLE / step 7 of
+REMOTE_CREATE_CYCLE above), so it shares your cluster by construction, not by
+a follow-up step. That leaves the manual case for a seat you did not create —
+most often another Supervisor, or a seat a Human created directly: if two such
+seats genuinely belong together, the Human sets the same `team.cluster` on
+both.
 
 One thing is NOT topology-gated: the verdict on a supervisor message. Whenever
 your turn opens with a `SUPERVISOR_OBSERVATION` / `SUPERVISOR_DECISION`, the
@@ -567,6 +594,9 @@ The fork cycle, in order:
    ```
    This copies the transcript (no LLM turn) and imports it. It returns the new
    `agentId`, a `seedPrompt`, and the `update_agent` call you must make next.
+   `team.cluster` on the fork is derived from the SOURCE agent's own cluster
+   (not from `labels` you pass) — a fork is a continuation of the source
+   seat, so its cluster travels with it the same way `team.fork-of` does.
 3. **Route the model** with the returned `update_agent` args. The CLI has no
    `--model`; only MCP moves it.
 4. ```text

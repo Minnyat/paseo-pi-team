@@ -723,6 +723,68 @@ domain: `create_agent` tạo successor Lead làm subagent của chính nó, nên
 trong cụm theo cấu tạo. Nếu sau này Supervisor được tạo agent ở workspace khác
 thì phải gate thêm ở đây.
 
+#### PR-G follow-up — đường TẠO cũng bị siết, không chỉ đường ĐỌC — ✅ ĐÃ CHỐT
+
+**Khoảng trống còn lại sau bản giao đầu tiên.** Mọi hàm ở trên (`agentCluster`,
+`selfCluster`, `clustersSeparate`, `supervisorTurnVerdict`, `team_chat`
+fan-out, lease) đều là phía ĐỌC: chúng suy cluster từ những gì Paseo đã ghi.
+Không có đường code nào ĐÓNG DẤU `team.cluster` lúc tạo agent — routing cycle
+của Lead (`skills/paseo-team-lead/SKILL.md` bước 9) chỉ truyền
+`settings: { thinkingOptionId, modeId }`, chưa bao giờ truyền `labels`. Hệ quả
+đúng như dòng đã gỡ khỏi bảng trên: mọi seat mới (writer, reviewer worktree
+trong worktree riêng, Supervisor do Human tạo ở workspace khác) suy ra cluster
+KHÁC Lead của nó, nên `supervisorTurnVerdict` từ chối mọi `SUPERVISOR_DECISION`
+bằng `CLUSTER_MISMATCH`, `team_chat` chỉ đích danh trả `RECIPIENT_OUT_OF_CLUSTER`,
+fan-out `domain:` rụng seat — đúng cái mà tầng ĐỌC đã dựng ra để chặn, nhưng
+giờ tự bắn vào chính seat hợp lệ vì không ai đóng dấu nó.
+
+**Quyết định.** Thêm `clusterLabelBlockReason({ role, args, cluster })` ở
+`policy-core.ts`, áp cho `create_agent` của **cả** lead và nhánh
+lead-recovery của supervisor:
+
+- Thiếu `labels["team.cluster"]` → từ chối, nêu đúng giá trị cần điền (cluster
+  của chính người tạo).
+- Có nhưng khác cluster của người tạo (so qua `normalizeCluster`, không so
+  chuỗi thô) → từ chối — một Lead tự đóng dấu agent mới vào cluster dự án khác
+  là leo thang thẩm quyền, vì Peer của agent đó sẽ hiện trong cluster đó.
+- Cluster của chính người tạo không suy được (null) → KHÔNG gate — không thể
+  đòi một giá trị mà chính người tạo cũng không biết; xem `selfCluster`.
+- Chỉ siết đường TẠO. Một agent tạo TRƯỚC gate này không có label, vẫn đọc
+  đúng qua `agentCluster` (`workspaceId`/`cwd`) như cũ — không hồi tố.
+
+Nối vào cả hai runtime: `mcpBlockReason` (core, dùng bởi Pi) và
+`claudeToolBlockReason` (Claude) đều gọi `clusterLabelBlockReason` ở đúng
+nhánh `create_agent`, theo cùng thứ tự (cluster trước, gate riêng của
+supervisor sau) — một lời gọi bị chặn ở runtime này bị chặn ở runtime kia.
+
+`scripts/remote-paseo.mjs run` (đường tạo agent trên host khác — trước đó
+KHÔNG có bất kỳ hỗ trợ `--label` nào) giờ nhận `--label <key>=<value>` lặp
+được, và **tự chèn** `team.cluster=<selfCluster của người gọi>` khi caller
+chưa tự khai; nếu vẫn không có (cluster của chính seat không suy được) thì
+`run` bị từ chối, đối xứng với cách wrapper đã từ chối route `claude-*` thiếu
+`--mode`. `scripts/team-fork.mjs` đóng dấu `team.cluster` của agent fork từ
+cluster của agent NGUỒN (giống hệt cách `team.fork-of`/`team.fork-reason`
+được đóng dấu — một sự thật suy ra được, không phải nhãn caller tự khai);
+thiếu thì bỏ qua nhãn chứ không ghi giá trị sai (giống quy ước "field vắng
+mặt, không phải field nói dối" của `LEASE_V1`).
+
+**Vì sao đây KHÔNG còn là việc tay.** `prompts/lead.md` và
+`prompts/supervisor.md` trước đây bảo "nhờ Human set `team.cluster` cho cả
+hai" ngay cả với trường hợp Lead tự tạo reviewer worktree của chính nó — nhưng
+từ giờ `create_agent` REFUSE nếu thiếu đúng nhãn đó, nên seat do Lead tạo
+luôn cùng cluster với Lead theo cấu tạo, không cần bước tay nào nữa. Hướng dẫn
+Human chỉ còn đúng cho seat mà Lead/Supervisor KHÔNG tự tạo được (một
+Supervisor khác, hoặc bất kỳ seat nào Human tạo trực tiếp ngoài `create_agent`
+của pack) — policy không sửa được nhãn của một ghế nó không tạo ra.
+
+Test: case mới trong `test/cluster.test.mts`, `test/policy.test.mts` (wiring
+Pi), `test/claude-policy.test.mjs` (wiring Claude, đối xứng),
+`test/remote-paseo.test.mjs` (passthrough/auto-fill/refuse `--label`),
+`test/team-fork.test.mjs` (cluster kế thừa từ nguồn), và
+`test/installer-contract.test.mjs` chạy `remote-paseo.mjs run` thật trong
+layout ĐÃ CÀI — đúng khuôn OCR-007/PR-C: một luật mà adapter/script không gọi
+được trong bản cài là luật không tồn tại trên máy người dùng.
+
 ---
 
 ---
@@ -800,7 +862,6 @@ thì phải gate thêm ở đây.
 | Chat retention / hiệu năng room hàng nghìn message | PR-B (nhẹ) | Dùng cursor `--since`, đo lúc làm |
 | Ngưỡng số agent làm wake/chat chậm | PR-B (nhẹ) | Đo lúc làm |
 | Chat cross-host: room per-daemon hay đồng bộ | PR-F | Đã khoanh ra ngoài. Nếu per-daemon thì cụm nhiều host có hai sổ lease — phải giải trước khi bật multi-lead cross-host |
-| Worktree reviewer phải khai `team.cluster` thủ công | PR-G (nhẹ) | Suy ra tự động không được: worktree khác cả `workspaceId` lẫn `cwd`. Nếu Paseo lộ ra repo gốc của worktree thì tự suy được |
 | Mention có đánh thức agent ở daemon khác không | PR-F | Chưa đo; khả năng cao là **không** (mention là chuyện của daemon giữ room) |
 | Fork một session **rất lớn** (vài MB) — thời gian copy + hành vi compaction thực tế | PR-E (nhẹ) | Cơ chế đã rõ (§1.2, §1.12); đã fork thật 486 entry ~tức thời, chưa đo mốc vài MB |
 
