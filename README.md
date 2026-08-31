@@ -342,7 +342,7 @@ scoped without relabelling anything:
 
 | Order | Source | Why |
 |---|---|---|
-| 1 | `team.cluster` label / `PASEO_TEAM_CLUSTER` | a reviewer workspace is a linked **worktree** — different `workspaceId` *and* different cwd from its Lead, so only a declared label can keep those two seats together |
+| 1 | `team.cluster` label / `PASEO_TEAM_CLUSTER` | a reviewer workspace is a linked **worktree** — different `workspaceId` *and* different cwd from its Lead, so only a declared label can keep those two seats together. Filled in **automatically** the moment 1 exists (see below) |
 | 2 | `workspaceId` | Paseo's own boundary, when there is one |
 | 3 | `cwd` | what a plain `paseo run` has instead |
 | 4 | *(none)* | unknown |
@@ -353,6 +353,24 @@ separation has to be proven: an underivable cluster on either side leaves
 today's behaviour exactly as it was. This is the same instinct as the
 `PASEO_TEAM_TOPOLOGY` typo rule, pointed the other way: a wrong guess must cost
 a blocked call with a reason, never governance that quietly switched itself off.
+
+**Tier 1 is stamped at creation, not left to a follow-up step.** Nothing wrote
+`team.cluster` when a seat was created — the Lead's routing cycle passed only
+`settings`, never `labels` — so every seat fell back to tier 2/3, which is
+exactly wrong for the seat that needs tier 1 most: a reviewer worktree, whose
+`workspaceId` *and* `cwd` differ from its Lead's by construction. A Lead's own
+`create_agent` (and a Supervisor's gated lead-recovery `create_agent`) is now
+REQUIRED to carry `labels: { "team.cluster": "<the creator's own cluster>" }` —
+missing it refuses with the exact value to fill in, and a value naming a
+*different* cluster than the creator's own is refused too (stamping a new seat
+into another project's cluster is an escalation, not a typo). The gate only
+disables when the creator's own cluster cannot be determined at all — it never
+demands a value the creator itself does not know. `remote-paseo.mjs run` fills
+the label in automatically from the caller's own cluster when `--label` does
+not already set one, and refuses the run if it still has none; `team_fork`
+derives it from the SOURCE agent's own cluster, the same way `team.fork-of` is.
+This is a create-time gate only — an agent created before it shipped carries no
+label and is still read back through tier 2/3, exactly as before.
 
 What the axis gates — **authority, never observation**. A Supervisor may watch
 several workspaces; that is its job. It may not *decide* for one it does not

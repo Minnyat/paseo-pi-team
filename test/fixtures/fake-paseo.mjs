@@ -42,6 +42,7 @@ if (argv[0] === "run") {
 		console.log(JSON.stringify({ status: "running" }));
 		process.exit(0);
 	}
+	const labels = argv.flatMap((value, i) => (argv[i - 1] === "--label" ? [value] : []));
 	console.log(
 		JSON.stringify({
 			agentId: "9f8e7d6c-0000-0000-0000-000000000000",
@@ -51,6 +52,7 @@ if (argv[0] === "run") {
 			title: argv.includes("--title")
 				? argv[argv.indexOf("--title") + 1]
 				: null,
+			labels,
 		}),
 	);
 	process.exit(0);

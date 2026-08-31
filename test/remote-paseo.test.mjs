@@ -581,6 +581,7 @@ const EP = "https://app.paseo.sh/#offer=tok";
 			thinking: "medium",
 			workspace: "wks-1",
 			title: "t",
+			label: ["team.cluster=d:/code/shop"],
 			prompt: "fix it now",
 		},
 		EP,
@@ -599,12 +600,67 @@ const EP = "https://app.paseo.sh/#offer=tok";
 			"wks-1",
 			"--title",
 			"t",
+			"--label",
+			"team.cluster=d:/code/shop",
 			"-d",
 			"--json",
 			"fix it now",
 		],
 		t,
 	);
+}
+
+{
+	const t = "buildArgv: run passes through every --label, in order, alongside the required one";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "pi-peer/testprov/model-b",
+			thinking: "medium",
+			workspace: "wks-1",
+			label: ["team.domain=backend", "team.cluster=d:/code/shop"],
+			prompt: "x",
+		},
+		EP,
+	);
+	const labelFlags = argv.flatMap((value, i) => (argv[i - 1] === "--label" ? [value] : []));
+	assert.deepEqual(labelFlags, ["team.domain=backend", "team.cluster=d:/code/shop"], t);
+}
+
+{
+	const t = "buildArgv: run without a team.cluster label is refused";
+	const error = expectRemoteError("USAGE", () =>
+		buildArgv(
+			"run",
+			{
+				provider: "pi-peer/testprov/model-b",
+				thinking: "medium",
+				workspace: "wks-1",
+				prompt: "x",
+			},
+			EP,
+		),
+	);
+	assert.match(error.message, /team\.cluster/, t);
+	assert.match(error.message, /--label/, t);
+}
+
+{
+	const t = "buildArgv: run refuses a repeated --label key fail-closed, never silently overwrites";
+	const error = expectRemoteError("USAGE", () =>
+		buildArgv(
+			"run",
+			{
+				provider: "pi-peer/testprov/model-b",
+				thinking: "medium",
+				workspace: "wks-1",
+				label: ["team.cluster=d:/code/shop", "team.cluster=d:/code/blog"],
+				prompt: "x",
+			},
+			EP,
+		),
+	);
+	assert.match(error.message, /more than once/, t);
 }
 
 {
@@ -615,6 +671,7 @@ const EP = "https://app.paseo.sh/#offer=tok";
 			provider: "pi-peer/testprov/model-b",
 			thinking: "medium",
 			workspace: "wks-1",
+			label: ["team.cluster=d:/code/shop"],
 			prompt: "x",
 			waitTimeout: "2m",
 		},
@@ -648,6 +705,7 @@ const EP = "https://app.paseo.sh/#offer=tok";
 				provider: "pi-peer/testprov/model-b",
 				thinking: "medium",
 				workspace: "wks-1",
+				label: ["team.cluster=d:/code/shop"],
 				prompt: "x",
 				waitTimeout: "2m",
 				background: true,
@@ -880,6 +938,54 @@ assert.deepEqual(
 	assert.equal(data.agentId, "9f8e7d6c-0000-0000-0000-000000000000", t);
 	assert.equal(data.status, "running", t);
 	assert.equal(r.json.startupIdentity.state, "ready", t);
+}
+
+{
+	// §PR-G follow-up: run with no --label at all still auto-fills team.cluster
+	// from this seat's own selfCluster() (here, the child process's own cwd —
+	// there is no PASEO_AGENT_ID/state file in this harness).
+	const t = "e2e: run auto-fills team.cluster when no --label sets one";
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1", "--prompt", "auto-fill",
+	], {
+		extraEnv: {
+			FAKE_PASEO_RUNTIME_MODEL: "testprov/model-b",
+			FAKE_PASEO_RUNTIME_THINKING: "medium",
+			FAKE_PASEO_NEST_RUNTIME: "1",
+		},
+	});
+	assert.equal(r.code, 0, `${t} (stderr: ${r.stderr})`);
+	assert.equal(
+		r.json.data.labels.filter((l) => l.startsWith("team.cluster=")).length,
+		1,
+		t,
+	);
+}
+
+{
+	// An explicit --label team.cluster=... must survive untouched — auto-fill
+	// only fires when the caller did not already declare one.
+	const t = "e2e: an explicit --label team.cluster is not overridden by auto-fill";
+	const r = runWrapper([
+		"run", "--host-id", "mac-review", "--provider", "pi-peer/testprov/model-b",
+		"--thinking", "medium", "--workspace", "wks-1",
+		"--label", "team.cluster=explicit-value",
+		"--label", "team.domain=backend",
+		"--prompt", "explicit-label",
+	], {
+		extraEnv: {
+			FAKE_PASEO_RUNTIME_MODEL: "testprov/model-b",
+			FAKE_PASEO_RUNTIME_THINKING: "medium",
+			FAKE_PASEO_NEST_RUNTIME: "1",
+		},
+	});
+	assert.equal(r.code, 0, `${t} (stderr: ${r.stderr})`);
+	assert.deepEqual(
+		r.json.data.labels,
+		["team.cluster=explicit-value", "team.domain=backend"],
+		t,
+	);
 }
 
 {
@@ -1213,6 +1319,7 @@ assert.deepEqual(
 			mode: "default",
 			workspace: "wks-1",
 			title: "t",
+			label: ["team.cluster=d:/code/shop"],
 			prompt: "x",
 		},
 		EP,
@@ -1233,6 +1340,8 @@ assert.deepEqual(
 			"wks-1",
 			"--title",
 			"t",
+			"--label",
+			"team.cluster=d:/code/shop",
 			"-d",
 			"--json",
 			"x",
@@ -1267,6 +1376,7 @@ assert.deepEqual(
 			provider: "pi-peer/testprov/model-b",
 			thinking: "medium",
 			workspace: "wks-1",
+			label: ["team.cluster=d:/code/shop"],
 			prompt: "x",
 		},
 		EP,

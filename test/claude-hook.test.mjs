@@ -345,7 +345,12 @@ rmSync(home, { recursive: true, force: true });
 // HOOK does.
 {
 	const LEAD = "aaaaaaaa-1111-4111-8111-111111111111";
-	const leadEnv = { ...baseEnv, PASEO_PI_ROLE: "lead", PASEO_AGENT_ID: LEAD };
+	const CLUSTER = "claude-hook-lease-stub";
+	// selfCluster() falls back to cwd when LEAD has no state file, so without a
+	// declared cluster this would resolve to the checkout's own path — a real,
+	// non-null value that would trip the cluster-label gate before the lease
+	// check under test ever ran.
+	const leadEnv = { ...baseEnv, PASEO_PI_ROLE: "lead", PASEO_AGENT_ID: LEAD, PASEO_TEAM_CLUSTER: CLUSTER };
 	const writerBrief = [
 		"PASEO_TEAM_TASK_V3_BEGIN",
 		"TASK_ID: T-1",
@@ -358,7 +363,7 @@ rmSync(home, { recursive: true, force: true });
 	const createWriter = {
 		session_id: "lease-1",
 		tool_name: "mcp__paseo__create_agent",
-		tool_input: { initialPrompt: writerBrief },
+		tool_input: { initialPrompt: writerBrief, labels: { "team.cluster": CLUSTER } },
 	};
 
 	// No daemon here, so the ledger read fails — and the hook must turn that into
@@ -375,7 +380,13 @@ rmSync(home, { recursive: true, force: true });
 	assert.equal(
 		await handleEvent(
 			"pre-tool-use",
-			{ ...createWriter, tool_input: { initialPrompt: writerBrief.replace("MODE: write", "MODE: read-only") } },
+			{
+				...createWriter,
+				tool_input: {
+					initialPrompt: writerBrief.replace("MODE: write", "MODE: read-only"),
+					labels: { "team.cluster": CLUSTER },
+				},
+			},
 			leadEnv,
 		),
 		null,

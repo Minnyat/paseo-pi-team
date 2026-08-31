@@ -25,6 +25,7 @@ import {
 	agentCluster,
 	agentClustersById,
 	agentOwnership,
+	clusterLabelBlockReason,
 	clustersSeparate,
 	leaseConflicts,
 	leaseHolderFor,
@@ -618,6 +619,45 @@ test("nobody releases or renews another cluster's lease", () => {
 		NOW - 2000 + TTL,
 		"the expiry is still the one the original claim set",
 	);
+});
+
+// ---------------------------------------------------------------------------
+// No code path ever stamped team.cluster at creation time (§PR-G follow-up)
+// ---------------------------------------------------------------------------
+
+test("create_agent requires the label; reading an agent that predates the gate is untouched", () => {
+	// The create-time gate a Lead/Supervisor now runs into.
+	assert.match(
+		String(clusterLabelBlockReason({ role: "lead", args: { initialPrompt: "x" }, cluster: SHOP })),
+		/labels\["team\.cluster"\] is required and must be "d:\/code\/shop"/,
+	);
+	assert.equal(
+		clusterLabelBlockReason({
+			role: "lead",
+			args: { initialPrompt: "x", labels: { "team.cluster": "D:\\Code\\Shop" } },
+			cluster: SHOP,
+		}),
+		null,
+	);
+	// Migration: an agent CREATED BEFORE this gate shipped carries no
+	// team.cluster label. Its state file looks exactly like this — and
+	// agentCluster still resolves it through workspaceId/cwd, exactly as it did
+	// before the gate existed. The gate only narrows the CREATE path; it never
+	// touches how an existing agent's cluster is read back.
+	const preExisting = { labels: {}, workspaceId: "wks_shop", cwd: "D:/Code/elsewhere" };
+	assert.equal(agentCluster(preExisting), "wks_shop");
+	// A supervisorSeats/agentClustersById read over a mix of pre- and
+	// post-gate agents narrows on both alike — the label is only ever an
+	// INPUT to agentCluster, never a requirement of it.
+	assert.equal(
+		clustersSeparate(agentCluster(preExisting), agentCluster({ labels: { "team.cluster": "wks_shop" } })),
+		false,
+		"a pre-gate agent (derived via workspaceId) and a post-gate agent (labelled) in the same cluster are not separate",
+	);
+});
+
+test("the gate does not apply outside lead/supervisor create_agent", () => {
+	assert.equal(clusterLabelBlockReason({ role: "peer", args: {}, cluster: SHOP }), null);
 });
 
 test("leaseHolderFor with no cluster keeps the old, stricter answer", () => {
