@@ -6,8 +6,11 @@
  * replaced: status hardcoded "0.1.0" while package.json said "0.0.0").
  *
  * The latest release comes from `git ls-remote --tags`, not `npm view`,
- * because the repository is private: ls-remote rides on the machine's own
- * git credentials, while the npm registry knows nothing about this package.
+ * because this package is never published to the npm registry (package.json
+ * keeps `"private": true`): the registry knows nothing about it, while the
+ * GitHub tags are the only place a release number actually exists. The repo
+ * itself is public, so ls-remote needs no credentials — but it would work
+ * with them just the same, which is why nothing here depends on visibility.
  */
 
 import { execFile, spawnSync } from "node:child_process";

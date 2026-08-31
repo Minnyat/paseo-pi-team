@@ -19,9 +19,9 @@ Claude runtime: [`docs/claude-runtime.md`](docs/claude-runtime.md).
 
 ## Quick start
 
-Zero runtime dependencies, Node >= 22.18. The repository is private, so the
-machine needs GitHub git credentials for the fetch (an SSH key, or
-`gh auth login` if git uses the `gh` credential helper).
+Zero runtime dependencies, Node >= 22.18. The repository is public, so the
+fetch needs no GitHub credentials — but it is never published to the npm
+registry, so every install below names the GitHub repo rather than a package.
 
 ```bash
 # run it once straight from GitHub — nothing to clone, nothing installed
