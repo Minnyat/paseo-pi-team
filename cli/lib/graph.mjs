@@ -26,8 +26,11 @@ import { runPaseoJson, mapWithConcurrency, PaseoError } from "./paseo-bridge.mjs
 import * as cache from "./graph-cache.mjs";
 import { readAgentStates, isAgentId } from "./agent-state.mjs";
 import {
+	agentCluster,
+	clustersSeparate,
 	domainConflicts,
 	normalizeDomain,
+	TEAM_CLUSTER_LABEL,
 } from "../../extensions/paseo-team-core/policy-core.js";
 
 export const ROLES = Object.freeze(["supervisor", "lead", "peer"]);
@@ -275,6 +278,39 @@ export function describeJurisdiction(nodes = []) {
 	};
 }
 
+/**
+ * Supervisor/Lead pairs PROVEN to sit in different clusters.
+ *
+ * `supervisorTurnVerdict` (policy-core.ts) already refuses every
+ * SUPERVISOR_DECISION between a cluster-separate pair with CLUSTER_MISMATCH —
+ * and does so unconditionally, because a Supervisor a human created directly
+ * in the wrong workspace is not something the policy can fix; it did not
+ * create that seat. So the refusal is silent from the Lead's side until an
+ * operator sees it here, before it happens.
+ *
+ * Reuses `clustersSeparate` rather than a `!==` on `node.cluster`: separation
+ * must be PROVEN, and an unresolvable cluster on either side (null) must
+ * never be treated as "different" — a false warning teaches an operator to
+ * ignore the real ones. See policy-core.ts's own comment on the same
+ * predicate for why that asymmetry is deliberate.
+ */
+export function describeClusterMismatches(nodes = []) {
+	const supervisors = nodes.filter((node) => node.role === "supervisor");
+	const leads = nodes.filter((node) => node.role === "lead");
+	const mismatches = [];
+	for (const supervisor of supervisors) {
+		for (const lead of leads) {
+			if (!clustersSeparate(supervisor.cluster, lead.cluster)) continue;
+			mismatches.push({
+				supervisor: { id: supervisor.id, shortId: supervisor.shortId, cluster: supervisor.cluster },
+				lead: { id: lead.id, shortId: lead.shortId, cluster: lead.cluster },
+				detail: `Supervisor ${supervisor.shortId} (cluster "${supervisor.cluster}") and Lead ${lead.shortId} (cluster "${lead.cluster}") are in different workspaces. Every SUPERVISOR_DECISION this Supervisor sends to this Lead will be refused with CLUSTER_MISMATCH. Set the same ${TEAM_CLUSTER_LABEL} label (or PASEO_TEAM_CLUSTER env var) on both seats to fix it.`,
+			});
+		}
+	}
+	return mismatches;
+}
+
 export function buildGraph({ agents = [], parents = {}, states = {}, permits = [], messages = [], degraded = [], now = 0 } = {}) {
 	const rows = Array.isArray(agents) ? agents.filter((a) => a && typeof a.id === "string") : [];
 	const known = new Set(rows.map((a) => a.id));
@@ -343,6 +379,11 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// From Paseo's own agent state file. A node without one still renders;
 			// these are simply null, and the read fault is in degraded[].
 			domain: state?.domain ?? null,
+			// Which workspace this seat lives in (policy-core's `agentCluster`,
+			// not re-derived here — see the module comment on describeClusterMismatches
+			// for why). A node without a resolvable state file gets null, same as
+			// domain: an unproven cluster, not "no cluster".
+			cluster: agentCluster(state),
 			// A session fork keeps the source's whole transcript, so "who did this
 			// reasoning first" is a real question about the board and not a
 			// bookkeeping detail. The label is written by team-fork.mjs.
@@ -420,6 +461,7 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			byDomain,
 		},
 		jurisdiction: describeJurisdiction(nodes),
+		clusterMismatches: describeClusterMismatches(nodes),
 		nodes,
 		edges,
 		permits: normalizedPermits.map(({ ok, raw, ...rest }) => ({ ...rest, raw })),

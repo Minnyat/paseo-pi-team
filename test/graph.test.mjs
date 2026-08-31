@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildGraph, chatEdges, collectGraph, inferFamily, inferRole, inferRoleProvider, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
+import { buildGraph, chatEdges, collectGraph, describeClusterMismatches, inferFamily, inferRole, inferRoleProvider, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
 import * as cache from "../cli/lib/graph-cache.mjs";
 
 // --- role inference --------------------------------------------------------
@@ -554,6 +554,126 @@ function fakeRunner(overrides = {}) {
 	});
 	assert.equal(unlabelled.jurisdiction.unlabeled.length, 1);
 	assert.equal(unlabelled.jurisdiction.unlabeled[0].role, "lead");
+}
+
+// --- cluster diagnostic: the workspace axis, surfaced before it bites ------
+// `supervisorTurnVerdict` (policy-core.ts) already refuses every
+// SUPERVISOR_DECISION between a cluster-separate Supervisor/Lead pair with
+// CLUSTER_MISMATCH. Policy cannot fix a seat it did not create — a human
+// spinning up a Supervisor in the wrong workspace fails silently from the
+// Lead's side — so the graph must show the mismatch BEFORE it shows up as a
+// refused decision.
+{
+	// A11 — `node.cluster` follows agentCluster's own precedence: an explicit
+	// team.cluster label wins over workspaceId, which wins over cwd, and a
+	// missing state file resolves to null rather than crashing.
+	const graph = buildGraph({
+		agents: [
+			{ id: "labelled", shortId: "labelled", name: "labelled", provider: "pi-lead/o/m", status: "idle", cwd: "/w" },
+			{ id: "workspaced", shortId: "workspaced", name: "workspaced", provider: "pi-lead/o/m", status: "idle", cwd: "/w" },
+			{ id: "bare-cwd", shortId: "bare-cwd", name: "bare-cwd", provider: "pi-lead/o/m", status: "idle", cwd: "/w" },
+			{ id: "no-state", shortId: "no-state", name: "no-state", provider: "pi-lead/o/m", status: "idle", cwd: "/w" },
+		],
+		states: {
+			labelled: { agentId: "labelled", labels: { "team.cluster": "Shop" }, workspaceId: "ws-1", cwd: "/shop" },
+			workspaced: { agentId: "workspaced", workspaceId: "ws-2", cwd: "/blog" },
+			"bare-cwd": { agentId: "bare-cwd", cwd: "D:\\Code\\Shop" },
+		},
+		now: 0,
+	});
+	const by = Object.fromEntries(graph.nodes.map((n) => [n.id, n]));
+	assert.equal(by.labelled.cluster, "shop", "an explicit team.cluster label wins, and is case/slash normalized");
+	assert.equal(by.workspaced.cluster, "ws-2", "workspaceId is next when there is no label");
+	assert.equal(by["bare-cwd"].cluster, "d:/code/shop", "cwd is the last fallback, normalized the same way");
+	assert.equal(by["no-state"].cluster, null, "no state file means an unproven cluster, not a crash");
+}
+
+{
+	// A Supervisor and a Lead genuinely in different clusters: the board must
+	// name the exact consequence (CLUSTER_MISMATCH on every SUPERVISOR_DECISION)
+	// and the exact fix (team.cluster / PASEO_TEAM_CLUSTER on both seats).
+	const graph = buildGraph({
+		agents: [
+			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		],
+		states: {
+			sup: { agentId: "sup", labels: { "team.cluster": "shop" } },
+			lead: { agentId: "lead", labels: { "team.cluster": "blog" } },
+		},
+		now: 0,
+	});
+	assert.equal(graph.clusterMismatches.length, 1);
+	const mismatch = graph.clusterMismatches[0];
+	assert.equal(mismatch.supervisor.id, "sup");
+	assert.equal(mismatch.supervisor.cluster, "shop");
+	assert.equal(mismatch.lead.id, "lead");
+	assert.equal(mismatch.lead.cluster, "blog");
+	assert.match(mismatch.detail, /SUPERVISOR_DECISION/);
+	assert.match(mismatch.detail, /CLUSTER_MISMATCH/);
+	assert.match(mismatch.detail, /team\.cluster/);
+	assert.match(mismatch.detail, /PASEO_TEAM_CLUSTER/);
+}
+
+{
+	// An unprovable cluster on EITHER side must not warn: a false warning
+	// teaches an operator to ignore warnings. This mirrors clustersSeparate's
+	// own null-is-"not separate" rule exactly — that predicate is reused here,
+	// not re-implemented.
+	const graph = buildGraph({
+		agents: [
+			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		],
+		states: {
+			sup: { agentId: "sup", labels: { "team.cluster": "shop" } },
+			// lead has no state file at all: cluster is null, not "different".
+		},
+		now: 0,
+	});
+	assert.deepEqual(graph.clusterMismatches, []);
+}
+
+{
+	// The healthy case: same cluster, spelled differently, still resolves as one.
+	const graph = buildGraph({
+		agents: [
+			{ id: "sup", shortId: "sup", name: "sup", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+			{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+		],
+		states: {
+			sup: { agentId: "sup", labels: { "team.cluster": "Shop" } },
+			lead: { agentId: "lead", labels: { "team.cluster": "shop/" } },
+		},
+		now: 0,
+	});
+	assert.deepEqual(graph.clusterMismatches, []);
+}
+
+{
+	// A garbage state entry (not an object) must degrade to a null cluster,
+	// not throw — the same fail-open discipline as the rest of buildGraph.
+	assert.doesNotThrow(() => {
+		const graph = buildGraph({
+			agents: [{ id: "lead", shortId: "lead", name: "lead", provider: "pi-lead/o/m", status: "idle", cwd: "/w" }],
+			states: { lead: "not-an-object" },
+			now: 0,
+		});
+		assert.equal(graph.nodes[0].cluster, null);
+	});
+}
+
+{
+	// describeClusterMismatches is exported directly so a caller (or a future
+	// CLI surface) can run it over an already-built node list without paying
+	// for buildGraph again.
+	const nodes = [
+		{ id: "sup", role: "supervisor", shortId: "sup", cluster: "a" },
+		{ id: "lead", role: "lead", shortId: "lead", cluster: "b" },
+		{ id: "peer", role: "peer", shortId: "peer", cluster: "c" },
+	];
+	const mismatches = describeClusterMismatches(nodes);
+	assert.equal(mismatches.length, 1, "only supervisor/lead pairs are checked, never peers");
 }
 
 // --- PR-E: a fork is lineage the board must show ---------------------------
