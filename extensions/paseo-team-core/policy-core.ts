@@ -118,32 +118,74 @@ export const PI_READ_ONLY = ["read", "bash", PEER_COMMUNICATION_TOOL];
 export const PI_WRITE = ["read", "write", "edit", "bash", PEER_COMMUNICATION_TOOL];
 
 /**
- * agent-browser MCP names are normalized by pi-mcp-adapter. Keep this prefix
- * allowlist explicit: a bare `open`/`click` target could belong to another
- * MCP server and must never be treated as browser authority.
+ * The browser surface, in two families — both of which the RUNTIME already
+ * provides. The pack used to install a third, the `agent-browser` npm package,
+ * as its own stdio MCP server; that is gone. Shipping a browser stack to sit
+ * next to two that are already there bought nothing and cost a CLI to pin, a
+ * Chrome runtime to probe, a skill to copy, an MCP entry to merge into two
+ * config files, and a CDP attach mode whose whole documented risk was handing a
+ * Peer every logged-in session in a real profile.
+ *
+ * 1. Paseo Browser Control (`browser_*`) — registered by the daemon on the same
+ *    `/mcp/agents` server as create_agent, and injected into EVERY seat
+ *    regardless of provider (the registration is gated on
+ *    `daemon.browserTools.enabled` plus a broker, never on the provider). This
+ *    is the pi seats' browser, and the fallback for a Claude seat.
+ * 2. Claude in Chrome (`mcp__claude-in-chrome__*`) — Claude Code's own, via the
+ *    Chrome extension. Claude seats only; it does not exist for pi.
+ *
+ * Sharing a server with create_agent does not make family 1 orchestration:
+ * driving a tab is browser authority. They are classified separately from the
+ * Paseo MCP allowlist so the orchestration wall can stay closed for Peers while
+ * the browser half stays reachable under BROWSER_MCP_AUTHORITY — classifying by
+ * server instead was the bug that shipped Peers with no browser at all.
  */
-const AGENT_BROWSER_MCP_PREFIXES = [
-	"agent_browser_",
-	"agent-browser_",
-	"agent_browser:",
-	"agent-browser:",
-	"mcp__agent_browser__",
-	"mcp__agent-browser__",
+const PASEO_BROWSER_PREFIXES = [
+	// The bare name, as Paseo registers it and as classifyClaudeTool hands it
+	// over once the mcp__paseo__ prefix is stripped.
+	"browser_",
+	// The dialects an MCP adapter normalizes a server-qualified name into.
+	"paseo_browser_",
+	"paseo:browser_",
+	"mcp__paseo__browser_",
 ];
-export function isAgentBrowserMcpTarget(name: string): boolean {
+export function isPaseoBrowserTool(name: string): boolean {
+	// Prefix-matched rather than enumerated: Paseo adds tools to this family
+	// between releases (browser_back/forward/hover/reload are already registered
+	// conditionally), and a fixed list would silently fail closed on each new
+	// one. The SERVER part is anchored, though — a loose "contains _browser_"
+	// would swallow `agent_browser_open` and hand browser authority to any
+	// unrelated server whose name happens to end in "browser".
 	const normalized = name.trim().toLowerCase();
-	return AGENT_BROWSER_MCP_PREFIXES.some((prefix) =>
+	return PASEO_BROWSER_PREFIXES.some(
+		(prefix) => normalized.startsWith(prefix) && normalized.length > prefix.length,
+	);
+}
+
+/**
+ * Claude in Chrome names, in every dialect a runtime spells them: Claude's own
+ * `mcp__claude-in-chrome__<tool>`, and the underscore/colon forms an MCP
+ * adapter may normalize a server name into. The server segment must be present
+ * — a bare `navigate` or `computer` could belong to anything.
+ */
+const CLAUDE_CHROME_MCP_PREFIXES = [
+	"mcp__claude-in-chrome__",
+	"mcp__claude_in_chrome__",
+	"claude-in-chrome_",
+	"claude_in_chrome_",
+	"claude-in-chrome:",
+	"claude_in_chrome:",
+];
+export function isClaudeChromeMcpTarget(name: string): boolean {
+	const normalized = name.trim().toLowerCase();
+	return CLAUDE_CHROME_MCP_PREFIXES.some((prefix) =>
 		normalized.startsWith(prefix),
 	);
 }
 
-export function callsAgentBrowserCli(command: string): boolean {
-	// This is a deny heuristic, not a shell parser: block every literal
-	// agent-browser reference in a Peer bash command so wrappers/aliases do not
-	// reopen the CLI surface. The typed MCP path is checked separately.
-	return /(?:^|[^a-z0-9])agent-browser(?:\.(?:cmd|exe|ps1|sh))?(?=$|[^a-z0-9])/i.test(
-		command,
-	);
+/** Either runtime-provided browser family. The single browser predicate. */
+export function isBrowserMcpTarget(name: string): boolean {
+	return isPaseoBrowserTool(name) || isClaudeChromeMcpTarget(name);
 }
 
 /** Monitoring-only Paseo tools — the supervisor's default surface. */
@@ -294,7 +336,7 @@ export function denyReason(
 	toolName: string,
 ): string {
 	if (role === "peer" && (toolName === "mcp" || toolName === "mcp_script")) {
-		return "Peer cannot use the MCP proxy unless the current V3 brief grants BROWSER_MCP_AUTHORITY: allowed. Paseo orchestration MCP remains forbidden. Report a DEPENDENCY_REQUEST to the Lead instead.";
+		return "Peer cannot use the MCP proxy: this brief sets BROWSER_MCP_AUTHORITY: denied. Paseo orchestration MCP remains forbidden either way. Report a DEPENDENCY_REQUEST to the Lead instead.";
 	}
 	if (role === "peer" && matchesPaseoToolName(toolName, ALL_PASEO_TOOLS)) {
 		return "Peer cannot orchestrate agents or manage workspaces. Report a DEPENDENCY_REQUEST to the Lead instead.";
@@ -2890,16 +2932,12 @@ export function leadCreateWorkspaceArgsBlockReason(
  * Decide whether an `mcp` proxy call is allowed for a role.
  * Returns a block reason, or null when allowed.
  */
-function isAgentBrowserServer(value: unknown): boolean {
-	return value === "agent-browser" || value === "agent_browser";
-}
-
 export function peerMcpBlockReason(
 	input: unknown,
 	brief: ParsedTaskBrief | null,
 ): string | null {
 	if (!browserMcpAllowed(brief)) {
-		return "Peer browser MCP is not authorized for this turn. Lead must send a V3 brief with BROWSER_MCP_AUTHORITY: allowed.";
+		return "This Peer's brief sets BROWSER_MCP_AUTHORITY: denied, so the browser is withheld for this turn. Report a DEPENDENCY_REQUEST to the Lead if the task needs it.";
 	}
 	const classification = classifyMcpInput(input);
 	if (classification.kind === "unknown") {
@@ -2910,31 +2948,28 @@ export function peerMcpBlockReason(
 	}
 	if (classification.kind === "meta") {
 		const rec = input as Record<string, unknown>;
-		if (typeof rec.connect === "string" || typeof rec.server === "string") {
-			const selected = [rec.connect, rec.server].filter(
-				(value): value is string => typeof value === "string",
-			);
-			return selected.every(isAgentBrowserServer)
-				? null
-				: "Peer may connect/query only the agent-browser MCP server; other MCP servers are denied.";
-		}
-		if (typeof rec.search === "string") {
-			return isAgentBrowserServer(rec.server)
-				? null
-				: "Peer MCP search must set server=agent-browser; broad discovery is denied.";
-		}
+		// `describe` reveals one tool's schema and invokes nothing, so it stays
+		// open for a browser target — that is how a Peer learns the arguments of
+		// a tool it is allowed to call.
 		if (typeof rec.describe === "string") {
-			return (rec.server === undefined || isAgentBrowserServer(rec.server)) &&
-				isAgentBrowserMcpTarget(rec.describe)
+			return isBrowserMcpTarget(rec.describe)
 				? null
-				: "Peer may describe only an agent-browser MCP target.";
+				: "Peer may describe only a browser MCP target.";
 		}
-		return "Peer browser MCP meta operation is not allowed; use an agent-browser target explicitly.";
+		// connect/search are gone with the agent-browser server. Both existed to
+		// reach a LAZY stdio server the Peer had to wake and enumerate; Paseo's
+		// browser lives on the MCP server the daemon already injected into this
+		// seat, so there is nothing left to connect and nothing a Peer needs to
+		// discover. Allowing them now would only point discovery at the
+		// orchestration surface sharing that server.
+		return "Peer MCP meta operations (connect/search) are not allowed: the browser is already connected on Paseo's own MCP server. Call a browser tool by name.";
 	}
 	const target = classification.target ?? "";
-	return isAgentBrowserMcpTarget(target)
+	// Browser Control shares the Paseo MCP server with create_agent; classify by
+	// tool family, not by server — see isPaseoBrowserTool.
+	return isBrowserMcpTarget(target)
 		? null
-		: `"${target}" is not an agent-browser MCP target; Paseo and unrelated MCP servers remain forbidden for Peers.`;
+		: `"${target}" is not a browser MCP target; Paseo orchestration and unrelated MCP servers remain forbidden for Peers.`;
 }
 
 /**
@@ -2965,7 +3000,9 @@ export function mcpBlockReason(
 		);
 	}
 	const target = classification.target ?? "";
-	if (role === "lead" && isAgentBrowserMcpTarget(target)) return null;
+	// A browser tool is browser authority wherever it is registered; the
+	// Supervisor stays out (observation only, no page it could drive).
+	if (role === "lead" && isBrowserMcpTarget(target)) return null;
 	if (!matchesPaseoToolName(target, mcpAllowedTargets(role))) {
 		if (role === "supervisor") {
 			return `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`;
@@ -3066,7 +3103,7 @@ export function mcpScriptBlockReason(
 		if (["call", "describe", "search", "emit"].includes(name)) continue;
 		if (
 			!matchesPaseoToolName(name, allowed) &&
-			!(role === "lead" && isAgentBrowserMcpTarget(name))
+			!(role === "lead" && isBrowserMcpTarget(name))
 		) {
 			return `Tool "${name}" referenced in mcp_script is not in the ${role} MCP allowlist.`;
 		}
@@ -3385,7 +3422,15 @@ export function peerAuthority(brief: ParsedTaskBrief | null): PeerAuthority {
 	const mode = resolvePeerMode(brief);
 	return {
 		edit: authorityField(brief, "EDIT_AUTHORITY") ?? mode === "write",
-		browserMcp: authorityField(brief, "BROWSER_MCP_AUTHORITY") ?? false,
+		// Browser is the one authority that defaults to GRANTED on a valid V3
+		// brief. It is not a write capability: the Peer reads a rendered page
+		// instead of a file, and every mutation it could reach is still gated by
+		// edit/commit/push authority. Defaulting it closed cost more than it
+		// bought — a Lead that forgot the field shipped a Peer with the runtime's
+		// default browser surface switched off, which reads as "the role pack
+		// broke my agent". An explicit `BROWSER_MCP_AUTHORITY: denied` still
+		// removes it, so a Lead that means to withhold the browser can.
+		browserMcp: authorityField(brief, "BROWSER_MCP_AUTHORITY") ?? true,
 		commit: authorityField(brief, "COMMIT_AUTHORITY") ?? false,
 		pushTaskBranch:
 			authorityField(brief, "PUSH_TASK_BRANCH_AUTHORITY") ?? false,

@@ -19,7 +19,7 @@
  *   paseo-team skills read <name>      -> SKILL.md body (JSON-wrapped)
  *   paseo-team skills write <name>     -> SKILL.md body from stdin
  *   paseo-team env list                -> documented env knobs + process values + target file
- *   paseo-team install [--attach-cdp-port <port>] -> delegate to the bundled installer
+ *   paseo-team install                            -> delegate to the bundled installer
  *
  * Every command emits a single JSON object (or JSON for read bodies). Non-JSON
  * errors go to stderr and the process exits non-zero.
@@ -430,9 +430,11 @@ function cmdInstall(argv) {
 function cmdClaudeSetup(argv) {
 	const known = ["--install", "--verify", "--uninstall", "--print-providers"];
 	const passthrough = ["--json"];
-	// --attach-cdp-port takes a value, so it is filtered as a pair rather than
-	// as a bare flag: the port must not fall through to the unknown-flag check.
-	const valued = ["--attach-cdp-port"];
+	// No valued flags any more: --attach-cdp-port went with the agent-browser
+	// integration. Kept as an empty list because the loop below distinguishes
+	// flag-with-value from bare flag, and collapsing that is how the next valued
+	// flag silently leaks its value into the unknown-flag check.
+	const valued = [];
 	// Fail closed on anything unrecognised: silently degrading a mistyped
 	// --instal into a read-only --verify would report success for work that
 	// never happened, and the rest of this CLI rejects unknown flags outright.
@@ -874,7 +876,6 @@ usage:
   pteam status
   pteam preflight [--strict] [--json] [--skip-models] [--runtime pi|claude|both] [--host-id <id>] [--cluster <path>] [--routes <path>]
   pteam claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
-                     [--attach-cdp-port <port>]   (with --install)
   pteam config read  <section> [--no-discovery]
   pteam config write <section>             (JSON body on stdin)
   pteam prompts read <role>                (supervisor|lead|peer)
@@ -885,7 +886,7 @@ usage:
   pteam env list
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
-  pteam install [--attach-cdp-port <port>]
+  pteam install
   pteam uninstall [--purge]                (remove what install wrote; --purge also deletes ~/.paseo-pi-team)
   pteam update [--check]                    (compare with the latest GitHub release tag)
 

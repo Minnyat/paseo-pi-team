@@ -43,6 +43,15 @@ const browserBrief = brief([
 	"BROWSER_MCP_AUTHORITY: allowed",
 	"PASEO_TEAM_TASK_V3_END",
 ]);
+// Browser is the one authority a valid V3 brief grants by default, so the
+// withheld case needs the field spelled out.
+const noBrowserBrief = brief([
+	"PASEO_TEAM_TASK_V3_BEGIN",
+	"TASK_ID: T-104",
+	"MODE: read-only",
+	"BROWSER_MCP_AUTHORITY: denied",
+	"PASEO_TEAM_TASK_V3_END",
+]);
 // MODE says write, EDIT_AUTHORITY says no: the narrower one wins.
 const authorityMismatchBrief = brief([
 	"PASEO_TEAM_TASK_V3_BEGIN",
@@ -70,7 +79,13 @@ assert.deepEqual(classifyClaudeTool("mcp__paseo-team__peer_ask_lead"), {
 	kind: "team",
 	target: "peer_ask_lead",
 });
-assert.equal(classifyClaudeTool("mcp__agent-browser__open").kind, "browser-mcp");
+// Claude in Chrome is the runtime's own browser and classifies as browser
+// authority, not as "some other MCP server".
+assert.equal(classifyClaudeTool("mcp__claude-in-chrome__navigate").kind, "browser-mcp");
+assert.equal(classifyClaudeTool("mcp__paseo__browser_click").kind, "browser-mcp");
+// The agent-browser server the pack used to install is no longer special: it is
+// an unrelated MCP server like any other.
+assert.equal(classifyClaudeTool("mcp__agent-browser__open").kind, "other-mcp");
 assert.equal(classifyClaudeTool("mcp__something-else__do").kind, "other-mcp");
 // An unknown bare tool is "other" — and "other" is denied unless allowlisted.
 assert.deepEqual(classifyClaudeTool("SomeFutureTool"), { kind: "other" });
@@ -115,9 +130,13 @@ assert.match(
 	decide("peer", "Bash", { command: "paseo run --provider claude-peer 'x'" }, writeBrief) ?? "",
 	/Paseo CLI/,
 );
-assert.match(
-	decide("peer", "Bash", { command: "agent-browser open https://x" }, browserBrief) ?? "",
-	/agent-browser CLI/,
+// There is no browser-CLI guard any more, and there is nothing left for it to
+// guard: neither replacement browser has a CLI a Peer could shell out to.
+// Running a stray `agent-browser` binary a user happens to have installed is
+// just an ordinary bash command that will fail on its own.
+assert.equal(
+	decide("peer", "Bash", { command: "agent-browser open https://x" }, browserBrief),
+	null,
 );
 assert.equal(
 	decide("peer", "Bash", { command: "git push -u origin HEAD:refs/heads/agent/T-100" }, writeBrief),
@@ -150,11 +169,42 @@ assert.match(
 	decide("peer", "mcp__paseo__list_agents", {}, writeBrief) ?? "",
 	/DEPENDENCY_REQUEST/,
 );
+// A brief that says nothing about the browser leaves it ON: the Peer keeps the
+// runtime's default browser surface, and only an explicit denial removes it.
+assert.equal(decide("peer", "mcp__claude-in-chrome__navigate", {}, writeBrief), null);
+assert.equal(decide("peer", "mcp__claude-in-chrome__navigate", {}, browserBrief), null);
 assert.match(
-	decide("peer", "mcp__agent-browser__open", {}, writeBrief) ?? "",
-	/BROWSER_MCP_AUTHORITY/,
+	decide("peer", "mcp__claude-in-chrome__navigate", {}, noBrowserBrief) ?? "",
+	/BROWSER_MCP_AUTHORITY: denied/,
 );
-assert.equal(decide("peer", "mcp__agent-browser__open", {}, browserBrief), null);
+assert.equal(decide("lead", "mcp__claude-in-chrome__computer", {}, null), null);
+assert.match(
+	decide("supervisor", "mcp__claude-in-chrome__navigate", {}, null) ?? "",
+	/no browser authority/,
+);
+// agent-browser is gone: it now falls through to the unrelated-MCP wall, for
+// every role, brief or no brief.
+assert.match(
+	decide("peer", "mcp__agent-browser__open", {}, browserBrief) ?? "",
+	/outside the peer role surface/,
+);
+// Paseo registers its own Browser Control on the SAME MCP server as
+// create_agent. It is browser authority, not orchestration — classifying by
+// server would switch the Peer's browser off with the orchestration wall.
+assert.deepEqual(classifyClaudeTool("mcp__paseo__browser_navigate"), {
+	kind: "browser-mcp",
+	target: "browser_navigate",
+});
+assert.equal(decide("peer", "mcp__paseo__browser_navigate", { url: "http://x" }, writeBrief), null);
+assert.equal(decide("lead", "mcp__paseo__browser_snapshot", {}, null), null);
+assert.match(
+	decide("peer", "mcp__paseo__browser_navigate", { url: "http://x" }, noBrowserBrief) ?? "",
+	/BROWSER_MCP_AUTHORITY: denied/,
+);
+assert.match(
+	decide("supervisor", "mcp__paseo__browser_navigate", { url: "http://x" }, null) ?? "",
+	/no browser authority/,
+);
 assert.match(
 	decide("peer", "mcp__unrelated__do", {}, browserBrief) ?? "",
 	/outside the peer role surface/,
@@ -172,6 +222,31 @@ assert.match(decide("peer", "SomeFutureTool", {}, writeBrief) ?? "", /blocked by
 for (const role of ["supervisor", "lead", "peer"]) {
 	assert.equal(decide(role, "ToolSearch", { query: "select:Read" }, writeBrief), null);
 	assert.ok(!claudeDisallowedTools(role).includes("ToolSearch"));
+}
+
+// --- the escalation chain owns the route to the Human -------------------------
+//
+// Peer -> Lead -> Supervisor -> Human. Only the Supervisor's escalation target
+// IS the Human, so only the Supervisor keeps the structured ask-the-user tool;
+// for the other two it is the door that puts a delegated decision back on the
+// Human's desk. Pi exposes no such tool to any role, so leaving it open on
+// Claude was also a cross-runtime authority asymmetry.
+assert.equal(decide("supervisor", "AskUserQuestion", { questions: [] }, null), null);
+assert.ok(!claudeDisallowedTools("supervisor").includes("AskUserQuestion"));
+assert.match(
+	decide("lead", "AskUserQuestion", { questions: [] }, null) ?? "",
+	/lead_ask_supervisor/,
+);
+assert.match(
+	decide("peer", "AskUserQuestion", { questions: [] }, writeBrief) ?? "",
+	/peer_ask_lead/,
+);
+for (const role of ["lead", "peer"]) {
+	assert.ok(
+		claudeDisallowedTools(role).includes("AskUserQuestion"),
+		"the static layer must strip it too, so the model never sees the door",
+	);
+	assert.ok(!claudeBaseTools(role).includes("AskUserQuestion"));
 }
 
 // --- peer: team tools ---------------------------------------------------------
@@ -195,7 +270,7 @@ assert.equal(decide("supervisor", "mcp__paseo__send_agent_prompt", {}), null);
 assert.match(decide("supervisor", "Write", {}) ?? "", /cannot modify product code/);
 assert.match(decide("supervisor", "Bash", { command: "ls" }) ?? "", /blocked by the supervisor role/);
 assert.match(decide("supervisor", "mcp__paseo__create_workspace", {}) ?? "", /monitoring tools/);
-assert.match(decide("supervisor", "mcp__agent-browser__open", {}) ?? "", /no browser authority/);
+assert.match(decide("supervisor", "mcp__paseo__browser_navigate", {}) ?? "", /no browser authority/);
 // create_agent is the one gated orchestration action, and the ARGS are the gate.
 // On Claude the arguments ARE the tool input, so a missing input is the
 // unclassifiable case that must fail closed.
@@ -253,7 +328,7 @@ assert.match(
 assert.equal(decide("lead", "mcp__paseo__create_agent", { provider: "x" }), null);
 assert.equal(decide("lead", "mcp__paseo__respond_to_permission", {}), null);
 assert.equal(decide("lead", "Bash", { command: "git status" }), null);
-assert.equal(decide("lead", "mcp__agent-browser__open", {}), null);
+assert.equal(decide("lead", "mcp__claude-in-chrome__navigate", {}), null);
 assert.match(decide("lead", "Write", {}) ?? "", /blocked by the lead role/);
 assert.match(decide("lead", "mcp__paseo__create_terminal", {}) ?? "", /not in the lead MCP allowlist/);
 // Reviewer isolation, layer 1: a review workspace must be a worktree.

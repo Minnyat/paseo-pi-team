@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import {
 	ALL_PASEO_TOOLS,
 	browserMcpAllowed,
-	callsAgentBrowserCli,
 	callsPaseoCli,
 	callsTeamSupportScript,
 	classifyMcpInput,
@@ -21,7 +20,8 @@ import {
 	peerGitAuthority,
 	policyFor,
 	policyWithAuthority,
-	isAgentBrowserMcpTarget,
+	isBrowserMcpTarget,
+	isPaseoBrowserTool,
 	resolvePeerMode,
 } from "../extensions/paseo-team-policy.ts";
 
@@ -296,36 +296,48 @@ assert.equal(
 
 // --- browser MCP authority -----------------------------------------------------
 
-assert.equal(isAgentBrowserMcpTarget("agent_browser_open"), true);
-assert.equal(isAgentBrowserMcpTarget("mcp__agent-browser__snapshot"), true);
-assert.equal(isAgentBrowserMcpTarget("open"), false);
-assert.equal(isAgentBrowserMcpTarget("paseo_list_agents"), false);
-assert.equal(
-	callsAgentBrowserCli("agent-browser open https://example.com"),
-	true,
-);
-assert.equal(
-	callsAgentBrowserCli("npx -y agent-browser open https://example.com"),
-	true,
-);
-assert.equal(callsAgentBrowserCli("npm exec -- agent-browser cookies"), true);
-assert.equal(callsAgentBrowserCli("pnpm exec agent-browser state"), true);
-assert.equal(callsAgentBrowserCli("./node_modules/.bin/agent-browser debug"), true);
-assert.equal(callsAgentBrowserCli("echo agent-browser open"), true);
-assert.equal(callsAgentBrowserCli("npm test"), false);
+// Two families, both provided by the runtime itself: Paseo Browser Control on
+// every seat, Claude in Chrome on Claude seats. The `agent-browser` server the
+// pack used to install is not one of them any more and gets no special
+// treatment — for a Peer it now hits the unrelated-MCP wall like anything else.
+assert.equal(isBrowserMcpTarget("browser_click"), true);
+assert.equal(isBrowserMcpTarget("paseo_browser_navigate"), true);
+assert.equal(isBrowserMcpTarget("mcp__claude-in-chrome__navigate"), true);
+assert.equal(isBrowserMcpTarget("claude_in_chrome_computer"), true);
+assert.equal(isBrowserMcpTarget("agent_browser_open"), false);
+assert.equal(isBrowserMcpTarget("mcp__agent-browser__snapshot"), false);
+assert.equal(isBrowserMcpTarget("open"), false);
+assert.equal(isBrowserMcpTarget("navigate"), false, "a bare tool name names no server");
+assert.equal(isBrowserMcpTarget("paseo_list_agents"), false);
 assert.equal(browserMcpAllowed(parseTaskBrief(v3WriteBrief)), true);
+// Silence grants the browser: it is the runtime's default surface, it writes
+// nothing on its own, and a Lead that omitted the field used to ship a Peer
+// with the browser switched off for no stated reason.
 assert.equal(
 	browserMcpAllowed(
 		parseTaskBrief(
 			"PASEO_TEAM_TASK_V3_BEGIN\nMODE: read-only\nPASEO_TEAM_TASK_V3_END",
 		),
 	),
+	true,
+);
+// An explicit denial still withholds it...
+assert.equal(
+	browserMcpAllowed(
+		parseTaskBrief(
+			"PASEO_TEAM_TASK_V3_BEGIN\nMODE: read-only\nBROWSER_MCP_AUTHORITY: denied\nPASEO_TEAM_TASK_V3_END",
+		),
+	),
 	false,
 );
+// ...and no valid brief at all still grants nothing: that is about the brief
+// being missing, not about the browser.
 assert.equal(browserMcpAllowed(null), false);
+// Browser Control rides on the Paseo MCP server but is browser authority, not
+// orchestration — the Peer keeps it while list_agents stays blocked.
 assert.equal(
 	peerMcpBlockReason(
-		{ tool: "agent_browser_snapshot" },
+		{ tool: "paseo_browser_navigate", args: { url: "http://example.com" } },
 		parseTaskBrief(v3WriteBrief),
 	),
 	null,
@@ -335,33 +347,68 @@ assert.match(
 		{ tool: "paseo_list_agents" },
 		parseTaskBrief(v3WriteBrief),
 	) ?? "",
-	/agent-browser/,
+	/not a browser MCP target/,
 );
+// The agent-browser server is no longer a browser as far as the policy is
+// concerned: it hits the same wall as any other unrelated server.
 assert.match(
-	peerMcpBlockReason({ tool: "agent_browser_snapshot" }, null) ?? "",
-	/not authorized/,
+	peerMcpBlockReason(
+		{ tool: "agent_browser_snapshot" },
+		parseTaskBrief(v3WriteBrief),
+	) ?? "",
+	/not a browser MCP target/,
 );
-assert.equal(
+assert.equal(isPaseoBrowserTool("browser_click"), true);
+assert.equal(isPaseoBrowserTool("mcp__paseo__browser_snapshot"), true);
+assert.equal(isPaseoBrowserTool("paseo_list_agents"), false);
+assert.equal(isPaseoBrowserTool("browser_"), false);
+// The server segment is anchored: a server whose NAME ends in "browser" must
+// not inherit browser authority from the prefix match.
+assert.equal(isPaseoBrowserTool("agent_browser_open"), false);
+assert.match(
+	peerMcpBlockReason({ tool: "browser_snapshot" }, null) ?? "",
+	/BROWSER_MCP_AUTHORITY: denied/,
+);
+// connect/search went with the lazy stdio server they existed to wake. Paseo's
+// browser is already connected on the server the daemon injected.
+assert.match(
 	peerMcpBlockReason(
 		{ connect: "agent-browser" },
 		parseTaskBrief(v3WriteBrief),
+	) ?? "",
+	/already connected/,
+);
+assert.equal(
+	peerMcpBlockReason(
+		{ describe: "browser_click" },
+		parseTaskBrief(v3WriteBrief),
 	),
 	null,
-);
-assert.match(
-	peerMcpBlockReason({}, parseTaskBrief(v3WriteBrief)) ?? "",
-	/meta operation/,
-);
-assert.match(
-	peerMcpBlockReason({ connect: "paseo" }, parseTaskBrief(v3WriteBrief)) ?? "",
-	/agent-browser/,
+	"describe reveals a schema and invokes nothing",
 );
 assert.match(
 	peerMcpBlockReason(
-		{ search: "agent browser snapshot" },
+		{ describe: "create_agent" },
 		parseTaskBrief(v3WriteBrief),
 	) ?? "",
-	/server=agent-browser/,
+	/only a browser MCP target/,
+);
+assert.match(
+	peerMcpBlockReason({}, parseTaskBrief(v3WriteBrief)) ?? "",
+	/meta operations/,
+);
+assert.match(
+	peerMcpBlockReason({ connect: "paseo" }, parseTaskBrief(v3WriteBrief)) ?? "",
+	/already connected/,
+	"a Peer must not connect the orchestration server the browser shares",
+);
+assert.match(
+	peerMcpBlockReason(
+		{ search: "browser snapshot" },
+		parseTaskBrief(v3WriteBrief),
+	) ?? "",
+	/already connected/,
+	"nor discover across it",
 );
 
 // --- peerGitAuthority ----------------------------------------------------------
@@ -1363,13 +1410,14 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 		"authority does not leak to the next unbriefed turn",
 	);
 
-	// A valid current brief grants only agent-browser MCP, never Paseo MCP.
+	// A valid current brief grants Browser Control, never Paseo ORCHESTRATION
+	// MCP — even though the daemon registers both on the same server.
 	await before({ prompt: v3WriteBrief, systemPrompt: "base" });
 	assert.equal(
 		(
 			await toolCall({
 				toolName: "mcp",
-				input: { tool: "agent_browser_snapshot" },
+				input: { tool: "browser_snapshot" },
 			})
 		)?.block,
 		undefined,
@@ -1377,16 +1425,27 @@ function requireHandler(handlers: StubHandlers, name: string): StubHandler {
 	assert.match(
 		(await toolCall({ toolName: "mcp", input: { tool: "list_agents" } }))
 			?.reason ?? "",
-		/agent-browser/,
+		/not a browser MCP target/,
 	);
+	// The agent-browser server the pack used to install is now just another
+	// unrelated server, on the typed path and in bash alike.
 	assert.match(
+		(
+			await toolCall({
+				toolName: "mcp",
+				input: { tool: "agent_browser_snapshot" },
+			})
+		)?.reason ?? "",
+		/not a browser MCP target/,
+	);
+	assert.equal(
 		(
 			await toolCall({
 				toolName: "bash",
 				input: { command: "agent-browser open https://example.com" },
 			})
-		)?.reason ?? "",
-		/Peer cannot run agent-browser CLI through bash/,
+		)?.block,
+		undefined,
 	);
 
 	// Correction via real Paseo send without a full brief revokes browser access.

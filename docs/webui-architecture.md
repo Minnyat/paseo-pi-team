@@ -130,7 +130,7 @@ paseo-team graph [--all] [--max-inspect <n>] [--refresh]  -> { nodes, edges, per
 paseo-team watchdog [--stale-after <ms>]       -> delegate scripts/watchdog.mjs
 paseo-team web [--port <n>] [--open] [--no-token]         -> khoi dong webui/server.mjs
 paseo-team update [--check]                      -> so version package.json voi tag GitHub moi nhat (git ls-remote, khong dung npm view vi package khong bao gio len npm registry)
-paseo-team uninstall [--purge]                   -> dao nguoc install: chi xoa dung cac item pack so huu (prompt/3 file, skill/3 thu muc, policy, team-scripts, entry MCP "agent-browser"); --purge moi xoa ~/.paseo-pi-team (kem audit log). Luu y: agent-browser CLI + Chrome runtime do browser-setup cai nam NGOAI pham vi uninstall (phai go tay)
+paseo-team uninstall [--purge]                   -> dao nguoc install: chi xoa dung cac item pack so huu (prompt/3 file, skill/2 thu muc, policy, team-scripts, va entry MCP "agent-browser" con sot lai tu ban cu); --purge moi xoa ~/.paseo-pi-team (kem audit log). Pack khong con cai browser rieng: ca hai runtime dung browser san co (Paseo Browser Control, Claude in Chrome)
 ```
 
 Nguyên tắc tái sử dụng — repo đã có sẵn, **không viết lại**:

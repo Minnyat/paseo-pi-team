@@ -1,0 +1,263 @@
+#!/usr/bin/env node
+// patch-paseo-mcp.mjs — let Paseo's bundled MCP server accept a client that
+// speaks a NEWER protocol revision than the SDK it was built against.
+//
+// The bug, from ~/.paseo/daemon.log:
+//
+//   Bad Request: Unsupported protocol version: 2026-07-28
+//   (supported versions: 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07)
+//
+// Paseo injects its orchestration MCP into every agent over HTTP — the agent
+// record carries `mcpServers.paseo = { type: "http", url:
+// "http://127.0.0.1:<port>/mcp/agents?callerAgentId=..." }` — so this is not a
+// cosmetic log line: it is a 400 on `create_agent`, `send_agent_prompt`,
+// `list_agents`, `respond_to_permission` and Browser Control, i.e. on the whole
+// Lead surface, for every Claude-hosted seat.
+//
+// Whose fault: the MCP spec says a client sends the NEGOTIATED version in the
+// `MCP-Protocol-Version` header, and Claude Code sends its own latest instead.
+// The initialize handshake itself succeeds (it carries no such header); the
+// very next request 400s. Paseo cannot fix a client it does not ship, and the
+// bundled @modelcontextprotocol/sdk is a transitive pin we do not control
+// either — so the durable fix is to make the SERVER liberal in what it accepts.
+//
+// What this changes: exactly one condition, in the two files that carry it.
+// A header version stays rejected unless it is a well-formed YYYY-MM-DD dated
+// revision NEWER than everything the SDK knows — "the client is ahead of us",
+// which is the only case that is safe to wave through. Garbage, and genuinely
+// unknown older strings, still 400.
+//
+// What this does NOT change: SUPPORTED_PROTOCOL_VERSIONS, so the initialize
+// handshake still negotiates the SDK's real latest. The server never claims a
+// protocol it does not implement; it only stops arguing about a header.
+//
+// Idempotent, reversible, and re-appliable: `npm i -g @getpaseo/cli` replaces
+// node_modules and silently reverts this, so re-run it after every Paseo
+// update. `--verify` answers without writing (exit 1 when unpatched), which is
+// what preflight's `paseo-mcp-protocol` check calls.
+//
+// Usage:
+//   node scripts/patch-paseo-mcp.mjs [--apply|--verify|--revert] [--json]
+//                                    [--sdk-dir <dir>]
+
+import { existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { join } from "node:path";
+import { isEntrypoint } from "./lib-common.mjs";
+
+/** Marker that makes the patch self-identifying, so re-running is a no-op. */
+export const PATCH_MARKER = "paseo-pi-team:accept-newer-protocol";
+
+/** The two dist builds that carry the header check. */
+export const PATCH_TARGETS = [
+	"dist/esm/server/webStandardStreamableHttp.js",
+	"dist/cjs/server/webStandardStreamableHttp.js",
+];
+
+/**
+ * The exact condition the SDK ships. Matched literally rather than by regex:
+ * if a future SDK rewords it, this script must FAIL LOUDLY rather than patch
+ * something it did not recognise.
+ */
+const ORIGINAL_CONDITION =
+	"if (protocolVersion !== null && !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)) {";
+
+/**
+ * `> SUPPORTED_PROTOCOL_VERSIONS[0]` is a string compare, which is exactly
+ * right for zero-padded YYYY-MM-DD: element 0 is LATEST_PROTOCOL_VERSION in
+ * every published build of this SDK.
+ */
+const PATCHED_CONDITION =
+	"if (protocolVersion !== null && !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)" +
+	` && !(/* ${PATCH_MARKER} */ /^\\d{4}-\\d{2}-\\d{2}$/.test(protocolVersion)` +
+	" && protocolVersion > SUPPORTED_PROTOCOL_VERSIONS[0])) {";
+
+export class PatchError extends Error {
+	constructor(code, message) {
+		super(`${code}: ${message}`);
+		this.name = "PatchError";
+		this.code = code;
+	}
+}
+
+/**
+ * Rewrite one file's source. Pure, so the transform is testable without a
+ * Paseo install on disk.
+ *
+ * @returns {{ source: string, state: "patched" | "already" }}
+ */
+export function patchSource(source) {
+	if (source.includes(PATCH_MARKER)) return { source, state: "already" };
+	if (!source.includes(ORIGINAL_CONDITION)) {
+		throw new PatchError(
+			"PATTERN_NOT_FOUND",
+			"the SDK's protocol-version check does not look the way this patch expects — refusing to guess. Report it rather than editing by hand: the check may have moved, or upstream may have fixed it, in which case this script is no longer needed",
+		);
+	}
+	return {
+		source: source.replace(ORIGINAL_CONDITION, PATCHED_CONDITION),
+		state: "patched",
+	};
+}
+
+/** Undo patchSource. Returns the source unchanged when it was never patched. */
+export function revertSource(source) {
+	if (!source.includes(PATCH_MARKER)) return { source, state: "already" };
+	if (!source.includes(PATCHED_CONDITION)) {
+		throw new PatchError(
+			"PATTERN_NOT_FOUND",
+			"the file carries this patch's marker but not the text it writes — it was edited by something else. Reinstall Paseo instead of reverting blind",
+		);
+	}
+	return {
+		source: source.replace(PATCHED_CONDITION, ORIGINAL_CONDITION),
+		state: "reverted",
+	};
+}
+
+/**
+ * Locate the MCP SDK inside the globally installed Paseo CLI.
+ *
+ * `npm root -g` rather than a hardcoded path: the global prefix differs per
+ * platform and per nvm/volta install, and getting it wrong would silently
+ * patch nothing.
+ */
+export function resolveSdkDir(explicit = null, env = process.env) {
+	if (explicit) return explicit;
+	const fromEnv = env.PASEO_TEAM_MCP_SDK_DIR;
+	if (fromEnv) return fromEnv;
+	let root;
+	try {
+		// execSync, not execFileSync: npm is npm.cmd on Windows and Node refuses
+		// to spawn a .cmd without a shell (EINVAL). The command is a fixed
+		// literal with nothing interpolated into it, so the shell adds no
+		// injection surface — and passing ARGS through a shell, which is what
+		// DEP0190 warns about, is exactly what this form avoids.
+		root = execSync("npm root -g", { encoding: "utf8" }).trim();
+	} catch (err) {
+		throw new PatchError(
+			"NPM_ROOT_UNAVAILABLE",
+			`could not run \`npm root -g\` to find the Paseo install (${err.message}). Pass --sdk-dir <dir> explicitly`,
+		);
+	}
+	return join(
+		root,
+		"@getpaseo",
+		"cli",
+		"node_modules",
+		"@modelcontextprotocol",
+		"sdk",
+	);
+}
+
+/**
+ * Apply, verify or revert across every target file.
+ *
+ * A backup is written beside each file on the first real write only — a second
+ * run must not overwrite the pristine copy with an already-patched one.
+ */
+export function runPatch({ sdkDir, mode = "apply" } = {}) {
+	if (!existsSync(sdkDir)) {
+		throw new PatchError(
+			"SDK_NOT_FOUND",
+			`no MCP SDK at ${sdkDir} — is @getpaseo/cli installed globally? Pass --sdk-dir <dir> if it lives elsewhere`,
+		);
+	}
+	const files = [];
+	for (const relative of PATCH_TARGETS) {
+		const path = join(sdkDir, relative);
+		if (!existsSync(path)) {
+			throw new PatchError(
+				"TARGET_MISSING",
+				`expected ${relative} inside ${sdkDir}, but it is not there`,
+			);
+		}
+		const before = readFileSync(path, "utf8");
+		if (mode === "verify") {
+			files.push({
+				file: relative,
+				state: before.includes(PATCH_MARKER) ? "already" : "unpatched",
+			});
+			continue;
+		}
+		const { source, state } =
+			mode === "revert" ? revertSource(before) : patchSource(before);
+		if (source !== before) {
+			const backup = `${path}.paseo-team-backup`;
+			if (mode === "apply" && !existsSync(backup)) copyFileSync(path, backup);
+			writeFileSync(path, source);
+		}
+		files.push({ file: relative, state });
+	}
+	const patched = files.every((entry) => entry.state !== "unpatched");
+	return { ok: mode !== "verify" || patched, sdkDir, mode, files, patched };
+}
+
+function parse(argv) {
+	const out = { mode: "apply", json: false, sdkDir: null };
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--apply") out.mode = "apply";
+		else if (arg === "--verify") out.mode = "verify";
+		else if (arg === "--revert") out.mode = "revert";
+		else if (arg === "--json") out.json = true;
+		else if (arg === "--sdk-dir") out.sdkDir = argv[++i] ?? null;
+		else if (arg === "-h" || arg === "--help") out.help = true;
+		else throw new PatchError("USAGE", `unknown flag "${arg}"`);
+	}
+	return out;
+}
+
+async function main(argv) {
+	let opts;
+	try {
+		opts = parse(argv);
+	} catch (err) {
+		console.error(err.message);
+		return 1;
+	}
+	if (opts.help) {
+		console.log(
+			"usage: node scripts/patch-paseo-mcp.mjs [--apply|--verify|--revert] [--json] [--sdk-dir <dir>]",
+		);
+		return 0;
+	}
+	try {
+		const result = runPatch({
+			sdkDir: resolveSdkDir(opts.sdkDir),
+			mode: opts.mode,
+		});
+		if (opts.json) {
+			console.log(JSON.stringify(result, null, 2));
+		} else {
+			for (const entry of result.files) {
+				console.log(`${entry.state.padEnd(9)} ${entry.file}`);
+			}
+			if (opts.mode === "apply") {
+				console.log(
+					"\nRestart the Paseo daemon for this to take effect, and re-run after every `npm i -g @getpaseo/cli`.",
+				);
+			}
+		}
+		return result.ok ? 0 : 1;
+	} catch (err) {
+		if (opts.json) {
+			console.log(
+				JSON.stringify(
+					{ ok: false, code: err.code ?? "UNKNOWN", message: err.message },
+					null,
+					2,
+				),
+			);
+		} else {
+			console.error(err.message);
+		}
+		return 1;
+	}
+}
+
+if (isEntrypoint(import.meta.url)) {
+	main(process.argv.slice(2)).then((code) => {
+		process.exitCode = code;
+	});
+}

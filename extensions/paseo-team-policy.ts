@@ -49,13 +49,12 @@ import { fileURLToPath } from "node:url";
 import {
 	ALL_PASEO_TOOLS,
 	browserMcpAllowed,
-	callsAgentBrowserCli,
 	callsPaseoCli,
 	denyReason,
 	detectRole,
 	extraTools,
 	gitAuthorityBlockReason,
-	isAgentBrowserMcpTarget,
+	isBrowserMcpTarget,
 	loadRolePrompt,
 	mcpBlockReason,
 	mcpScriptBlockReason,
@@ -452,7 +451,7 @@ function applyPolicy(pi: ExtensionAPI, r: TeamRole): Policy {
 	const policy = currentPolicy(r);
 	const browserTools =
 		r === "peer" && browserMcpAllowed(currentBrief)
-			? [...registered].filter(isAgentBrowserMcpTarget)
+			? [...registered].filter(isBrowserMcpTarget)
 			: [];
 	const allowed = [
 		...new Set([...policy.allow, ...browserTools, ...extraTools()]),
@@ -575,13 +574,13 @@ export default function (pi: ExtensionAPI) {
 		const policy = currentPolicy(r);
 		if (
 			r === "peer" &&
-			isAgentBrowserMcpTarget(event.toolName) &&
+			isBrowserMcpTarget(event.toolName) &&
 			!browserMcpAllowed(currentBrief)
 		) {
 			return {
 				block: true,
 				reason:
-					"Direct agent-browser MCP tool is denied because BROWSER_MCP_AUTHORITY is not allowed in the current V3 brief.",
+					"This Peer's brief sets BROWSER_MCP_AUTHORITY: denied, so the browser is withheld for this turn.",
 			};
 		}
 		const teamBlockReason = teamToolBlockReason(r, event.toolName, currentBrief);
@@ -644,13 +643,9 @@ export default function (pi: ExtensionAPI) {
 						"Peer cannot drive the Paseo CLI from bash (would bypass the tool policy). Report a DEPENDENCY_REQUEST to the Lead instead.",
 				};
 			}
-			if (callsAgentBrowserCli(command)) {
-				return {
-					block: true,
-					reason:
-						"Peer cannot run agent-browser CLI through bash; BROWSER_MCP_AUTHORITY only permits the typed agent-browser MCP surface.",
-				};
-			}
+			// No browser-CLI guard: it existed for the agent-browser npm package,
+			// which the pack no longer installs. Paseo Browser Control is an MCP
+			// surface over the daemon's broker and has no CLI to shell out to.
 			const supportScriptReason = supportScriptBlockReason(r, command);
 			if (supportScriptReason) {
 				return { block: true, reason: supportScriptReason };

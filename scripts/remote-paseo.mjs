@@ -28,7 +28,7 @@
 //                    (disposition independent-reviewer forces worktree isolation)
 //   agents           --host-id <id> [--all]             paseo ls -g
 //   run              --host-id <id> --provider <role-provider>/<model-ref>
-//                    --thinking <level> [--mode <m>] [--workspace <wks>] [--title <t>]
+//                    --thinking <level> [--mode <m>] (claude-* defaults to "auto") [--workspace <wks>] [--title <t>]
 //                    [--label <key>=<value> ...] [--prompt <text> | --brief <file>]
 //                    [--wait-timeout <dur>]
 //                    A "team.cluster" label is required on every remotely-created
@@ -196,6 +196,15 @@ export function parseArgs(argv) {
 	}
 	return out;
 }
+
+/**
+ * Permission mode a `claude-*` route gets when the caller passes no --mode.
+ *
+ * Paseo refuses to inherit a mode across providers, so one has to be supplied
+ * on every claude-* create; this is the value the pack supplies. See the note
+ * in buildArgv's `run` case for why it is "auto" rather than "default".
+ */
+export const CLAUDE_DEFAULT_MODE = "auto";
 
 // Per-command flag allowlist (camelCase keys — the parse output). Anything
 // outside the set is a typo — rejected fail-closed so a misspelled option
@@ -687,15 +696,22 @@ export function buildArgv(command, opts, endpoint) {
 			// differs from the caller's (in this pack it always does — lead and
 			// peer are different profiles), Paseo refuses the create outright.
 			// pi declares no modes, so only the Claude family needs one.
+			//
+			// The default is CLAUDE_DEFAULT_MODE ("auto"), not "default". On
+			// "default" every one of the new seat's tool calls parks in the
+			// pending-permission queue, so the seat does nothing until someone
+			// triages it one call at a time — the seat looks hung, and the Lead
+			// spends its turn clicking instead of leading. What bounds a seat
+			// here is the role policy, which is enforced before any of this; the
+			// permission queue only decides how often a human is interrupted
+			// while the seat does already-bounded work. Pass --mode explicitly to
+			// narrow it (plan, default, acceptEdits).
 			const mode =
 				typeof opts.mode === "string" && opts.mode.trim() !== ""
 					? opts.mode.trim()
-					: null;
-			if (family === "claude" && !mode) {
-				throw usageError(
-					'a claude-* route requires --mode <plan|default|acceptEdits|auto|bypassPermissions> — Paseo cannot inherit a permission mode across providers. Use "default" unless the brief already grants EDIT_AUTHORITY (then "acceptEdits"); never "bypassPermissions"',
-				);
-			}
+					: family === "claude"
+						? CLAUDE_DEFAULT_MODE
+						: null;
 			if (typeof opts.workspace !== "string" || opts.workspace.trim() === "") {
 				throw usageError(
 					"run requires --workspace <id> — the remote workspace id from `workspaces`/`workspace-create` (a remote agent without a workspace would run in the controller's cwd)",
@@ -903,9 +919,11 @@ Commands:
   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
                    --thinking <level> --workspace <wks-id> [--title <t>]
                    [--label <key>=<value> ...] [--prompt <text> | --brief <file>]
-                   [--wait-timeout <dur>] [--startup-timeout <dur>]
+                   [--wait-timeout <dur>] [--startup-timeout <dur>] [--mode <m>]
                    a team.cluster label is required; filled in automatically
                    from this seat's own cluster when --label does not set one
+                   claude-* routes need a permission mode (Paseo never inherits
+                   one across providers); omitting --mode sends "auto"
   status           --agent-ref <host-id>/<agent-id>
   cancel           --agent-ref <host-id>/<agent-id>
   archive          --agent-ref <host-id>/<agent-id>

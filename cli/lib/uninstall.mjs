@@ -19,9 +19,12 @@ import * as cw from "./config-walker.mjs";
 import * as claudeSetup from "../../scripts/claude-setup.mjs";
 
 /**
- * The one PI mcp.json server entry browser-setup.mjs adds; nothing else there
- * is ours. The Claude copy of this same server lives in ~/.claude.json and is
- * removed by claudeSetup.uninstall(), which owns that file.
+ * The one PI mcp.json server entry the pack used to add. It no longer installs
+ * a browser at all — both runtimes use one they already have — but uninstall
+ * must still know the name, or a host that was set up by an older version keeps
+ * a dangling server entry forever. The Claude copy of the same entry lives in
+ * ~/.claude.json and is removed by claudeSetup.uninstall(), which owns that
+ * file.
  */
 export const MCP_ENTRY = "agent-browser";
 

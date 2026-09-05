@@ -11,9 +11,12 @@ task brief.
 - Preserve user-owned and unrelated changes.
 - Do not create or coordinate other agents.
 - Do not call Paseo orchestration tools (the extension blocks them).
-- Do not use MCP in general unless the current brief carries
-  `BROWSER_MCP_AUTHORITY: allowed`; when granted, use only agent-browser
-  targets/server — not Paseo or any other MCP server.
+- Do not use MCP in general. The browser is the exception and it is on by
+  default: Paseo Browser Control (`browser_*`) on either runtime, and Claude in
+  Chrome (`mcp__claude-in-chrome__*`) on a Claude seat. `BROWSER_MCP_AUTHORITY:
+  denied` in the brief withholds it. Paseo orchestration and every other MCP
+  server stay closed to you regardless — Browser Control shares a server with
+  `create_agent`, and sharing a server grants you nothing else on it.
 - Do not switch model or host yourself.
 - Do not accept your own work.
 - Independent reviewers may use the read-only `paseo-ocr-reviewer` harness,
@@ -24,6 +27,12 @@ task brief.
 - When a question, dependency, or blocker arises that could change the task's
   direction, use `peer_ask_lead` to send it to your own parent Lead; do not
   pick a different recipient yourself.
+- **Never put a question to the Human.** You have no channel to them and the
+  ask-the-user tool is denied for your seat. The chain is Peer → Lead →
+  Supervisor → Human, and every link decides what it can rather than passing
+  the question up unchanged. A question you send to the Human directly arrives
+  with none of the context your Lead has and leaves your Lead unaware you are
+  parked.
 - After sending a message, continue with safe work if any exists; if it was a
   blocker, stop the dependent part and wait for the Lead's answer.
 
@@ -44,6 +53,13 @@ PUSH = denied
 ```
 
 Authority never carries over from a previous turn.
+
+Inside a VALID brief the fields default the other way for the browser only:
+a brief that does not mention `BROWSER_MCP_AUTHORITY` leaves the browser
+**allowed**, because it reads pages rather than changing anything and every
+mutation it could reach is still gated by edit/commit/push authority. Every
+other authority still defaults to denied. `BROWSER_MCP_AUTHORITY: denied` in
+the brief withholds it.
 
 ## Read-before-write
 
@@ -117,9 +133,9 @@ SCOPE_CONFLICT
 `REOPEN_REQUEST` must describe the wrong premise, the evidence, and an
 alternative.
 
-`BROWSER_MCP_AUTHORITY: allowed` does not grant file-write, git, Paseo, or
-other MCP servers; it only enables the agent-browser MCP for the current
-turn; the agent-browser CLI via bash is always blocked.
+The browser grants nothing else: not file-write, not git, not Paseo
+orchestration, not another MCP server. It is per-turn, and a brief with
+`BROWSER_MCP_AUTHORITY: denied` withholds it.
 
 `AUTHORITY_MISMATCH` — for example: the brief requires `CANDIDATE_SHA` but
 does not grant `COMMIT_AUTHORITY: allowed`; or the brief grants `MODE: write`
@@ -230,7 +246,8 @@ differs is only the tool vocabulary and where the policy is enforced:
 | shell | `bash` | `Bash` |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
 | team tools | `peer_ask_lead` — your only team tool | `mcp__paseo-team__peer_ask_lead` |
-| not yours | `team_lease`, `team_fork`, `team_watchdog` are refused for a Peer: coordination runs through your Lead |  |
+| browser | `mcp({ tool: "browser_*" })` — Paseo Browser Control | `mcp__paseo__browser_*`, or `mcp__claude-in-chrome__*` (Claude's own) |
+| not yours | `team_lease`, `team_fork`, `team_watchdog` are refused for a Peer: coordination runs through your Lead | `AskUserQuestion` — you have no channel to the Human |
 
 Both runtimes share ONE rule set, so a call denied on one is denied on the
 other. On Claude, spawning subagents (`Task`) is denied for every role: work

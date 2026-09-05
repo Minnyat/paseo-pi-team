@@ -153,16 +153,31 @@ The notice is context, not a deny: nothing here blocks a tool.
 | Read/Glob/Grep | yes | yes | yes |
 | Bash | no | yes | yes, guarded |
 | Write/Edit | no | only with `PASEO_TEAM_LEAD_WRITE=1` | only with `MODE: write` + `EDIT_AUTHORITY: allowed` |
-| `mcp__paseo__*` | monitoring + `create_heartbeat`/`delete_heartbeat` + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
+| `mcp__paseo__*` (orchestration) | monitoring + `create_heartbeat`/`delete_heartbeat` + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
 | `mcp__paseo-team__*` | `team_watchdog`, `team_fork`, `team_lease` (`status` only) — it RECEIVES `lead_ask_supervisor` consults, never sends one | those three with `team_lease` unrestricted, plus `lead_ask_supervisor` | `peer_ask_lead` only |
-| `mcp__agent-browser__*` | no | yes | only with `BROWSER_MCP_AUTHORITY: allowed` |
+| `mcp__paseo__browser_*` (Browser Control) and `mcp__claude-in-chrome__*` | no | yes | yes, unless the brief says `BROWSER_MCP_AUTHORITY: denied` |
 | `Task` (Claude subagents) | no | no | no |
+| `AskUserQuestion` | yes | no | no |
 
 `Task` is denied for every role on purpose: a Claude subagent runs outside
 Paseo, so it carries no role prompt, no brief authority, and never appears in
 the team graph. Fan-out belongs to the Lead, through Paseo.
 
-The Peer bash guard is unchanged from pi: no Paseo CLI, no agent-browser CLI,
+`AskUserQuestion` is denied for the Lead and the Peer for the mirror-image
+reason: the escalation chain is Peer → Lead → Supervisor → Human, and a
+structured ask-the-user tool is the door that skips two links of it. pi never
+exposed one to any role, so leaving it open on Claude was also a cross-runtime
+authority asymmetry — a rule denied on one runtime denied on the other is the
+whole point of the shared core. It removes the interrupt, not the voice: a
+Lead's own turn output still reaches the Human it is talking to, which is where
+the irreversible actions `lead.md` reserves for them belong.
+
+Browser Control (`browser_*`) is registered by Paseo on the SAME MCP server as
+`create_agent`. It is classified by tool family rather than by server, or the
+Peer's orchestration wall takes the browser down with it — which is exactly
+what it used to do.
+
+The Peer bash guard is unchanged from pi: no Paseo CLI,
 no commit/push without the matching authority, force-push and merge never, and
 a granted push is branch-scoped to exactly
 `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`.
@@ -173,7 +188,7 @@ a granted push is branch-scoped to exactly
 present. Manually:
 
 ```bash
-node scripts/claude-setup.mjs --install          # hooks + paseo-team and agent-browser MCP servers
+node scripts/claude-setup.mjs --install          # hooks + the paseo-team MCP server
 node scripts/claude-setup.mjs --print-providers  # the claude-* provider block
 node scripts/claude-setup.mjs --verify           # exit 1 when incomplete
 pteam claude-setup --verify --json               # same thing through the CLI
@@ -189,15 +204,17 @@ merges: our entries are tagged `paseo-team-role-policy`, and only tagged
 entries are replaced or removed. A file that cannot be parsed is reported and
 left byte-for-byte alone.
 
-`~/.claude.json` gets two servers, and they are owned differently.
-`paseo-team` is ours and is rewritten on every install. `agent-browser` is the
-same stdio server the pi installer registers in `~/.pi/agent/mcp.json`, written
-in Claude's dialect (`type: "stdio"`, no `lifecycle`) — and an entry the user
-already configured is left exactly as it is. Without it the `Lead` and `Peer`
-rows for `mcp__agent-browser__*` in the table above are unreachable: the policy
-allows a tool the runtime never registered. `--verify` and `preflight` both
-report it, so the gap fails a check rather than surfacing as an agent that says
-it cannot reach a browser.
+`~/.claude.json` gets exactly one server: `paseo-team`, which is ours and is
+rewritten on every install.
+
+It used to get a second, `agent-browser`, so that the browser rows in the table
+above pointed at something the runtime had actually registered. That server is
+gone — the browser a Claude seat uses is now one it already has (Claude in
+Chrome, and Paseo Browser Control on the server the daemon injects), so there
+is nothing left for this installer to register. What it does instead is
+REMOVE an `agent-browser` entry a previous version of itself wrote, and leave
+alone one the user configured, which is the same ownership rule the merge
+always followed — dropping our integration is not a licence to delete theirs.
 
 ## Mixed-fleet routing
 
@@ -262,11 +279,25 @@ create_agent({
 The Paseo CLI spells the same thing `--mode` (`paseo run --mode default`), and
 so does `remote-paseo.mjs run`, which refuses a `claude-*` route without one.
 
-`modeId: "default"` is the right answer for a Peer: every tool call raises a
-Paseo permission the Lead triages, which is the loop the pack is built around.
-Use `acceptEdits` only for a write Peer whose brief already grants
-`EDIT_AUTHORITY`. Never `bypassPermissions` — the role policy still applies, but
-the human loses the permission gate.
+`modeId: "auto"` is the right answer for a Peer, and it is what
+`remote-paseo.mjs run` fills in when `--mode` is omitted
+(`CLAUDE_DEFAULT_MODE`).
+
+This used to say `"default"`, on the theory that every Peer tool call raising a
+Paseo permission for the Lead to triage was the loop the pack is built around.
+It is not: what bounds a Peer is the role policy plus its V3 brief, and both
+are enforced in the `PreToolUse` hook, before Paseo's permission queue ever
+sees the call. The queue only decides how often somebody is interrupted while
+the Peer does already-bounded work — and on `"default"` the answer is "every
+call", so the Peer sits in the queue looking hung while the Lead spends its
+turn clicking instead of leading. The same trap the Lead's own seat hit (next
+section), one level down.
+
+Narrow it deliberately when you want that: `"plan"` for a seat that should
+propose before acting, `"default"` for one you genuinely intend to watch call
+by call. `"acceptEdits"` is the middle setting for a write Peer whose brief
+already grants `EDIT_AUTHORITY`. Never `bypassPermissions` — the role policy
+still applies, but Paseo's own guardrails outside it are gone too.
 
 ### …including the Lead's own seat
 

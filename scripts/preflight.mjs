@@ -8,8 +8,7 @@
 // Checks (per host): node, git, paseo CLI + daemon, pi CLI, pi-mcp-adapter,
 // role-pack extension + prompts, Paseo role providers, model inventory,
 // routing-config validity, per-model thinking support, cluster routing
-// contract, endpoint env presence, agent-browser MCP registration per runtime,
-// CDP mode + reachability,
+// contract, endpoint env presence, the browser surface both runtimes share,
 // repository state.
 //
 // Never prints secret values: only env-var NAMES are checked/reported.
@@ -24,18 +23,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-	browserMcpInstalled,
 	claudeUserConfigPath,
 	readJsonOrNull,
 	verify as verifyClaudeSetup,
 } from "./claude-setup.mjs";
 import { orchestrationPreferencesNotice } from "./lib-common.mjs";
-import {
-	describeCdpTarget,
-	inspectAgentBrowser,
-	probeCdpEndpoint,
-	probeCdpExposure,
-} from "./browser-setup.mjs";
 import {
 	RoutingError,
 	buildProviderInventory,
@@ -252,6 +244,34 @@ let daemonUp = false;
 	}
 }
 
+// --- Paseo's bundled MCP server accepts a newer protocol header ----------------
+//
+// Paseo injects its orchestration MCP into every agent over HTTP, and its
+// pinned @modelcontextprotocol/sdk 400s a client that sends a protocol revision
+// newer than the SDK knows — which Claude Code does. Unpatched, every
+// `create_agent` / `send_agent_prompt` / `list_agents` from a Claude seat fails
+// mid-turn with nothing in the seat's own transcript explaining it; the only
+// trace is a line in ~/.paseo/daemon.log. That is precisely the kind of silence
+// preflight exists to break, and it comes back on every Paseo upgrade.
+{
+	try {
+		const { resolveSdkDir, runPatch } = await import("./patch-paseo-mcp.mjs");
+		const sdkDir = resolveSdkDir();
+		const result = runPatch({ sdkDir, mode: "verify" });
+		if (result.patched) pass("paseo-mcp-protocol", sdkDir);
+		else
+			fail(
+				"paseo-mcp-protocol",
+				"Paseo's bundled MCP SDK rejects Claude Code's protocol header — Claude seats lose the whole Paseo tool surface → run: node scripts/patch-paseo-mcp.mjs --apply (re-run after every `npm i -g @getpaseo/cli`)",
+			);
+	} catch (err) {
+		// No global Paseo install, an unreadable one, or an SDK layout this patch
+		// does not recognise. None of those is a reason to fail a preflight that
+		// may be running on a controller with no local daemon at all.
+		warn("paseo-mcp-protocol", `not checked: ${String(err.message).slice(0, 160)}`);
+	}
+}
+
 // --- pi-mcp-adapter -----------------------------------------------------------
 
 if (wantPi) {
@@ -287,112 +307,31 @@ if (wantPi) {
 	}
 }
 
-// --- agent-browser -------------------------------------------------------------
-
+// --- browser surface ----------------------------------------------------------
+//
+// The pack used to install `agent-browser` and probe it here: CLI, Chrome
+// runtime, bundled skill, an MCP entry per runtime, and a CDP attach target.
+// All of it is gone. Both runtimes now use a browser they already have —
+// Paseo Browser Control, which the daemon registers on its own MCP server and
+// injects into EVERY seat (gated on `daemon.browserTools.enabled` plus a
+// broker, never on the provider), and Claude in Chrome on Claude seats.
+//
+// So the browser check that remains is `paseo-mcp-protocol` above: Browser
+// Control rides the same /mcp/agents server as create_agent, and when that
+// server refuses Claude's protocol header the browser goes with it.
 {
-	const browser = inspectAgentBrowser();
-	if (browser.cli) pass("agent-browser-cli", browser.cliVersion || "installed");
-	else
+	// readJsonOrNull returns null for "absent" and undefined for "present but
+	// unreadable"; neither is evidence that the browser is off, and the default
+	// when the key is missing is enabled.
+	const daemonConfig = readJsonOrNull(join(homedir(), ".paseo", "config.json"));
+	const browserToolsOff =
+		Boolean(daemonConfig) && daemonConfig?.daemon?.browserTools?.enabled === false;
+	if (browserToolsOff)
 		fail(
-			"agent-browser-cli",
-			"agent-browser CLI missing → installer should run npm install -g agent-browser",
+			"paseo-browser-tools",
+			'daemon.browserTools.enabled is false in ~/.paseo/config.json — no seat has a browser on either runtime. Set it to true (`pteam config write paseo`) or accept that BROWSER_MCP_AUTHORITY grants nothing.',
 		);
-	if (browser.browserRuntime)
-		pass("agent-browser-runtime", "Chrome/runtime ready");
-	else
-		fail(
-			"agent-browser-runtime",
-			"Chrome/runtime missing or doctor failed → run agent-browser install",
-		);
-	// Everything from here to the Claude sub-check reads PI's own tree: the
-	// skill under ~/.pi/agent/skills and the MCP config at ~/.pi/agent/mcp.json.
-	// A host running `--runtime claude` has no reason to own either, so failing
-	// those checks there invents work — and under --strict it fails the WHOLE
-	// preflight over a file that host is correct not to have. The CLI and Chrome
-	// checks above stay unconditional: those are host-level, and both runtimes
-	// need them.
-	if (wantPi) {
-		if (browser.skill) pass("agent-browser-skill", browser.skillPath);
-		else
-			fail(
-				"agent-browser-skill",
-				`${browser.skillPath}/SKILL.md missing → installer should copy the bundled skill`,
-			);
-		if (browser.configReadable && browser.browserMcpEnabled)
-			pass("agent-browser-mcp", browser.configPath);
-		else if (!browser.configReadable)
-			fail(
-				"agent-browser-mcp",
-				`${browser.configPath} is missing or invalid JSON`,
-			);
-		else if (browser.browserMcp)
-			fail(
-				"agent-browser-mcp",
-				`${browser.configPath} contains a disabled agent-browser server`,
-			);
-		else
-			fail(
-				"agent-browser-mcp",
-				`${browser.configPath} has no agent-browser server entry`,
-			);
-
-		// How the entry reaches a browser. A config only names a port; without the
-		// probe below, an unreachable CDP target first shows up as a failed browser
-		// call in the middle of a Peer turn instead of as host unreadiness.
-		if (browser.browserMcpEnabled && browser.cdpTarget) {
-			const target = browser.cdpTarget;
-			if (target.mode === "launch") {
-				pass("agent-browser-cdp", describeCdpTarget(target));
-			} else if (target.mode === "ambiguous") {
-				fail(
-					"agent-browser-cdp",
-					`the agent-browser entry in ${browser.configPath} has ambiguous --cdp flags (duplicated with different ports, or one is missing its port) — leave exactly one "--cdp <port>"`,
-				);
-			} else {
-				const probe = await probeCdpEndpoint({ port: target.port });
-				if (probe.ok) {
-					pass(
-						"agent-browser-cdp",
-						`attached to 127.0.0.1:${target.port} (${probe.browser}) — a Peer granted BROWSER_MCP_AUTHORITY inherits every session in that profile`,
-					);
-					// Loopback reachability says nothing about the bind address. A
-					// browser started with --remote-debugging-address=0.0.0.0 hands
-					// full, unauthenticated control to the whole network. Only
-					// meaningful once something is actually listening.
-					const exposed = await probeCdpExposure({ port: target.port });
-					if (exposed.length > 0)
-						warn(
-							"agent-browser-cdp-exposure",
-							`CDP port ${target.port} also answers on ${exposed.join(", ")} — unauthenticated browser control is reachable off-host; bind the browser to 127.0.0.1`,
-						);
-					else pass("agent-browser-cdp-exposure", "CDP port is loopback-only");
-				} else {
-					fail(
-						"agent-browser-cdp",
-						`nothing answers CDP on 127.0.0.1:${target.port} (${probe.error}) — start the browser with --remote-debugging-port=${target.port}, or reinstall without --attach-cdp-port to use launch mode`,
-					);
-				}
-			}
-		}
-	}
-
-	// The checks above read PI's config only. Claude Code keeps its MCP servers
-	// in a different file with a different owner, so a pi-only probe reports a
-	// green browser surface for a fleet whose Claude seats have no browser tool
-	// at all — the exact silence this check exists to break.
-	if (wantClaude) {
-		const claudeConfigPath = claudeUserConfigPath();
-		const claudeConfig = readJsonOrNull(claudeConfigPath);
-		if (claudeConfig === undefined)
-			fail("agent-browser-mcp:claude", `${claudeConfigPath} is present but not valid JSON`);
-		else if (browserMcpInstalled(claudeConfig))
-			pass("agent-browser-mcp:claude", claudeConfigPath);
-		else
-			fail(
-				"agent-browser-mcp:claude",
-				`${claudeConfigPath} has no usable agent-browser server — Claude Lead/Peer cannot call mcp__agent-browser__* → run: node scripts/claude-setup.mjs --install`,
-			);
-	}
+	else pass("paseo-browser-tools", "daemon.browserTools enabled (default)");
 }
 
 // --- role-pack installation ---------------------------------------------------
