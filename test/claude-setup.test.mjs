@@ -379,7 +379,7 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 	);
 	// The regression this guards: mergeHooks runs FIRST and has already written
 	// settings.json by now, so skipping the whole mcp transform left a fleet
-	// governed by hooks with no team_chat, team_lease or peer_ask_lead at all —
+	// governed by hooks with no team_lease or peer_ask_lead at all —
 	// seats that come up policed and mute.
 	assert.ok(
 		written.mcpServers[TEAM_MCP_SERVER_NAME],

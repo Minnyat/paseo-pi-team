@@ -5,7 +5,7 @@
 // writer on the same files, and the failure is a corrupted working tree rather
 // than an error message.
 //
-// The ledger lives in a chat room, which gives a total order by server
+// The ledger is an append-only file, which gives a total order by append
 // timestamp but NO compare-and-swap (measured: four concurrent posts all
 // succeeded). So arbitration happens on read, and this file is where that
 // arbitration is pinned — it must be pure, so a lease decision never depends on

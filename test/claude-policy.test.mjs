@@ -407,45 +407,12 @@ assert.match(described, /edit=true/);
 assert.match(describeClaudePolicy("peer", null), /brief=none/);
 assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 
-// --- chat CLI guard: runtime parity ------------------------------------------
-// The coordination channel is a typed tool on BOTH runtimes. If the redirect
-// lived only in the Pi adapter, picking a `claude-lead` provider would be a
-// one-line bypass of the envelope, the room allowlist and the size ceiling —
-// which is exactly the failure mode policy-core exists to prevent.
-{
-	const bash = (role, command) =>
-		claudeToolBlockReason({ role, toolName: "Bash", toolInput: { command }, brief: null });
-
-	assert.match(String(bash("lead", "paseo chat ls")), /team_chat/);
-	assert.match(String(bash("lead", "paseo chat post coord hi")), /team_chat/);
-	assert.match(String(bash("lead", "paseo.cmd chat read coord")), /team_chat/);
-	assert.match(String(bash("lead", "echo hi && paseo chat post r x")), /team_chat/);
-
-	// Narrow on purpose: this is a chat redirect, not a new CLI ban.
-	assert.equal(bash("lead", "paseo ls -g"), null);
-	assert.equal(bash("lead", "node scripts/remote-paseo.mjs health --host-id mac"), null);
-	assert.equal(bash("lead", "git status"), null);
-
-	// A Peer never had chat and still does not — via the blanket Paseo CLI block.
-	assert.match(String(bash("peer", "paseo chat ls")), /Paseo CLI from bash/);
-
-	// And the tool itself is Lead/Supervisor only on this runtime too.
-	assert.equal(
-		claudeToolBlockReason({ role: "peer", toolName: "mcp__paseo-team__team_chat", toolInput: {}, brief: null }),
-		"team_chat is restricted to Lead and Supervisor agents.",
-	);
-	assert.equal(
-		claudeToolBlockReason({ role: "lead", toolName: "mcp__paseo-team__team_chat", toolInput: {}, brief: null }),
-		null,
-	);
-}
-
 // --- OCR-001 parity: the support-script side door is shut on Claude too ----
 {
 	const bash = (role, command) =>
 		claudeToolBlockReason({ role, toolName: "Bash", toolInput: { command }, brief: null });
 
-	assert.match(String(bash("peer", "node /x/paseo-team-scripts/team-chat.mjs post {}")), /support script/i);
+	assert.match(String(bash("peer", "node /x/paseo-team-scripts/team-lease.mjs claim {}")), /support script/i);
 	assert.match(String(bash("peer", "node /x/paseo-team-scripts/remote-paseo.mjs run")), /support script/i);
 	// The Reviewer Peer runs this one by design.
 	assert.equal(bash("peer", "node /x/paseo-team-scripts/ocr-review.mjs --repo r"), null);
@@ -454,7 +421,7 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 
 // --- scope lease: the same rule reaches the Claude runtime -------------------
 // The rule itself is pinned in scope-lease.test.mts. What is pinned HERE is that
-// the Claude adapter actually consults it — the leg that, for the chat guard,
+// the Claude adapter actually consults it — the leg that, for an earlier guard,
 // was missing on this runtime and would have made `claude-lead` a one-provider
 // bypass.
 {
@@ -551,7 +518,7 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 // Parity, not repetition: the rules are pinned in governance.test.mts, and what
 // is pinned HERE is that the Claude adapter consults them. A governance rule
 // present on one runtime only would let an operator pick a provider to escape
-// it — the exact failure the chat guard hit before the core split.
+// it — the exact failure a bash guard hit before the core split.
 {
 	const LEAD_A = "aaaaaaaa-3333-4333-8333-333333333333";
 	const LEAD_B = "bbbbbbbb-4444-4444-8444-444444444444";

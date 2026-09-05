@@ -110,23 +110,10 @@ export const LEAD_ALLOWED_MCP_TARGETS: string[] = [
 export const MCP_TOOLS = ["mcp", "mcp_script"];
 export const PEER_COMMUNICATION_TOOL = "peer_ask_lead";
 export const TEAM_WATCHDOG_TOOL = "team_watchdog";
-export const TEAM_CHAT_TOOL = "team_chat";
 export const TEAM_LEASE_TOOL = "team_lease";
 export const TEAM_FORK_TOOL = "team_fork";
 /** The Lead -> Supervisor consult channel; see the PR-H section below. */
 export const LEAD_CONSULT_TOOL = "lead_ask_supervisor";
-/** Payload ceiling, kept in sync with scripts/team-chat.mjs MAX_BODY_BYTES. */
-export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
-/** Mirror of TEAM_MESSAGE_KINDS in scripts/team-chat.mjs (shapes tool schemas). */
-export const TEAM_MESSAGE_KIND_NAMES = [
-	"handoff",
-	"dependency",
-	"claim",
-	"release",
-	"question",
-	"decision",
-	"progress",
-] as const;
 export const PI_READ_ONLY = ["read", "bash", PEER_COMMUNICATION_TOOL];
 export const PI_WRITE = ["read", "write", "edit", "bash", PEER_COMMUNICATION_TOOL];
 
@@ -242,7 +229,6 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 						(tool) => tool !== PEER_COMMUNICATION_TOOL,
 					),
 					TEAM_WATCHDOG_TOOL,
-					TEAM_CHAT_TOOL,
 					TEAM_LEASE_TOOL,
 					TEAM_FORK_TOOL,
 					LEAD_CONSULT_TOOL,
@@ -258,7 +244,7 @@ export function policyFor(role: TeamRole, peerMode: PeerMode): Policy {
 			// (ALL_PASEO_TOOLS) is checked FIRST. The surface that decides what
 			// the Supervisor may call is SUPERVISOR_ALLOWED_MCP_TARGETS.
 			return {
-				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_CHAT_TOOL, TEAM_LEASE_TOOL, TEAM_FORK_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
+				allow: ["read", "mcp", TEAM_WATCHDOG_TOOL, TEAM_LEASE_TOOL, TEAM_FORK_TOOL, ...PASEO_TOOLS.monitoring, "send_agent_prompt"],
 				deny: ["write", "edit", "mcp_script", ...ALL_PASEO_TOOLS],
 			};
 		case "peer":
@@ -338,35 +324,20 @@ export function denyReason(
 // ---------------------------------------------------------------------------
 
 const PASEO_CLI_RE =
-	/\b(paseo|paseo-pi|pio)(?:\.(?:cmd|exe|ps1|sh))?\s+(?:run|send|ls|agent|workspace|provider|schedule|heartbeat|daemon|status|attach|logs|stop|delete|archive|inspect|wait|import|clone|onboard|start|restart|hub|chat|terminal|script|loop|permit|speech|hooks|help)\b/i;
+	/\b(paseo|paseo-pi|pio)(?:\.(?:cmd|exe|ps1|sh))?\s+(?:run|send|ls|agent|workspace|provider|schedule|heartbeat|daemon|status|attach|logs|stop|delete|archive|inspect|wait|import|clone|onboard|start|restart|hub|terminal|script|loop|permit|speech|hooks|help)\b/i;
 
 export function callsPaseoCli(command: string): boolean {
 	return PASEO_CLI_RE.test(command);
 }
 
 /**
- * `paseo chat ...` in a bash command, in any spelling the shims use.
- *
- * Chat is the coordination bus between Leads and Supervisors, and it is the one
- * Paseo surface with no MCP tool behind it (60 tools, none of them chat --
- * measured 2026-08-27). Left on bash it is a channel no policy can inspect: no
- * room allowlist, no TEAM_MESSAGE_V1 envelope, no size ceiling, no audit.
- */
-const PASEO_CHAT_CLI_RE =
-	/\b(paseo|paseo-pi|pio)(?:\.(?:cmd|exe|ps1|sh))?\s+chat\b/i;
-
-export function callsPaseoChatCli(command: string): boolean {
-	return PASEO_CHAT_CLI_RE.test(command);
-}
-
-/**
  * Direct invocation of a pack support script that grants authority the caller's
  * role does not have.
  *
- * Blocking `paseo chat` while leaving `node .../team-chat.mjs` open moves the
- * bypass one word to the left: the script's own gate reads PASEO_PI_ROLE and
- * PASEO_AGENT_ID from an environment the calling process owns, so it can only
- * check what the caller asserts. This puts both spellings at the same bar.
+ * A script's own gate reads PASEO_PI_ROLE and PASEO_AGENT_ID from an
+ * environment the calling process owns, so it can only check what the caller
+ * asserts. Naming the script here puts the direct invocation at the same bar as
+ * the tool it backs.
  *
  * Two scripts are deliberately NOT listed:
  *   - ocr-review.mjs        the Reviewer skill runs it directly, by design
@@ -377,7 +348,7 @@ export function callsPaseoChatCli(command: string): boolean {
  * boundary: a determined process can always re-spell the invocation. It closes
  * the obvious door, and the daemon remains the only real boundary.
  */
-const AUTHORITY_SUPPORT_SCRIPTS = ["team-chat.mjs", "remote-paseo.mjs"];
+const AUTHORITY_SUPPORT_SCRIPTS = ["team-lease.mjs", "remote-paseo.mjs"];
 const SUPPORT_SCRIPT_RE = new RegExp(
 	`(?:^|[\\s"'\`/\\\\])(${AUTHORITY_SUPPORT_SCRIPTS.map((name) => name.replace(".", "\\.")).join("|")})(?=$|["'\`\\s])`,
 	"i",
@@ -398,10 +369,11 @@ export function callsTeamSupportScript(command: string): boolean {
 // of them staffing writers on the same files, and that failure shows up as a
 // corrupted working tree rather than an error.
 //
-// The ledger is a chat room. That buys a total order by server timestamp
-// (measured: four concurrent posts, four distinct timestamps, none lost) but no
-// compare-and-swap — every CLAIM succeeds. Arbitration therefore happens on
-// READ, here, and this module stays pure: it is handed the ledger as data so a
+// The ledger is an append-only file this pack owns (lease-ledger.mjs); it used
+// to be a Paseo chat room, until Paseo retired those in 0.4.0. Either way it is
+// evidence, not a lock: append order is the total order and there is no
+// compare-and-swap, so arbitration happens on READ, here, and this module stays
+// pure: it is handed the ledger as data so a
 // lease decision never depends on a daemon being reachable, and so the same
 // rules run identically on both runtimes.
 // ---------------------------------------------------------------------------
@@ -561,7 +533,7 @@ export interface LeaseHolder {
  * the body, which the sender writes. That is the same rule the message graph
  * follows, and for the same reason: an id the claimant supplies proves nothing.
  *
- * @param entries rows from `paseo chat read --json` (author, createdAt, body)
+ * @param entries ledger records (author, createdAt, body)
  */
 export function resolveLeases(
 	entries: unknown,
@@ -779,30 +751,10 @@ export function supportScriptBlockReason(
 }
 
 /**
- * Lead/Supervisor bash guard: redirect the chat CLI to the typed tool.
+ * The text the runtime adapters put on the team_lease tool.
  *
- * Deliberately narrow -- a chat-only redirect, not a new CLI ban. Every other
- * Paseo command a Lead runs from bash (remote-paseo.mjs, `ls`, status checks)
- * is untouched. Peers are already covered by the blanket callsPaseoCli() block
- * and are not this function's business.
- *
- * This lives in the CORE, not in an adapter: a Lead running on Claude must hit
- * the same wall as a Lead running on Pi, or the guard is decoration.
- */
-export function coordinationCliBlockReason(
-	role: TeamRole,
-	command: string,
-): string | null {
-	if (role !== "lead" && role !== "supervisor") return null;
-	if (!callsPaseoChatCli(command)) return null;
-	return `Use the team_chat tool instead of the Paseo chat CLI. The typed tool enforces the TEAM_MESSAGE_V1 envelope, the room allowlist, the ${TEAM_CHAT_MAX_BODY_BYTES}-byte payload ceiling and hop/TTL loop protection - none of which exist when the command is typed by hand.`;
-}
-
-/**
- * One sentence the runtime adapters put in the team_chat tool description.
- * Deliberately does NOT claim the chat surface is sealed: the bash rules are
- * heuristics, rooms are unrestricted unless PASEO_TEAM_ROOMS is set, and chat
- * rooms have no ACL of their own.
+ * Kept in the core so a Lead on Claude and a Lead on Pi read the same sentence;
+ * the parity test pins the adapters to it.
  */
 export function teamLeaseToolDescription(): string {
 	return (
@@ -811,17 +763,6 @@ export function teamLeaseToolDescription(): string {
 		"Scopes are repo-relative paths and nest: holding `src` also holds `src/auth`. " +
 		"A claim can lose — read `granted` in the result, not merely `ok`. " +
 		"Creating a write-mode Peer without a covering lease is refused."
-	);
-}
-
-export function teamChatToolDescription(): string {
-	return (
-		"Coordinate with other Leads and Supervisors through a Paseo chat room. " +
-		"`post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; " +
-		"`read` returns the room with envelopes parsed; `rooms` lists rooms. " +
-		"Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. " +
-		"Use this instead of the Paseo chat CLI, which the bash guard redirects here. " +
-		"Rooms are unrestricted unless PASEO_TEAM_ROOMS is set."
 	);
 }
 
@@ -1010,7 +951,7 @@ export function domainConflicts(a: unknown, b: unknown): boolean {
 // `team.domain` answers "what does this seat govern". It never answered "where
 // does this seat live", and every governance read in this file is host-global:
 // `buildStateIndex` walks EVERY cwd-slug under `$PASEO_HOME/agents`, and
-// team-chat's domain fan-out runs `paseo ls -g`, the flag whose whole purpose
+// a domain fan-out runs `paseo ls -g`, the flag whose whole purpose
 // is to escape cwd scoping. With one project on a host that difference never
 // showed. With two it does, and in three separate ways:
 //
@@ -1690,13 +1631,13 @@ export function supervisorTurnNotice({
 // cover: the Lead speaking first.
 //
 // The channel is `lead_ask_supervisor`, deliberately shaped like the block it
-// wants back rather than like a chat message:
+// wants back rather than like a bare message:
 //
 //   - it carries OPTIONS, EVIDENCE and REVERSIBILITY, which are three of the
 //     four Delegated-decision criteria in `supervisor.md`. A consult that
 //     cannot fill them is one the Supervisor would have bounced anyway, so the
 //     schema refuses it at the sender rather than after a round trip;
-//   - it is delivered as a PROMPT (`paseo send`), not as a chat post, because
+//   - it is delivered as a PROMPT (`paseo send`) because
 //     a prompt wakes an idle Supervisor AND opens a turn — which is what makes
 //     the notice below fire;
 //   - a cluster with no Supervisor seat is a NAMED answer
@@ -2173,8 +2114,8 @@ export function leadConsultTurnNotice({
  * `peer_ask_lead` and must not have a second escalation path that its own Lead
  * cannot see — that is how a Peer routes around a Lead's decision. A Supervisor
  * consulting itself is a loop, and a Supervisor consulting ANOTHER Supervisor
- * is a governance conversation that belongs in `team_chat` where it is logged
- * as a message edge rather than arriving as a delegated-decision request.
+ * is a peer conversation between equals — it belongs in a direct prompt, not in
+ * a channel whose whole shape says "decide this for me".
  */
 export function leadConsultToolBlockReason(
 	role: TeamRole,
@@ -2185,7 +2126,7 @@ export function leadConsultToolBlockReason(
 	if (role === "peer") {
 		return `${LEAD_CONSULT_TOOL} is restricted to Lead agents. A Peer escalates through peer_ask_lead so its own Lead sees the question; a second path to the Supervisor would route around that Lead.`;
 	}
-	return `${LEAD_CONSULT_TOOL} is restricted to Lead agents — it is the channel INTO your seat, not out of it. Use team_chat to reach another coordinator.`;
+	return `${LEAD_CONSULT_TOOL} is restricted to Lead agents — it is the channel INTO your seat, not out of it. To reach another coordinator, prompt them directly — a Lead or Supervisor is a permitted send_agent_prompt target.`;
 }
 
 export function leadAskSupervisorToolDescription(): string {
@@ -2408,14 +2349,14 @@ export function sendAgentPromptBlockReason({
 	}
 	if (isSelf) return null;
 	if (!target) {
-		return `BLOCKED: PROMPT_TARGET_UNKNOWN — Paseo has no readable state for agent ${targetId}, so it cannot be shown to belong to this seat. Confirm the id with list_agents, or reach its owner through team_chat.`;
+		return `BLOCKED: PROMPT_TARGET_UNKNOWN — Paseo has no readable state for agent ${targetId}, so it cannot be shown to belong to this seat. Confirm the id with list_agents.`;
 	}
 	if (ownSubagent) return null;
 	if (target.role === "lead" || target.role === "supervisor") {
 		return crossClusterPromptBlockReason(targetId, target, cluster);
 	}
 	const owner = target.parentAgentId ?? "an unknown parent";
-	return `BLOCKED: PROMPT_TARGET_NOT_OWNED — agent ${targetId} is not this seat's subagent (its parent is ${owner}) and is not a Lead or Supervisor. Prompting another Lead's Peer bypasses that Lead's brief, authority and scope lease. Coordinate with ${owner} through team_chat instead.`;
+	return `BLOCKED: PROMPT_TARGET_NOT_OWNED — agent ${targetId} is not this seat's subagent (its parent is ${owner}) and is not a Lead or Supervisor. Prompting another Lead's Peer bypasses that Lead's brief, authority and scope lease. Ask ${owner} to staff it — that Lead is itself a permitted prompt target.`;
 }
 
 /**
@@ -2701,17 +2642,35 @@ export const ROLE_PROVIDERS: string[] = RUNTIME_FAMILIES.flatMap((family) =>
 export interface RoleProvider {
 	family: RuntimeFamily;
 	role: TeamRole;
+	/** Seat variant name for "<family>-<role>-<seat>"; null for a base provider. */
+	seat: string | null;
 }
 
-/** Split "claude-peer" → { family: "claude", role: "peer" }; null when unknown. */
+/** Tail of a seat provider name — mirrors SEAT_ID_RE in scripts/seat-profiles.mjs. */
+const SEAT_TAIL_RE = /^[a-z][a-z0-9-]{1,23}$/;
+
+/**
+ * Split "claude-peer" → { family: "claude", role: "peer", seat: null }, and
+ * "claude-peer-researcher" → { ..., seat: "researcher" }; null when unknown.
+ *
+ * Seat variants MUST resolve here, and that is a security property rather than
+ * a convenience: every provider-name gate in this file (the Supervisor-seat
+ * check in leadCreateSupervisorArgsBlockReason, isLeadRecoveryProvider) asks
+ * this function what role a provider is. A parser that returned null for
+ * "claude-supervisor-audit" would make those gates silently skip a seat that
+ * carries full Supervisor authority — the deny would look like an allow.
+ */
 export function parseRoleProvider(name: string): RoleProvider | null {
 	const head = name.split("/")[0]?.trim().toLowerCase() ?? "";
 	for (const family of RUNTIME_FAMILIES) {
 		const prefix = `${family}-`;
 		if (!head.startsWith(prefix)) continue;
-		const role = head.slice(prefix.length);
-		if (ROLES.includes(role as TeamRole)) {
-			return { family, role: role as TeamRole };
+		const rest = head.slice(prefix.length);
+		for (const role of ROLES) {
+			if (rest === role) return { family, role, seat: null };
+			if (!rest.startsWith(`${role}-`)) continue;
+			const seat = rest.slice(role.length + 1);
+			if (SEAT_TAIL_RE.test(seat)) return { family, role, seat };
 		}
 	}
 	return null;
@@ -2830,7 +2789,7 @@ export function supervisorCreateAgentArgsBlockReason(
  * (`leadCreateWorkspaceBlockReason` mandates it), so it has a different
  * `workspaceId` AND a different `cwd` from the Lead that owns it. Unlabelled,
  * that Peer reads as a foreign cluster to every cluster-scoped rule
- * (`supervisorTurnVerdict`, `team_chat` fan-out, the lease board).
+ * (`supervisorTurnVerdict`, the lease board).
  *
  * Applies to the only two create_agent paths a role in this pack has: a
  * Lead's own create_agent, and a Supervisor's gated lead-recovery create_agent
@@ -2877,7 +2836,7 @@ export function clusterLabelBlockReason({
 			: {};
 	const declared = normalizeCluster(labels[TEAM_CLUSTER_LABEL]);
 	if (!declared) {
-		return `Refusing create_agent: labels["${TEAM_CLUSTER_LABEL}"] is required and must be "${own}" — this seat's own cluster. Without it the new seat cannot be told apart from one in another workspace, and every cluster-scoped rule (SUPERVISOR_DECISION, team_chat, scope lease) will silently treat it as foreign.`;
+		return `Refusing create_agent: labels["${TEAM_CLUSTER_LABEL}"] is required and must be "${own}" — this seat's own cluster. Without it the new seat cannot be told apart from one in another workspace, and every cluster-scoped rule (SUPERVISOR_DECISION, scope lease) will silently treat it as foreign.`;
 	}
 	if (declared !== own) {
 		return `Refusing create_agent: labels["${TEAM_CLUSTER_LABEL}"] is "${declared}", but this seat's own cluster is "${own}". Stamping a new agent into a different cluster is an escalation — its future Peers would appear inside that other cluster's authority. Set it to "${own}", or create the agent from a seat that actually belongs to cluster "${declared}".`;
@@ -3624,8 +3583,6 @@ export function teamToolBlockReason(
 	if (toolName === TEAM_WATCHDOG_TOOL && role !== "lead" && role !== "supervisor") {
 		return "team_watchdog is restricted to Lead and Supervisor agents.";
 	}
-	const chatReason = teamChatToolBlockReason(role, toolName);
-	if (chatReason) return chatReason;
 	// The lease tool's action is not visible here (teamToolBlockReason takes a
 	// name, not arguments), so this is the coarse gate; the adapters apply the
 	// per-action one with the arguments in hand.
@@ -3695,21 +3652,3 @@ export function teamLeaseToolBlockReason(
 	return "team_lease is restricted to Lead agents (Supervisor may read status).";
 }
 
-/**
- * Who may hold the coordination channel. A Peer coordinates with exactly one
- * agent -- its parent Lead -- and has peer_ask_lead for that; a room would hand
- * it a broadcast surface the parent cannot see.
- *
- * Called with a role alone it answers "may this role hold team_chat at all",
- * which is what the runtime adapters ask before exposing the tool.
- */
-export function teamChatToolBlockReason(
-	role: TeamRole,
-	toolName: string = TEAM_CHAT_TOOL,
-): string | null {
-	if (toolName !== TEAM_CHAT_TOOL) return null;
-	if (role !== "lead" && role !== "supervisor") {
-		return "team_chat is restricted to Lead and Supervisor agents.";
-	}
-	return null;
-}

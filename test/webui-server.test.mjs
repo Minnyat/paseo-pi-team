@@ -30,12 +30,6 @@ import {
 	const graph = await handleApi({ method: "GET", pathname: "/api/graph", query: { all: "1", maxInspect: "8" }, exec: echo });
 	assert.deepEqual(graph.args, ["graph", "--all", "--max-inspect", "8"]);
 
-	// The coordination view: chat rooms are opt-in and reach argv only after a
-	// pattern check, so a WebUI field can never grow into a command-line
-	// injection point.
-	const withChat = await handleApi({ method: "GET", pathname: "/api/graph", query: { withChat: "leases,coord" }, exec: echo });
-	assert.deepEqual(withChat.args, ["graph", "--with-chat", "leases,coord"]);
-
 	const agents = await handleApi({ method: "GET", pathname: "/api/agents", query: {}, exec: echo });
 	assert.deepEqual(agents.args, ["agents"], "a missing flag is absent, never the string 'undefined'");
 }
@@ -54,10 +48,7 @@ import {
 	await rejects("/api/prompts", { role: "root" });
 	await rejects("/api/agent", { id: "not an id" });
 	await rejects("/api/skill", { name: "../secret" });
-	await rejects("/api/chat/read", { room: "a room with spaces" });
 	await rejects("/api/graph", { maxInspect: "99999" });
-	await rejects("/api/graph", { withChat: "leases; rm -rf /" });
-	await rejects("/api/graph", { withChat: "a,b,c,d,e,f,g,h,i" });
 	await rejects("/api/permits/decide", {}, "POST", JSON.stringify({ action: "approve-all", agentId: "aaaaaaaa", requestId: "r" }));
 	await rejects("/api/permits/decide", {}, "POST", JSON.stringify({ action: "allow", agentId: "; rm -rf /", requestId: "r" }));
 
@@ -150,12 +141,12 @@ assert.equal(bearerToken({ headers: {} }), null);
 	assert.equal(failures, 2, "failed answers are never cached");
 
 	// Scoped invalidation: a POST drops only the reads its write can reach,
-	// so a chat message must not throw away a 60s preflight answer.
+	// so prompting an agent must not throw away a 60s preflight answer.
 	const fresh = () => Promise.resolve({ exitCode: 0, stdout: "{}" });
-	await cache.run("chat list", 60_000, fresh, "chat");
+	await cache.run("agents", 60_000, fresh, "agents");
 	await cache.run("preflight --json", 60_000, fresh, "preflight");
-	cache.invalidate(["chat"]);
-	assert.ok(!(await cache.run("chat list", 60_000, fresh, "chat")).cached, "the invalidated tag re-runs");
+	cache.invalidate(["agents"]);
+	assert.ok(!(await cache.run("agents", 60_000, fresh, "agents")).cached, "the invalidated tag re-runs");
 	assert.equal((await cache.run("preflight --json", 60_000, fresh, "preflight")).cached, true, "an untouched tag survives");
 }
 
@@ -219,23 +210,23 @@ assert.equal(bearerToken({ headers: {} }), null);
 	const auth = { authorization: "Bearer t" };
 	const base = `http://127.0.0.1:${handle.port}`;
 	try {
-		const chatFirst = await (await fetch(`${base}/api/chat`, { headers: auth })).json();
+		const agentsFirst = await (await fetch(`${base}/api/agents`, { headers: auth })).json();
 		const preflightFirst = await (await fetch(`${base}/api/preflight`, { headers: auth })).json();
-		assert.equal(chatFirst.cached, false);
+		assert.equal(agentsFirst.cached, false);
 		assert.equal(preflightFirst.cached, false);
 
-		const posted = await fetch(`${base}/api/chat/post`, {
+		const posted = await fetch(`${base}/api/agent/send`, {
 			method: "POST",
 			headers: { ...auth, "content-type": "application/json" },
-			body: JSON.stringify({ room: "team", message: "hello" }),
+			body: JSON.stringify({ agentId: "aaaaaaaa-1111-4111-8111-111111111111", prompt: "hello" }),
 		});
 		assert.equal(posted.status, 200);
 
-		const chatAgain = await (await fetch(`${base}/api/chat`, { headers: auth })).json();
-		assert.equal(chatAgain.cached, false, "chat answers were invalidated by the post");
+		const agentsAgain = await (await fetch(`${base}/api/agents`, { headers: auth })).json();
+		assert.equal(agentsAgain.cached, false, "agent answers were invalidated by the post");
 
 		const preflightAgain = await (await fetch(`${base}/api/preflight`, { headers: auth })).json();
-		assert.equal(preflightAgain.cached, true, "a chat post must not throw away the 60s preflight answer");
+		assert.equal(preflightAgain.cached, true, "a prompt must not throw away the 60s preflight answer");
 		assert.equal(calls.filter((call) => call.startsWith("preflight")).length, 1, "preflight ran exactly once");
 	} finally {
 		await handle.close();
@@ -282,7 +273,7 @@ assert.equal(bearerToken({ headers: {} }), null);
 
 // --- every route is a real CLI subcommand ---------------------------------
 {
-	const known = new Set(["status", "preflight", "config", "prompts", "skills", "env", "install", "agents", "agent", "permits", "chat", "graph", "watchdog", "web"]);
+	const known = new Set(["status", "preflight", "config", "prompts", "skills", "env", "install", "agents", "agent", "permits", "graph", "watchdog", "web", "seats"]);
 	for (const [key, route] of Object.entries(ROUTES)) {
 		const { args } = route.build(
 			{ section: "providers", role: "lead", id: "aaaa1111-2222-3333-4444-555555555555", name: "paseo-team-lead", room: "team" },

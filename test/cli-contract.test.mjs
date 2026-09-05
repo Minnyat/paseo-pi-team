@@ -47,7 +47,7 @@ try {
 	{
 		const help = run(["--help"]);
 		assert.equal(help.status, 0);
-		for (const command of ["agents", "permits list", "graph", "web", "chat read", "update", "uninstall", "models"]) {
+		for (const command of ["agents", "permits list", "graph", "web", "update", "uninstall", "models"]) {
 			assert.ok(help.stdout.includes(command), `help documents '${command}'`);
 		}
 
@@ -145,19 +145,6 @@ try {
 		assert.equal(warm.json.inspectSpent, 0);
 		assert.equal(warm.json.pendingParents, 0);
 		assert.equal(warm.json.counts.edges, 2);
-	}
-
-	// --- chat ----------------------------------------------------------------
-	{
-		const rooms = run(["chat", "list"]);
-		assert.equal(rooms.json.rooms[0].name, "team");
-
-		const read = run(["chat", "read", "team", "--limit", "10"]);
-		assert.equal(read.json.messages[0].body, "hello");
-
-		const badRoom = run(["chat", "read", "../etc"]);
-		assert.notEqual(badRoom.status, 0);
-		assert.match(badRoom.stderr, /invalid room/);
 	}
 
 	// --- config still round-trips through the sandbox ------------------------
@@ -493,6 +480,86 @@ try {
 		// The interception must not swallow an ordinary run.
 		const stillWorks = run(["agents"]);
 		assert.equal(stillWorks.status, 0, stillWorks.stderr);
+	}
+
+	// --- seats: config section, generation, and provider ownership ----------
+	{
+		const seatsFile = join(sandbox, "team", "seat-profiles.local.json");
+		const paseoConfig = join(sandbox, "paseo-config.json");
+
+		// The section is readable before the file exists, and carries the form
+		// schema — a WebUI opening this tab on a fresh machine must get a form,
+		// not an error.
+		const empty = run(["config", "read", "seats"]);
+		assert.equal(empty.status, 0, empty.stderr);
+		assert.equal(empty.json.exists, false);
+		assert.ok(empty.json.schema, "the seats section ships a form schema");
+		assert.equal(empty.json.path, seatsFile, "the seat file honours PST_TEAM_CONFIG_DIR");
+
+		// Written the way the WebUI writes it: full JSON on stdin.
+		const doc = {
+			version: 1,
+			seats: {
+				researcher: { base: "claude-peer", label: "Claude Peer (Researcher)", capabilities: ["web-research"] },
+				audit: { base: "pi-lead", capabilities: ["lead-write"] },
+			},
+		};
+		const wrote = run(["config", "write", "seats"], { __stdin: JSON.stringify(doc) });
+		assert.equal(wrote.status, 0, wrote.stderr);
+
+		const listed = run(["seats", "list"]);
+		assert.equal(listed.status, 0, listed.stderr);
+		assert.equal(listed.json.ok, true, JSON.stringify(listed.json.errors));
+		assert.ok(listed.json.catalog.length > 0, "the capability catalog travels with the answer");
+		const generated = listed.json.providers;
+		assert.deepEqual(Object.keys(generated).sort(), ["claude-peer-researcher", "pi-lead-audit"]);
+		assert.equal(generated["claude-peer-researcher"].env.PASEO_PI_ROLE, "peer");
+		assert.equal(generated["claude-peer-researcher"].env.PASEO_TEAM_EXTRA_TOOLS, "WebFetch,WebSearch");
+		// The two policy layers must agree: the dynamic layer is opened by the env
+		// above, so the static layer must no longer strip the same tools.
+		const denied = generated["claude-peer-researcher"].disallowedTools ?? [];
+		assert.ok(!denied.includes("WebFetch") && !denied.includes("WebSearch"), "a granted tool is not also statically denied");
+		assert.ok(denied.includes("Task") && denied.includes("Agent"), "everything else the peer may never use stays denied");
+		assert.equal("disallowedTools" in generated["pi-lead-audit"], false, "pi providers carry no deny list");
+
+		// A dry run answers with the same plan and writes nothing.
+		const before = existsSync(paseoConfig) ? readFileSync(paseoConfig, "utf8") : null;
+		const dry = run(["seats", "apply", "--dry-run"]);
+		assert.equal(dry.status, 0, dry.stderr);
+		assert.equal(dry.json.dryRun, true);
+		assert.deepEqual(dry.json.created.sort(), ["claude-peer-researcher", "pi-lead-audit"]);
+		assert.equal(existsSync(paseoConfig) ? readFileSync(paseoConfig, "utf8") : null, before, "--dry-run writes nothing");
+
+		const applied = run(["seats", "apply"]);
+		assert.equal(applied.status, 0, applied.stderr);
+		const config = JSON.parse(readFileSync(paseoConfig, "utf8"));
+		assert.ok(config.agents.providers["claude-peer-researcher"], "the provider reached the Paseo config");
+
+		// Removing the seat removes the provider it created, and only that one.
+		config.agents.providers["hand-written"] = { extends: "claude", label: "not ours" };
+		writeFileSync(paseoConfig, JSON.stringify(config, null, 2));
+		delete doc.seats.researcher;
+		run(["config", "write", "seats"], { __stdin: JSON.stringify(doc) });
+		const reapplied = run(["seats", "apply"]);
+		assert.deepEqual(reapplied.json.removed, ["claude-peer-researcher"]);
+		const after = JSON.parse(readFileSync(paseoConfig, "utf8"));
+		assert.equal("claude-peer-researcher" in after.agents.providers, false);
+		assert.ok(after.agents.providers["hand-written"], "a provider this tool never created survives");
+		assert.ok(after.agents.providers["pi-lead-audit"], "a seat that is still defined survives");
+
+		// An invalid document is refused whole, with the reason, and changes nothing.
+		run(["config", "write", "seats"], {
+			__stdin: JSON.stringify({ seats: { bad: { base: "claude-supervisor", capabilities: ["web-research"] } } }),
+		});
+		const refused = run(["seats", "apply"]);
+		assert.equal(refused.status, 1, "an invalid seat document is an error exit");
+		assert.equal(refused.json.ok, false);
+		assert.equal(refused.json.code, "SEATS_INVALID");
+		assert.ok(refused.json.errors.length > 0);
+		const untouched = JSON.parse(readFileSync(paseoConfig, "utf8"));
+		assert.ok(untouched.agents.providers["pi-lead-audit"], "a refused apply leaves the previous providers alone");
+
+		assert.equal(run(["seats", "nonsense"]).status, 2, "an unknown seats subcommand is a usage error");
 	}
 } finally {
 	rmSync(sandbox, { recursive: true, force: true });

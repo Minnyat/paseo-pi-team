@@ -67,7 +67,6 @@ import {
 	teamToolBlockReason,
 	PEER_COMMUNICATION_TOOL,
 	TEAM_WATCHDOG_TOOL,
-	TEAM_CHAT_TOOL,
 	TEAM_LEASE_TOOL,
 	TEAM_FORK_TOOL,
 	LEAD_CONSULT_TOOL,
@@ -83,11 +82,8 @@ import {
 	teamForkToolDescription,
 	teamLeaseToolBlockReason,
 	teamLeaseToolDescription,
-	TEAM_CHAT_MAX_BODY_BYTES,
-	TEAM_MESSAGE_KIND_NAMES,
 	agentOwnership,
 	classifyMcpInput,
-	coordinationCliBlockReason,
 	leaseBlockReason,
 	matchesPaseoToolName,
 	parseSupervisorBlock,
@@ -102,8 +98,6 @@ import {
 	type GovernanceContext,
 	type SupervisorSeat,
 	supportScriptBlockReason,
-	teamChatToolBlockReason,
-	teamChatToolDescription,
 	writerScopeFromCreateAgent,
 	type ParsedTaskBrief,
 	type PeerMode,
@@ -377,39 +371,6 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 		},
 	});
 	pi.registerTool({
-		name: TEAM_CHAT_TOOL,
-		label: "team_chat",
-		description: teamChatToolDescription(),
-		parameters: {
-			type: "object",
-			properties: {
-				action: { type: "string", enum: ["post", "read", "rooms"] },
-				room: { type: "string", maxLength: 128 },
-				kind: { type: "string", enum: [...TEAM_MESSAGE_KIND_NAMES] },
-				topic: { type: "string", maxLength: 128 },
-				message: { type: "string", minLength: 1, maxLength: TEAM_CHAT_MAX_BODY_BYTES },
-				to: { type: "array", items: { type: "string", maxLength: 136 }, minItems: 1, maxItems: 64 },
-				correlationId: { type: "string", maxLength: 128 },
-				replyTo: { type: "string", maxLength: 128 },
-				hop: { type: "integer", minimum: 0, maximum: 7 },
-				ttl: { type: "integer", minimum: 1, maximum: 8 },
-				since: { type: "string", maxLength: 64 },
-				limit: { type: "integer", minimum: 1, maximum: 500 },
-			},
-			required: ["action"],
-			additionalProperties: false,
-		} as any,
-		async execute(_id, params, signal, _onUpdate, _ctx) {
-			const blocked = teamChatToolBlockReason(r, TEAM_CHAT_TOOL);
-			if (blocked) return { content: [{ type: "text", text: blocked }], details: undefined, isError: true };
-			const { action, ...rest } = (params ?? {}) as Record<string, unknown>;
-			const command = action === "post" ? "post" : action === "read" ? "read" : "rooms";
-			const args = command === "rooms" ? [command] : [command, JSON.stringify(rest)];
-			const result = await runSupportScript("team-chat.mjs", args, signal);
-			return { content: [{ type: "text", text: result.stdout || result.stderr }], details: undefined, isError: result.code !== 0 };
-		},
-	});
-	pi.registerTool({
 		name: TEAM_LEASE_TOOL,
 		label: "team_lease",
 		description: teamLeaseToolDescription(),
@@ -672,12 +633,6 @@ export default function (pi: ExtensionAPI) {
 			const blockReason = mcpScriptBlockReason(r, code);
 			if (blockReason) {
 				return { block: true, reason: blockReason };
-			}
-		}
-		if ((r === "lead" || r === "supervisor") && isToolCallEventType("bash", event)) {
-			const chatReason = coordinationCliBlockReason(r, event.input.command ?? "");
-			if (chatReason) {
-				return { block: true, reason: chatReason };
 			}
 		}
 		if (r === "peer" && isToolCallEventType("bash", event)) {

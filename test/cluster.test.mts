@@ -3,7 +3,7 @@
  *
  * `team.domain` said what a seat governs; nothing said WHERE it lives. Every
  * governance read in policy-core is host-global (`buildStateIndex` walks every
- * cwd-slug, team-chat's fan-out runs `paseo ls -g`), so two projects sharing a
+ * cwd-slug, a domain fan-out runs `paseo ls -g`), so two projects sharing a
  * machine reached into each other. These tests pin the three properties that
  * fix has to hold:
  *

@@ -36,7 +36,7 @@ const serverPath = join(root, "scripts", "claude-team-mcp.mjs");
 	// runtime and not the other is a capability the other runtime silently lacks.
 	assert.deepEqual(
 		listed.result.tools.map((tool) => tool.name).sort(),
-		["lead_ask_supervisor", "peer_ask_lead", "team_chat", "team_fork", "team_lease", "team_watchdog"],
+		["lead_ask_supervisor", "peer_ask_lead", "team_fork", "team_lease", "team_watchdog"],
 	);
 	for (const tool of listed.result.tools) {
 		assert.equal(tool.inputSchema.type, "object");
@@ -91,7 +91,6 @@ assert.deepEqual(
 	[
 		["lead_ask_supervisor", ["lead"]],
 		["peer_ask_lead", ["peer"]],
-		["team_chat", ["lead", "supervisor"]],
 		["team_fork", ["lead", "supervisor"]],
 		["team_lease", ["lead", "supervisor"]],
 		["team_watchdog", ["lead", "supervisor"]],
@@ -119,36 +118,14 @@ assert.deepEqual(
 	assert.equal(messages[3].result.tools.length, TEAM_TOOLS.length);
 }
 
-// The Pi extension takes this text from policy-core's teamChatToolDescription();
-// this file is plain .mjs and cannot import the .ts core, so the string is
-// mirrored — and drift between the two runtimes is exactly what this pack's
-// parity tests exist to catch.
+// Every tool description is mirrored from policy-core: this file is plain .mjs
+// and cannot import the .ts core, so drift between the two runtimes is exactly
+// what this pack's parity tests exist to catch.
 {
-	const { teamChatToolDescription } = await import("../extensions/paseo-team-core/policy-core.ts");
-	const chat = TEAM_TOOLS.find((tool) => tool.name === "team_chat");
-	assert.equal(
-		chat.description,
-		teamChatToolDescription(),
-		"the Claude tool description must not drift from the shared one",
-	);
-	assert.ok(
-		!/only sanctioned/i.test(chat.description),
-		"and must not overstate closure: the bash rules are heuristics, not a boundary",
-	);
-
-	// The payload ceiling exists in three unlinked copies for the same reason the
-	// description does: this file cannot import the .ts core, and team-chat.mjs is
-	// a separate process. Only team-chat.mjs ENFORCES it — the other two advertise
-	// it — so drift would leave a schema promising more than the tool accepts.
-	// Same parity rule for the lease tool: one description, two runtimes.
+	// One description, two runtimes.
 	const lease = TEAM_TOOLS.find((tool) => tool.name === "team_lease");
 	const { teamLeaseToolDescription } = await import("../extensions/paseo-team-core/policy-core.ts");
-	assert.equal(lease.description, teamLeaseToolDescription(), "the lease description must not drift either");
-
-	const { TEAM_CHAT_MAX_BODY_BYTES: coreCeiling } = await import("../extensions/paseo-team-core/policy-core.ts");
-	const { MAX_BODY_BYTES: enforcedCeiling } = await import("../scripts/team-chat.mjs");
-	assert.equal(chat.inputSchema.properties.message.maxLength, enforcedCeiling, "the Claude schema advertises what team-chat.mjs enforces");
-	assert.equal(coreCeiling, enforcedCeiling, "and so does the shared core");
+	assert.equal(lease.description, teamLeaseToolDescription(), "the lease description must not drift");
 
 	// Same parity rule for the fork tool, and one more for its reason set: the
 	// enum in this schema is what a Claude Lead can even ASK for, so a reason

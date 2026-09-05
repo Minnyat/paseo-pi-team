@@ -1,17 +1,24 @@
 /**
  * team-lease.test.mjs — the I/O half of the scope lease.
  *
- * The arbitration itself is pure and lives in scope-lease.test.mts. What is
- * tested here is the part that talks to the room: that a lease event is posted
- * as a RECORD (no mention, so no Lead is woken for bookkeeping), that the caller
- * is told whether it actually won rather than merely that the post succeeded,
- * and — the one that matters most — that an unreadable ledger is reported as
- * "unknown" and never as "empty".
+ * The arbitration itself is pure and lives in scope-lease.test.mts; the store
+ * underneath is tested in lease-ledger.test.mjs. What is tested here is the
+ * seam between them: that a lease event is written as a RECORD (nobody is woken
+ * for bookkeeping), that the caller is told whether it actually won rather than
+ * merely that the write succeeded, and — the one that matters most — that an
+ * unreadable ledger is reported as "unknown" and never as "empty".
+ *
+ * The ledger stopped being a Paseo chat room when Paseo retired chat rooms in
+ * 0.4.0. Two guarantees used to come from that room for free and are now this
+ * file's business to prove: only a Lead or Supervisor may write to the board,
+ * and every record carries the id of the seat that wrote it.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	DEFAULT_TTL_MS,
-	LEASE_ROOM,
 	MAX_TTL_MS,
 	claimScope,
 	fetchLeases,
@@ -19,6 +26,7 @@ import {
 	releaseScope,
 	renewScope,
 } from "../scripts/team-lease.mjs";
+import { createLedger } from "../scripts/lease-ledger.mjs";
 import { LEASE_MAX_TTL_MS } from "../extensions/paseo-team-core/policy-core.ts";
 
 const SELF = "11111111-1111-4111-8111-111111111111";
@@ -31,28 +39,45 @@ function record(author, action, scope, at, ttlMs = DEFAULT_TTL_MS) {
 	return { id: `m-${at}`, author, createdAt: new Date(at).toISOString(), body: lines.join("\n") };
 }
 
-/** A fake daemon: `chat read` returns the given ledger, `chat post` appends. */
-function fakeRoom(initial = []) {
+/** An in-memory board that records what it was asked to do. */
+function fakeLedger(initial = []) {
 	const messages = [...initial];
-	const calls = [];
+	const appended = [];
+	const reads = [];
 	return {
 		messages,
-		calls,
-		run: async (args) => {
-			calls.push(args);
-			if (args[0] === "chat" && args[1] === "read") return messages;
-			if (args[0] === "chat" && args[1] === "post") {
-				const posted = { id: `m-${messages.length}`, author: SELF, createdAt: new Date(NOW - 1).toISOString(), body: args[3] };
-				messages.push(posted);
-				return posted;
-			}
-			throw new Error(`unexpected argv: ${args.join(" ")}`);
+		appended,
+		reads,
+		path: "<memory>",
+		async append({ author, body, now }) {
+			const written = { id: `m-${messages.length}`, author, createdAt: new Date(now).toISOString(), body };
+			appended.push(written);
+			messages.push(written);
+			return written;
+		},
+		async read({ since, limit }) {
+			reads.push({ since, limit });
+			const floor = Date.parse(since);
+			const windowed = messages.filter((m) => Date.parse(m.createdAt) >= floor);
+			const kept = windowed.length > limit ? windowed.slice(windowed.length - limit) : windowed;
+			return { path: "<memory>", messages: kept, count: kept.length };
 		},
 	};
 }
 
-const opts = (room, extra = {}) => ({
-	runPaseo: room.run,
+/** A board that cannot be read at all — the "we do not know" case. */
+const brokenLedger = (code = "LEASE_LEDGER_UNREADABLE") => ({
+	path: "<broken>",
+	append: async () => {
+		throw Object.assign(new Error("board unwritable"), { code: "LEASE_LEDGER_UNWRITABLE" });
+	},
+	read: async () => {
+		throw Object.assign(new Error("board unreadable"), { code });
+	},
+});
+
+const opts = (ledger, extra = {}) => ({
+	ledger,
 	selfAgentId: SELF,
 	role: "lead",
 	now: NOW,
@@ -64,44 +89,41 @@ const opts = (room, extra = {}) => ({
 // out" must never collapse into the same answer, because the guard treats them
 // as opposite.
 {
-	const result = await fetchLeases({
-		runPaseo: async () => { throw Object.assign(new Error("daemon down"), { code: "CLI_ERROR" }); },
-		selfAgentId: SELF,
-		role: "lead",
-		now: NOW,
-	});
+	const result = await fetchLeases(opts(brokenLedger()));
 	assert.equal(result.ok, false);
 	assert.equal(result.leases, null, "null, never an empty map");
-	assert.match(String(result.message), /daemon down/);
+	assert.match(String(result.message), /unreadable/i);
 }
 
 // --- claiming a free scope ---------------------------------------------------
 {
-	const room = fakeRoom();
-	const result = await claimScope({ scope: "./src/auth/" }, opts(room));
+	const ledger = fakeLedger();
+	const result = await claimScope({ scope: "./src/auth/" }, opts(ledger));
 	assert.equal(result.ok, true);
 	assert.equal(result.scope, "src/auth", "the scope is normalized before it reaches the ledger");
 	assert.equal(result.granted, true);
 	assert.equal(result.holder.agentId, SELF);
 	assert.equal(result.ttlMs, DEFAULT_TTL_MS);
+	assert.ok(result.recordId, "the caller can cite the record it wrote");
 
-	const posted = room.calls.find((c) => c[1] === "post");
-	assert.ok(posted[3].includes("LEASE_V1"));
-	assert.ok(posted[3].includes("ACTION: claim"));
-	assert.ok(posted[3].includes("SCOPE: src/auth"));
-	assert.equal(posted[2], LEASE_ROOM);
+	assert.equal(ledger.appended.length, 1);
+	const [written] = ledger.appended;
+	assert.equal(written.author, SELF, "the record carries the seat that claimed — nothing stamps it for us now");
+	assert.ok(written.body.includes("LEASE_V1"));
+	assert.ok(written.body.includes("ACTION: claim"));
+	assert.ok(written.body.includes("SCOPE: src/auth"));
 	// A record wakes nobody: no mention head, and no recipient lookup was needed.
-	assert.ok(!posted[3].startsWith("@"), "a bookkeeping entry must not pull a Lead out of its work");
-	assert.ok(!room.calls.some((c) => c[0] === "ls"));
+	assert.ok(!written.body.startsWith("@"), "a bookkeeping entry must not pull a Lead out of its work");
 }
 
 // --- losing the race ---------------------------------------------------------
-// The post still succeeds — the room has no compare-and-swap — so the caller
-// must be told who actually holds the scope rather than that the write worked.
+// The write still succeeds — the board is append-only evidence, not a lock — so
+// the caller must be told who actually holds the scope rather than that the
+// write worked.
 {
-	const room = fakeRoom([record(OTHER, "claim", "src/auth", NOW - 1000)]);
-	const result = await claimScope({ scope: "src/auth/login" }, opts(room));
-	assert.equal(result.ok, true, "posting an intent is not an error");
+	const ledger = fakeLedger([record(OTHER, "claim", "src/auth", NOW - 1000)]);
+	const result = await claimScope({ scope: "src/auth/login" }, opts(ledger));
+	assert.equal(result.ok, true, "writing an intent is not an error");
 	assert.equal(result.granted, false, "but it did not win");
 	assert.equal(result.holder.agentId, OTHER);
 	assert.equal(result.holder.scope, "src/auth", "and the report names the covering scope, not the requested one");
@@ -109,134 +131,103 @@ const opts = (room, extra = {}) => ({
 
 // --- release and renew -------------------------------------------------------
 {
-	const room = fakeRoom([record(SELF, "claim", "src/auth", NOW - 1000)]);
-	const released = await releaseScope({ scope: "src/auth" }, opts(room));
+	const ledger = fakeLedger([record(SELF, "claim", "src/auth", NOW - 1000)]);
+	const released = await releaseScope({ scope: "src/auth" }, opts(ledger));
 	assert.equal(released.granted, false, "after releasing, we no longer hold it");
 	assert.equal(released.holder, null);
 	assert.equal(released.ttlMs, null, "a release carries no TTL");
-	assert.ok(room.calls.find((c) => c[1] === "post")[3].includes("ACTION: release"));
+	assert.ok(ledger.appended[0].body.includes("ACTION: release"));
 }
 {
-	const room = fakeRoom([record(SELF, "claim", "src/auth", NOW - 1000, 2000)]);
-	const renewed = await renewScope({ scope: "src/auth", ttlMs: 60_000 }, opts(room));
+	const ledger = fakeLedger([record(SELF, "claim", "src/auth", NOW - 1000, 2000)]);
+	const renewed = await renewScope({ scope: "src/auth", ttlMs: 60_000 }, opts(ledger));
 	assert.equal(renewed.granted, true);
 	assert.ok(renewed.holder.expiresAt > NOW, "the renew pushed the expiry past now");
 }
 
 // --- status ------------------------------------------------------------------
 {
-	const room = fakeRoom([
+	const ledger = fakeLedger([
 		record(OTHER, "claim", "src/billing", NOW - 3000),
 		record(SELF, "claim", "src/auth", NOW - 1000),
 	]);
-	const status = await leaseStatus({}, opts(room));
+	const status = await leaseStatus({}, opts(ledger));
 	assert.equal(status.ok, true);
 	assert.equal(status.count, 2);
 	assert.deepEqual(status.leases.map((l) => l.scope), ["src/billing", "src/auth"], "oldest claim first");
 	assert.match(status.leases[0].expiresAtIso, /^\d{4}-/, "expiry is readable, not a bare epoch");
 
-	const scoped = await leaseStatus({ scope: "src/auth/login" }, opts(room));
+	const scoped = await leaseStatus({ scope: "src/auth/login" }, opts(ledger));
 	assert.equal(scoped.holder.agentId, SELF, "asking about a child scope answers with its covering lease");
 }
 {
 	// An unreadable ledger must be visible in status too, not rendered as "no
 	// leases held" — that reading is what would invite a second writer.
-	const status = await leaseStatus({}, {
-		runPaseo: async () => { throw Object.assign(new Error("nope"), { code: "CLI_ERROR" }); },
-		selfAgentId: SELF,
-		role: "lead",
-		now: NOW,
-	});
+	const status = await leaseStatus({}, opts(brokenLedger()));
 	assert.equal(status.ok, false);
 	assert.equal(status.leases, null);
 }
 
 // --- input validation --------------------------------------------------------
 {
-	const room = fakeRoom();
-	await assert.rejects(claimScope({ scope: "../outside" }, opts(room)), /scope must be/i);
-	await assert.rejects(claimScope({ scope: "" }, opts(room)), /scope must be/i);
-	await assert.rejects(claimScope({}, opts(room)), /scope must be/i);
-	await assert.rejects(claimScope({ scope: "src", ttlMs: 0 }, opts(room)), /ttlMs/);
-	await assert.rejects(claimScope({ scope: "src", ttlMs: MAX_TTL_MS + 1 }, opts(room)), /ttlMs/);
-	await assert.rejects(claimScope({ scope: "src", ttlMs: 1.5 }, opts(room)), /ttlMs/);
-	assert.equal(room.calls.length, 0, "nothing invalid ever reached the room");
+	const ledger = fakeLedger();
+	await assert.rejects(claimScope({ scope: "../outside" }, opts(ledger)), /scope must be/i);
+	await assert.rejects(claimScope({ scope: "" }, opts(ledger)), /scope must be/i);
+	await assert.rejects(claimScope({}, opts(ledger)), /scope must be/i);
+	await assert.rejects(claimScope({ scope: "src", ttlMs: 0 }, opts(ledger)), /ttlMs/);
+	await assert.rejects(claimScope({ scope: "src", ttlMs: MAX_TTL_MS + 1 }, opts(ledger)), /ttlMs/);
+	await assert.rejects(claimScope({ scope: "src", ttlMs: 1.5 }, opts(ledger)), /ttlMs/);
+	assert.equal(ledger.appended.length, 0, "nothing invalid ever reached the board");
 }
 
-// Only Lead and Supervisor hold the chat channel at all, so a Peer cannot post
-// a lease either — the check lives in team-chat and is inherited here.
+// --- only a coordinator may write to the board -------------------------------
+// This used to be inherited: the board was a chat room and chat was Lead and
+// Supervisor only. With the room gone the gate has to be stated here, or a
+// Peer would quietly gain the ability to lock scopes.
 {
-	const room = fakeRoom();
-	await assert.rejects(claimScope({ scope: "src" }, opts(room, { role: "peer" })), /ROLE_NOT_ALLOWED/);
+	const ledger = fakeLedger();
+	await assert.rejects(claimScope({ scope: "src" }, opts(ledger, { role: "peer" })), /ROLE_NOT_ALLOWED/);
+	assert.equal(ledger.appended.length, 0, "a refused role writes nothing");
 }
 
-// --- the ledger room does not exist yet -------------------------------------
-// First run on a fresh machine: nobody has created the room. Making that the
-// operator's problem would mean the very first claim fails with a CLI error and
-// the Lead has no idea it was supposed to run a setup step.
+// --- a record with no author is refused, not written anonymously -------------
+// resolveLeases drops a row whose author is not a string, and it drops it
+// silently — the claim would look like it succeeded and hold nothing.
 {
-	let created = 0;
-	let postAttempts = 0;
-	const messages = [];
-	const run = async (args) => {
-		if (args[0] === "chat" && args[1] === "create") {
-			created += 1;
-			return { id: "room-1", name: args[2] };
-		}
-		if (args[0] === "chat" && args[1] === "post") {
-			postAttempts += 1;
-			if (created === 0) throw Object.assign(new Error("chat room not found"), { code: "CLI_ERROR" });
-			const posted = { id: "m1", author: SELF, createdAt: new Date(NOW - 1).toISOString(), body: args[3] };
-			messages.push(posted);
-			return posted;
-		}
-		if (args[0] === "chat" && args[1] === "read") return messages;
-		throw new Error(`unexpected argv: ${args.join(" ")}`);
-	};
-
-	const result = await claimScope({ scope: "src/auth" }, { runPaseo: run, selfAgentId: SELF, role: "lead", now: NOW });
-	assert.equal(result.granted, true, "the first claim on a fresh machine succeeds");
-	assert.equal(created, 1, "the ledger room is created on demand");
-	assert.equal(postAttempts, 2, "created only after the post showed it was missing — the happy path stays one call");
-}
-
-{
-	// A create that fails for any other reason must not be retried forever, and
-	// the original post error is what the caller needs to see.
-	const run = async (args) => {
-		if (args[0] === "chat" && args[1] === "create") throw Object.assign(new Error("permission denied"), { code: "CLI_ERROR" });
-		if (args[0] === "chat" && args[1] === "post") throw Object.assign(new Error("chat room not found"), { code: "CLI_ERROR" });
-		return [];
-	};
+	const ledger = fakeLedger();
 	await assert.rejects(
-		claimScope({ scope: "src/auth" }, { runPaseo: run, selfAgentId: SELF, role: "lead", now: NOW }),
-		/room not found/,
-		"the caller is told what actually failed, not what the recovery attempt failed at",
+		claimScope({ scope: "src" }, { ledger, role: "lead", now: NOW, selfAgentId: "" }),
+		/SELF_UNKNOWN/,
 	);
+	assert.equal(ledger.appended.length, 0);
+}
+
+// --- a board that does not exist yet is not a failure ------------------------
+// First claim on a fresh machine. The chat room needed a create-then-retry
+// dance for this; a file needs none, but the outcome has to be the same: the
+// claim succeeds rather than reporting the board as broken.
+{
+	const path = join(mkdtempSync(join(tmpdir(), "pteam-lease-")), "lease-ledger.jsonl");
+	const result = await claimScope({ scope: "src/auth" }, opts(createLedger({ path })));
+	assert.equal(result.granted, true, "the first claim on a fresh machine succeeds");
+	assert.equal(result.ledger, path, "and it says which board it wrote to");
 }
 
 // --- the read window must not be able to hide a live lease ------------------
-// Reading "the last N messages" made a live claim invisible once the room moved
+// Reading "the last N records" made a live claim invisible once the board moved
 // past it: the scope then read as FREE, which is the silent two-writer outcome
 // this whole mechanism exists to prevent — and any Lead could force it by
-// posting cheap records until a victim's claim fell off the end.
+// writing cheap records until a victim's claim fell off the end.
 //
 // The window is therefore time-based, and the bound is the one fact that makes
 // it safe: no lease can outlive LEASE_MAX_TTL_MS, so nothing live can sit
 // outside a window that covers it.
 {
-	let since = null;
-	const run = async (args) => {
-		if (args[0] === "chat" && args[1] === "read") {
-			const index = args.indexOf("--since");
-			since = index >= 0 ? args[index + 1] : null;
-			return [];
-		}
-		throw new Error(`unexpected argv: ${args.join(" ")}`);
-	};
-	const result = await fetchLeases({ runPaseo: run, selfAgentId: SELF, role: "lead", now: NOW });
+	const ledger = fakeLedger();
+	const result = await fetchLeases(opts(ledger));
 	assert.equal(result.ok, true);
-	assert.ok(since, "the ledger is read by time, not by message count");
+	const { since } = ledger.reads[0];
+	assert.ok(since, "the ledger is read by time, not by record count");
 	const windowMs = NOW - Date.parse(since);
 	assert.ok(
 		windowMs >= LEASE_MAX_TTL_MS,
@@ -245,16 +236,11 @@ const opts = (room, extra = {}) => ({
 }
 
 {
-	// If the daemon still returns a full page, the read may have been cut short
-	// and the board is not known to be complete. Report it as UNREADABLE — a
+	// If the board comes back at the cap, the read may have been cut short and
+	// the board is not known to be complete. Report it as UNREADABLE — a
 	// truncated board that reads as "free" is exactly the failure being fixed.
 	const full = Array.from({ length: 2000 }, (_, i) => record(OTHER, "claim", `src/s${i}`, NOW - 1000));
-	const result = await fetchLeases({
-		runPaseo: async () => full,
-		selfAgentId: SELF,
-		role: "lead",
-		now: NOW,
-	});
+	const result = await fetchLeases(opts(fakeLedger(full)));
 	assert.equal(result.ok, false, "a possibly-truncated read is not a board");
 	assert.equal(result.leases, null);
 	assert.match(String(result.code), /TRUNCATED/);

@@ -12,7 +12,7 @@
  * only make sense if you know what a JSON config is.
  *
  * Everything is inserted with textContent, never innerHTML: agent names and
- * chat bodies are model-authored text, and this page holds a token that can
+ * message bodies are model-authored text, and this page holds a token that can
  * approve permission requests.
  */
 
@@ -822,26 +822,10 @@ function openDrawer(node) {
 
 $("drawer-close").addEventListener("click", () => $("node-drawer").classList.add("hidden"));
 
-/**
- * Chat rooms are opt-in because each one costs a daemon round trip. The field
- * is normalized here so a stray space or trailing comma does not turn into a
- * rejected request the operator has to decode.
- */
-function graphRooms() {
-	return ($("graph-rooms")?.value ?? "")
-		.split(",")
-		.map((room) => room.trim())
-		.filter((room) => /^[A-Za-z0-9._-]{1,128}$/.test(room))
-		.slice(0, 8)
-		.join(",");
-}
-
 async function refreshGraph({ silent = false } = {}) {
 	try {
 		const params = new URLSearchParams();
 		if ($("graph-all").checked) params.set("all", "1");
-		const rooms = graphRooms();
-		if (rooms) params.set("withChat", rooms);
 		const query = params.toString();
 		lastGraph = (await api(`/api/graph${query ? `?${query}` : ""}`)).data;
 		if (activeTab === "graph") renderTeam(lastGraph);
@@ -946,6 +930,8 @@ const configState = {
 	section: null,
 	schema: null,
 	doc: {},
+	/** The document as it is on disk, for "unsaved edits?" checks. */
+	saved: {},
 	mode: "form",
 	// Repaint callbacks for fields whose options follow a sibling field.
 	// Rebuilt from scratch on every render — a stale closure would write into
@@ -1087,6 +1073,72 @@ function enumControl(field, path, prefix) {
 	return fallback ? el("div", { class: "cfg-swap" }, [select, fallback]) : select;
 }
 
+/**
+ * A checkbox set writing an array of ids.
+ *
+ * The offered list is the intersection of the schema's `enum` and whatever
+ * `optionsBy` allows for the sibling it depends on — a capability the catalog
+ * refuses for the chosen base role is not merely disabled, it is absent, since
+ * `seats apply` would reject the document anyway.
+ *
+ * A value already in the document that the current list does not offer stays
+ * visible and CHECKED, flagged as out-of-list. Silently dropping it would make
+ * switching a seat's base quietly rewrite its grants on the next save.
+ */
+function flagsControl(field, path, prefix) {
+	const wrap = el("div", { class: "cfg-flags" });
+	const describe = new Map((field.options ?? []).map((option) => [option.id, option]));
+
+	const current = () => {
+		const value = getPath(configState.doc, path);
+		return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
+	};
+
+	const write = (next) => {
+		if (next.length === 0) deletePath(configState.doc, path);
+		else setPath(configState.doc, path, next);
+	};
+
+	const paint = () => {
+		clear(wrap);
+		const dependent = field.optionsBy ? dependentOptions(field.optionsBy, configState.doc, prefix) : null;
+		const allowed = dependent !== null ? dependent : (field.enum ?? []);
+		const chosen = current();
+		const extra = chosen.filter((id) => !allowed.includes(id));
+		if (allowed.length === 0 && extra.length === 0) {
+			wrap.appendChild(el("p", { class: "cfg-hint", text: "Vai trò gốc này chưa có năng lực nào cấp thêm được." }));
+			return;
+		}
+		for (const id of [...allowed, ...extra]) {
+			const option = describe.get(id) ?? { id, label: id };
+			const box = el("input", { type: "checkbox" });
+			box.checked = chosen.includes(id);
+			box.addEventListener("change", () => {
+				const next = current().filter((value) => value !== id);
+				if (box.checked) next.push(id);
+				write(next);
+			});
+			const tools = Array.isArray(option.tools) && option.tools.length > 0 ? option.tools.join(", ") : null;
+			const envKeys = Object.keys(option.env ?? {});
+			const grants = [tools, envKeys.length > 0 ? envKeys.join(", ") : null].filter(Boolean).join(" · ");
+			wrap.appendChild(
+				el("label", { class: "cfg-flag" }, [
+					box,
+					el("span", { class: "cfg-flag-body" }, [
+						el("span", { class: "cfg-flag-label", text: extra.includes(id) ? `${option.label} (ngoài danh sách)` : option.label }),
+						grants ? el("code", { class: "cfg-flag-grant", text: grants }) : null,
+						option.hint ? el("span", { class: "cfg-hint", text: option.hint }) : null,
+					]),
+				]),
+			);
+		}
+	};
+
+	paint();
+	if (field.optionsBy) configState.dependents.push(whenDependencyChanges(field.optionsBy, prefix, paint));
+	return wrap;
+}
+
 function linesControl(field, path) {
 	const area = el("textarea", { class: "cfg-lines", rows: "3", spellcheck: "false" });
 	const current = getPath(configState.doc, path);
@@ -1212,13 +1264,14 @@ function fieldControl(field, path, prefix) {
 	if (field.type === "enum") return enumControl(field, path, prefix);
 	if (field.type === "lines") return linesControl(field, path);
 	if (field.type === "kv") return kvControl(field, path);
+	if (field.type === "flags") return flagsControl(field, path, prefix);
 	if (field.type === "map") return mapControl(field, path);
 	return stringControl(field, path, prefix);
 }
 
 function fieldRow(field, prefix) {
 	const path = joinPath(prefix, field.path);
-	const row = el("div", { class: `cfg-field${field.type === "map" ? " cfg-field-wide" : ""}` });
+	const row = el("div", { class: `cfg-field${field.type === "map" || field.type === "flags" ? " cfg-field-wide" : ""}` });
 	row.appendChild(
 		el("div", { class: "cfg-label" }, [
 			el("label", { text: field.label }),
@@ -1332,6 +1385,9 @@ async function loadConfig() {
 		configState.section = section;
 		configState.schema = data.schema ?? null;
 		configState.doc = data.exists ? clone(data.data) : clone(configState.schema?.seed ?? {});
+		// What is on disk right now, so "Áp dụng ghế" can tell edited from saved.
+		configState.saved = pruneEmpty(clone(configState.doc)) ?? {};
+		$("seats-apply").classList.toggle("hidden", section !== "seats");
 		$("config-meta").textContent = `${data.path}${data.exists ? "" : " (chưa tồn tại — lưu sẽ tạo mới)"}`;
 		$("config-editor").value = JSON.stringify(configState.doc, null, 2);
 		// A section without a schema keeps the old raw-JSON editor.
@@ -1343,6 +1399,36 @@ async function loadConfig() {
 
 $("config-load").addEventListener("click", loadConfig);
 $("config-section").addEventListener("change", loadConfig);
+
+/**
+ * Apply the SAVED seat document, never the form's working copy.
+ *
+ * The CLI reads the file, so applying while the form holds unsaved edits would
+ * generate providers from a document the user is still writing. Refusing with
+ * a message beats generating something they did not ask for.
+ */
+$("seats-apply").addEventListener("click", async () => {
+	if (JSON.stringify(pruneEmpty(clone(configState.doc)) ?? {}) !== JSON.stringify(configState.saved ?? {})) {
+		toast("Còn thay đổi chưa lưu. Bấm Lưu trước rồi mới Áp dụng.", true);
+		return;
+	}
+	try {
+		const { data } = await api("/api/seats/apply", { method: "POST", body: {} });
+		if (data.ok === false) {
+			toast(`Không áp dụng được: ${(data.errors ?? []).join(" | ")}`, true);
+			return;
+		}
+		const parts = [
+			data.created?.length ? `tạo ${data.created.join(", ")}` : null,
+			data.updated?.length ? `cập nhật ${data.updated.join(", ")}` : null,
+			data.removed?.length ? `gỡ ${data.removed.join(", ")}` : null,
+			data.skipped?.length ? `bỏ qua (đã có sẵn, không phải do công cụ tạo): ${data.skipped.join(", ")}` : null,
+		].filter(Boolean);
+		toast(parts.length > 0 ? `${parts.join("; ")}. ${data.note}` : `Không có gì thay đổi. ${data.note}`);
+	} catch (error) {
+		toastError(error);
+	}
+});
 $("config-mode-form").addEventListener("click", () => setConfigMode("form"));
 $("config-mode-raw").addEventListener("click", () => setConfigMode("raw"));
 $("config-save").addEventListener("click", async () => {
@@ -1379,60 +1465,6 @@ $("config-save").addEventListener("click", async () => {
 loaders.config = async () => {
 	if (configState.section !== $("config-section").value) await loadConfig();
 };
-
-// --- chat ------------------------------------------------------------------
-
-loaders.chat = async () => {
-	try {
-		const { data } = await api("/api/chat");
-		const select = clear($("chat-room"));
-		const rooms = data.rooms ?? [];
-		if (rooms.length === 0) {
-			clear($("chat-body")).appendChild(
-				el("div", { class: "empty" }, [
-					el("div", { class: "empty-icon", text: "…" }),
-					el("p", { text: "Chưa có phòng trao đổi nào." }),
-					el("p", { class: "hint", text: "Phòng do người phụ trách tạo bằng lệnh: paseo chat create <tên>" }),
-				]),
-			);
-			return;
-		}
-		for (const room of rooms) {
-			const name = room?.name ?? room?.id ?? String(room);
-			select.appendChild(el("option", { value: name, text: name }));
-		}
-	} catch (error) {
-		clear($("chat-body")).appendChild(errorBlock(error));
-	}
-};
-
-$("chat-load").addEventListener("click", async () => {
-	const room = $("chat-room").value;
-	if (!room) return;
-	try {
-		const { data } = await api(`/api/chat/read?room=${encodeURIComponent(room)}&limit=100`);
-		const body = clear($("chat-body"));
-		const messages = Array.isArray(data.messages) ? data.messages : [];
-		if (messages.length === 0) {
-			body.appendChild(el("p", { class: "hint", text: "Phòng này chưa có tin nhắn nào." }));
-			return;
-		}
-		for (const message of messages) {
-			const author = message.agentId ?? message.author ?? "";
-			body.appendChild(
-				el("div", { class: "message" }, [
-					el("div", {
-						class: "meta",
-						text: `${agentNameFor(author) || author || "không rõ"} · ${relativeTime(message.createdAt ?? message.ts)}`,
-					}),
-					el("div", { text: String(message.body ?? message.message ?? JSON.stringify(message)) }),
-				]),
-			);
-		}
-	} catch (error) {
-		toastError(error);
-	}
-});
 
 // --- boot ------------------------------------------------------------------
 

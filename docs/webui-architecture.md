@@ -32,7 +32,7 @@ màn hình là sai lầm thiết kế phổ biến nhất ở lớp này.
 |---|---|---|---|
 | **Config** | file trong `~/.pi`, `~/.paseo`, `~/.paseo-pi-team` | thay đổi hiếm | full-JSON qua stdin, atomic + backup |
 | **Permission** | daemon Paseo (`paseo permit`) + policy tĩnh của role | giây, đang chặn agent | hành vi có thẩm quyền, cần audit |
-| **Observability** | daemon Paseo (`ls`/`inspect`/`logs`/`chat`) | 2-5s | chỉ đọc + gửi prompt |
+| **Observability** | daemon Paseo (`ls`/`inspect`/`logs`) | 2-5s | chỉ đọc + gửi prompt |
 
 ### "Cấp quyền" là hai thứ khác nhau
 
@@ -48,6 +48,18 @@ Phải tách bạch trong UI, vì nhầm lẫn chúng là lỗi bảo mật:
 WebUI hiển thị (2) ở dạng chỉ-đọc-có-giải-thích (render từ chính bảng policy),
 và cho sửa qua env/prompt/brief. Không có nút "cấp full quyền".
 
+**Ngoại lệ duy nhất, có chủ đích: tab "Ghế tuỳ biến"** (section `seats`) tạo ra
+authority thật — nó sinh provider Paseo mang `PASEO_TEAM_EXTRA_TOOLS` /
+`PASEO_TEAM_LEAD_WRITE`. Ba ràng buộc giữ nó nằm trong tinh thần trên:
+
+- Người dùng chọn **năng lực** trong danh mục `scripts/seat-profiles.mjs`, không
+  bao giờ gõ tên tool. Trình duyệt không có đường nào cấp một tool mà code chưa
+  duyệt — cùng lời hứa mà `config-schema.mjs` đã giữ cho các trường cấu hình.
+- Mỗi năng lực tự khai vai trò gốc và runtime family nhận được nó, nên UI không
+  chào một quyền mà `seats apply` sẽ từ chối.
+- Ghi provider là một hành động **riêng** (`POST /api/seats/apply`), không đi kèm
+  thao tác lưu file, và chỉ đụng những tên có trong sổ cái nó tự tạo.
+
 ## 2. Bề mặt dữ liệu thật của Paseo (đã probe, CLI 0.3.0)
 
 Xác minh trực tiếp trên daemon local, không suy đoán từ tài liệu:
@@ -60,7 +72,6 @@ paseo inspect <id> --json-> { Id, Name, Provider, Model, Status, Mode, Cwd,
                               PendingPermissions[], Worktree, ParentAgentId }
 paseo permit ls --json   -> [] (pending permission toàn cục)
 paseo permit allow|deny <agent> [req_id]
-paseo chat ls|create|inspect|post|read|wait   -> kênh phối hợp nhiều agent
 paseo logs <id> [--tail n] [--filter tools|text|errors|permissions] [-f]
 paseo attach <id>        -> stream output của agent đang chạy
 paseo send <id> --prompt ...
@@ -93,12 +104,22 @@ paseo-team config read routing|cluster [--no-discovery]
                                                   CLI mo ta. Danh sach runtime rong (daemon chet) -> o do lui ve
                                                   nhap tay, khong bao gio thanh dropdown trong.
                                                   --no-discovery: bo qua daemon, doc thuan file
+paseo-team config read|write seats             -> ~/.paseo-pi-team/seat-profiles.local.json (ghe tuy bien)
+                                               schema mang danh muc nang luc tu scripts/seat-profiles.mjs;
+                                               field `capabilities` la type "flags" (mang id), optionsBy
+                                               phu thuoc sibling `base` -> nang luc vai tro goc khong nhan
+                                               duoc thi KHONG hien ra
+paseo-team seats list                          -> { seats, providers sinh ra, catalog, ledger, errors[] }
+paseo-team seats apply [--dry-run]             -> merge provider vao ~/.paseo/config.json (atomic + backup).
+                                               Chi go provider co ten trong so cai
+                                               ~/.paseo-pi-team/seat-providers.json; ten trung do nguoi viet
+                                               tay -> bao `skipped`, khong bao gio ghi de.
+                                               Tai lieu ban dau: docs/claude-runtime.md + README (Custom seats)
 paseo-team agents [--all]                      -> node list chuan hoa + role suy ra tu provider
 paseo-team agent inspect <ref>                 -> inspect + pending permit + parent
 paseo-team agent send <ref>                    -> prompt qua stdin -> file -> paseo send --prompt-file
 paseo-team permits list                        -> pending permit + hang khong phan loai duoc
 paseo-team permits allow|deny <agent> <reqId>  -> ghi audit roi delegate
-paseo-team chat list|read <room>|post <room>   -> delegate paseo chat
 paseo-team models [--provider <role-provider>] -> model that su co cua tung role provider (ca hai family).
                                                Khong co --provider: 1 lan `provider ls` + 1 lan `provider models`
                                                MOI FAMILY (dai dien = role provider dau tien dang bat va khoe),
@@ -192,14 +213,13 @@ trúc gần như không đổi. Nên:
 ## 5. Bài toán khó: dựng lại đồ thị liên lạc agent ↔ agent
 
 Paseo cho sẵn **node** và **cạnh spawn**, nhưng *không* có API "liệt kê tin
-nhắn giữa các agent" — `send` là fire-and-forget. Ba nguồn để tái dựng cạnh tin
-nhắn, theo thứ tự độ tin cậy giảm dần:
+nhắn giữa các agent" — `send` là fire-and-forget. Hai nguồn để tái dựng cạnh
+tin nhắn, theo thứ tự độ tin cậy giảm dần.
 
-**(a) Chat room — tin cậy cao.** `paseo chat read <room> --json` là kênh
-broadcast có cấu trúc, truy vấn được đầy đủ. Nếu đội dùng chat room cho phối
-hợp, đây là nguồn tốt nhất, và nên được khuyến khích ngay trong prompt của Lead.
+(Nguồn tin cậy nhất trước đây là chat room, nhưng Paseo đã bỏ chat room ở 0.4.0
+— PR #3053 upstream gỡ hẳn thay vì migrate — nên nó không còn tồn tại.)
 
-**(b) Peer -> Lead — tin cậy cao nhờ wire format sẵn có.**
+**(a) Peer -> Lead — tin cậy cao nhờ wire format sẵn có.**
 `scripts/team-communication.mjs` đã đóng gói mọi tin nhắn Peer gửi lên Lead
 theo khối có header ổn định:
 
@@ -229,7 +249,7 @@ Schema chuẩn hoá mà `paseo-team graph` trả về:
   "nodes": [{ "id", "shortId", "name", "role", "provider", "model", "status",
               "cwd", "worktree", "parentId", "pendingPermissions": 0,
               "stale": false, "confidence": "suspected|unknown" }],
-  "edges": [{ "type": "spawn|message|chat", "from", "to", "kind", "taskId",
+  "edges": [{ "type": "spawn|message", "from", "to", "kind", "taskId",
               "correlationId", "ts", "confidence" }],
   "events": [{ "ts", "agentId", "type", "summary" }],
   "degraded": [{ "agentId", "reason": "LOGS_TIMEOUT" }]   // không im lặng nuốt lỗi
@@ -272,7 +292,7 @@ chiếu với `roleProfiles` mà `paseo-team status` đã trả về.
 ## 8. Lộ trình
 
 - **PR-1 — CLI observability** — *xong*: `agents`, `agent inspect|send`,
-  `permits list|allow|deny`, `chat`, `graph`, `watchdog`.
+  `permits list|allow|deny`, `graph`, `watchdog`.
   Test: `test/paseo-bridge.test.mjs`, `test/graph.test.mjs`,
   `test/cli-contract.test.mjs`.
 - **PR-2 — WebUI transport** — *xong*: `webui/server.mjs` (token, bảng
@@ -281,22 +301,19 @@ chiếu với `roleProfiles` mà `paseo-team status` đã trả về.
 - **PR-3 — Permissions inbox** — *xong*: màn hình duyệt quyền, hàng không phân
   loại được thì hiện nhưng không cho một-chạm, audit tại
   `~/.paseo-pi-team/permit-audit.jsonl`.
-- **PR-4 — Cạnh message** — *xong* (qua chat room, không qua `paseo logs`):
-  `pteam graph --with-chat <room>` đọc `paseo chat read --json`, nơi `author`
-  là **agent id thật**, nên cạnh là `confidence: "confirmed"` chứ không phải
-  suy đoán. Hoá ra không cần `graph --with-logs` — phụ thuộc `paseo logs`
-  (thứ dễ timeout nhất, §2) đã tránh được hoàn toàn. Envelope là
-  `TEAM_MESSAGE_V1` (`scripts/team-chat.mjs`), recipient lấy từ `@mention`
-  trong thân tin nhắn — chính token Paseo dùng để giao. Drawer timeline
-  per-agent vẫn chưa làm.
+- **PR-4 — Cạnh message** — *đã gỡ*: từng chạy qua chat room
+  (`pteam graph --with-chat <room>`), nơi `author` là agent id thật nên cạnh có
+  `confidence: "confirmed"`. Paseo bỏ chat room ở 0.4.0, nên nguồn đó biến mất
+  cùng với nó. `buildGraph()` vẫn nhận `messages` như một đầu vào, nhưng hiện
+  không có producer nào. Drawer timeline per-agent vẫn chưa làm.
 - **PR-5 — Multi-host** — *chưa*: host selector qua `remote-paseo.mjs`, endpoint
   bí mật không rời server.
 - **Governance (PR-D) + bàn giao (PR-E)** — *xong* trong tab Team graph: lọc
-  theo `team.domain`, băng cảnh báo chồng lấn jurisdiction, ô "Phòng chat" đẩy
-  `--with-chat`, cạnh `fork` cho phiên bàn giao. Chi tiết:
+  theo `team.domain`, băng cảnh báo chồng lấn jurisdiction, cạnh `fork` cho
+  phiên bàn giao. Chi tiết:
   `docs/multi-supervisor-topology.md` §4.
 
-Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge permit + cạnh
-**message** (từ chat room) đều là dữ liệu thật; cạnh message suy-đoán-từ-log
-vẫn chưa có (legend vẫn ghi rõ "suy đoán" để không ai đọc
+Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge permit là dữ liệu
+thật; cạnh **message** không còn nguồn nào (chat room đã bị Paseo gỡ), và cạnh
+message suy-đoán-từ-log vẫn chưa có (legend vẫn ghi rõ "suy đoán" để không ai đọc
 nhầm một đồ thị thiếu cạnh thành một đội không nói chuyện với nhau).

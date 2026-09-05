@@ -52,56 +52,6 @@ assert.equal(typeof detail.UpdatedAt, "string");
 assert.ok(Array.isArray(detail.PendingPermissions));
 assert.ok(detail.ParentAgentId === null || typeof detail.ParentAgentId === "string");
 
-// --- chat room contract ------------------------------------------------------
-// `paseo chat` carries the Lead/Supervisor coordination bus (scripts/team-chat.mjs)
-// and is ABSENT from Paseo's published CLI docs, so nothing upstream promises
-// this shape. Every unit test mocks the CLI; this is the one place the real
-// argv is exercised, including the trailing `--json` that team-chat.mjs appends
-// to every command — a post that silently rejected it would fail only in
-// production. Runs a full create -> post -> read -> delete cycle in a
-// throwaway room so it leaves no residue on the daemon.
-{
-  const room = `pteam-contract-${process.pid}-${Date.now().toString(36)}`;
-  const marker = `PTEAM_CONTRACT_${process.pid}`;
-  let created = false;
-  try {
-    const createdRoom = paseoJson(["chat", "create", room, "--purpose", "paseo-pi-team contract test"]);
-    created = true;
-    assert.equal(typeof createdRoom.id, "string", "chat create must return a room id");
-    assert.equal(createdRoom.name, room);
-
-    // The body goes through argv exactly as team-chat.mjs sends it.
-    const posted = paseoJson(["chat", "post", room, `${marker} @${required.slice(0, 7)} body`]);
-    for (const field of ["id", "author", "createdAt", "body", "mentionAgentIds"]) {
-      assert.ok(Object.hasOwn(posted, field), `chat post contract must expose ${field}`);
-    }
-    assert.ok(posted.body.includes(marker), "the posted body must round-trip verbatim");
-    // The graph's confirmed message edges depend on this: the author is stamped
-    // by the daemon, never taken from the envelope.
-    assert.equal(typeof posted.author, "string");
-    assert.ok(Array.isArray(posted.mentionAgentIds), "mentions must parse out of the body");
-    assert.ok(
-      posted.mentionAgentIds.includes(required.slice(0, 7)),
-      "an @short-id in the body must be recognized as a mention — delivery depends on it",
-    );
-
-    const read = paseoJson(["chat", "read", room]);
-    assert.ok(Array.isArray(read), "chat read --json must return an array");
-    const found = read.find((message) => message.id === posted.id);
-    assert.ok(found, "a posted message must come back from chat read");
-    assert.equal(found.author, posted.author, "author must be stable between post and read");
-    assert.equal(found.body, posted.body);
-  } finally {
-    if (created) {
-      try {
-        paseoJson(["chat", "delete", room]);
-      } catch (error) {
-        console.error(`[warn] could not delete contract room ${room}: ${String(error?.message ?? error)}`);
-      }
-    }
-  }
-}
-
 // --- agent state file contract ----------------------------------------------
 // `$PASEO_HOME/agents/<cwd-slug>/<agent-id>.json` is the source the graph, the
 // ownership guard and the fork all read. It is not documented anywhere, so the

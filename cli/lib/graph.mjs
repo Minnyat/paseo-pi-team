@@ -21,7 +21,6 @@
  */
 
 import { MESSAGE_KINDS } from "../../scripts/team-communication.mjs";
-import { TEAM_MESSAGE_HEADER, parseTeamMessage } from "../../scripts/team-chat.mjs";
 import { runPaseoJson, mapWithConcurrency, PaseoError } from "./paseo-bridge.mjs";
 import * as cache from "./graph-cache.mjs";
 import { readAgentStates, isAgentId } from "./agent-state.mjs";
@@ -54,17 +53,37 @@ export function inferRole(provider) {
 	return inferRoleProvider(provider)?.role ?? null;
 }
 
-/** Role + family for a provider reference; null when it is not a role provider. */
+/** Tail of a seat provider name — mirrors SEAT_ID_RE in scripts/seat-profiles.mjs. */
+const SEAT_TAIL_RE = /^[a-z][a-z0-9-]{1,23}$/;
+
+/**
+ * Role + family for a provider reference; null when it is not a role provider.
+ *
+ * A seat variant ("claude-peer-researcher") resolves to its BASE role plus the
+ * seat name, so the graph shows a custom seat as the peer it actually is —
+ * with the variant visible — instead of an unknown node. Same split as
+ * parseRoleProvider in policy-core.ts; graph.test.mjs pins the two together.
+ */
 export function inferRoleProvider(provider) {
 	if (typeof provider !== "string") return null;
 	const head = provider.split("/")[0].trim().toLowerCase();
 	for (const family of RUNTIME_FAMILIES) {
 		const prefix = `${family}-`;
 		if (!head.startsWith(prefix)) continue;
-		const role = head.slice(prefix.length);
-		if (ROLES.includes(role)) return { family, role };
+		const rest = head.slice(prefix.length);
+		for (const role of ROLES) {
+			if (rest === role) return { family, role, seat: null };
+			if (!rest.startsWith(`${role}-`)) continue;
+			const seat = rest.slice(role.length + 1);
+			if (SEAT_TAIL_RE.test(seat)) return { family, role, seat };
+		}
 	}
 	return null;
+}
+
+/** Seat variant of an agent's provider, or null for a base role provider. */
+export function inferSeat(provider) {
+	return inferRoleProvider(provider)?.seat ?? null;
 }
 
 /** Runtime family of an agent's provider ("pi" | "claude"), or null. */
@@ -105,66 +124,6 @@ export function parsePeerMessage(text) {
 		correlationId: fields.CORRELATION_ID,
 		taskId: fields.TASK_ID,
 	};
-}
-
-/** Paseo stamps a human's `paseo chat post` with this author. */
-const HUMAN_AUTHOR = "manual";
-const MENTION = /@([A-Za-z0-9-]{4,64})/g;
-
-/**
- * Turn one room's messages into message edges.
- *
- * This is the one message path that is a FACT rather than a reconstruction:
- * `paseo chat read --json` reports the real author agent id, so the edge does
- * not have to be inferred from a Lead's tool log. Recipients come from the
- * `@mention` tokens the sender wrote — the same tokens Paseo uses to deliver —
- * resolved back to full ids through the current listing.
- *
- * A mention nobody in the listing answers to is KEPT and flagged. Dropping it
- * would hide exactly the case an operator needs: a message aimed at an agent
- * that is archived, on another host, or misaddressed.
- *
- * @param {Array}  messages rows from `paseo chat read --json`
- * @param {Array}  roster   rows from `paseo ls` (for shortId -> id)
- * @param {string} room
- */
-export function chatEdges(messages, roster = [], room = null) {
-	const byShort = new Map();
-	for (const agent of Array.isArray(roster) ? roster : []) {
-		if (typeof agent?.id !== "string") continue;
-		byShort.set(typeof agent.shortId === "string" ? agent.shortId : agent.id.slice(0, 7), agent.id);
-		byShort.set(agent.id, agent.id);
-	}
-	const edges = [];
-	for (const message of Array.isArray(messages) ? messages : []) {
-		const body = typeof message?.body === "string" ? message.body : "";
-		const envelope = parseTeamMessage(body);
-		// No envelope means ordinary room chatter. It is a real message, but it
-		// carries no protocol meaning, so it is not a graph edge.
-		if (!envelope) continue;
-		const author = typeof message?.author === "string" ? message.author : null;
-		const human = author === HUMAN_AUTHOR || !author;
-		const head = body.slice(0, body.indexOf(TEAM_MESSAGE_HEADER));
-		const mentions = [...head.matchAll(MENTION)].map((match) => match[1]);
-		for (const mention of mentions.length > 0 ? mentions : [null]) {
-			if (mention === null) continue;
-			const resolved = byShort.get(mention) ?? null;
-			edges.push({
-				type: "message",
-				from: human ? "human" : author,
-				to: resolved ?? mention,
-				kind: envelope.kind,
-				taskId: envelope.topic,
-				correlationId: envelope.correlationId,
-				ts: message?.createdAt ?? null,
-				room,
-				origin: human ? "human" : "agent",
-				unresolvedRecipient: resolved === null,
-				confidence: "confirmed",
-			});
-		}
-	}
-	return edges;
 }
 
 const PERMIT_AGENT_KEYS = ["agentId", "AgentId", "agent_id", "agent", "AgentID"];
@@ -406,6 +365,9 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// Which coding agent is executing this role. A mixed fleet is normal:
 			// the same role can run on pi and on Claude at the same time.
 			family: inferFamily(agent.provider),
+			// Seat variant ("researcher") when the provider is a custom seat, so
+			// the UI can say which variant of the role this node is.
+			seat: inferSeat(agent.provider),
 			provider: typeof agent.provider === "string" ? agent.provider : null,
 			thinking: typeof agent.thinking === "string" ? agent.thinking : null,
 			status: typeof agent.status === "string" ? agent.status : "unknown",
@@ -466,9 +428,9 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			taskId: message.taskId ?? null,
 			correlationId: message.correlationId ?? null,
 			ts: message.ts ?? null,
-			// Chat-derived edges carry provenance the UI needs to draw them
-			// honestly: which room, whether a person or an agent spoke, and
-			// whether the recipient could be resolved at all.
+			// Message edges carry provenance the UI needs to draw them honestly:
+			// where they came from, whether a person or an agent spoke, and whether
+			// the recipient could be resolved at all.
 			room: message.room ?? null,
 			origin: message.origin ?? null,
 			unresolvedRecipient: message.unresolvedRecipient ?? false,
@@ -611,23 +573,7 @@ export async function collectGraph(options = {}) {
 		if (entry) parents[id] = entry.parentId;
 	}
 
-	// Chat rooms are opt-in per call: reading them costs one round trip each,
-	// and most snapshots do not need the coordination layer.
-	const rooms = Array.isArray(options.chatRooms) ? options.chatRooms : [];
-	const messages = [];
-	if (rooms.length > 0) {
-		const read = await mapWithConcurrency(rooms, options.concurrency ?? 4, (room) =>
-			run(["chat", "read", room], { timeoutMs }),
-		);
-		read.forEach((result, index) => {
-			const room = rooms[index];
-			if (result.ok) messages.push(...chatEdges(result.value, agents, room));
-			// One unreadable room must not cost the others, nor the graph.
-			else degraded.push({ reason: "CHAT_READ_FAILED", detail: `${room}: ${String(result.error?.message ?? result.error)}` });
-		});
-	}
-
-	const graph = buildGraph({ agents, parents, states, permits, messages, degraded, now });
+	const graph = buildGraph({ agents, parents, states, permits, degraded, now });
 	return {
 		...graph,
 		ok: true,

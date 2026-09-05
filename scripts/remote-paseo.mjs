@@ -33,7 +33,7 @@
 //                    [--wait-timeout <dur>]
 //                    A "team.cluster" label is required on every remotely-created
 //                    agent (§PR-G) — every cluster-scoped rule (SUPERVISOR_DECISION,
-//                    team_chat fan-out, the scope-lease board) reads it from the
+//                    the scope-lease board) reads it from the
 //                    agent's own state. main() fills it in automatically from this
 //                    seat's own cluster (selfCluster()) when --label does not
 //                    already set one; buildArgv() refuses the run if it is still
@@ -712,7 +712,7 @@ export function buildArgv(command, opts, endpoint) {
 			const labels = parseRunLabels(opts.label);
 			if (!labels.some((entry) => entry.key === TEAM_CLUSTER_LABEL)) {
 				throw usageError(
-					`run requires a "${TEAM_CLUSTER_LABEL}" label — pass --label ${TEAM_CLUSTER_LABEL}=<value> (this seat's own cluster). Every cluster-scoped rule (SUPERVISOR_DECISION, team_chat fan-out, the scope-lease board) reads it from the created agent's state; without it the new seat is orphaned from its own Lead's cluster the moment workspaceId/cwd diverge (e.g. a reviewer worktree).`,
+					`run requires a "${TEAM_CLUSTER_LABEL}" label — pass --label ${TEAM_CLUSTER_LABEL}=<value> (this seat's own cluster). Every cluster-scoped rule (SUPERVISOR_DECISION, the scope-lease board) reads it from the created agent's state; without it the new seat is orphaned from its own Lead's cluster the moment workspaceId/cwd diverge (e.g. a reviewer worktree).`,
 				);
 			}
 			const prompt = readPrompt(opts);
