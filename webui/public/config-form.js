@@ -151,14 +151,18 @@ export function dependentOptionProblems(schema, doc, prefix = "") {
 			// Same resolver the control paints from: what the form refuses to save
 			// must be exactly what it refused to offer.
 			const allowed = dependentOptions(field.optionsBy, doc, base);
-			if (
-				value !== undefined &&
-				value !== null &&
-				value !== "" &&
-				allowed.length > 0 &&
-				!allowed.includes(value)
-			) {
-				problems.push(`${base || field.path}: ${field.label} "${value}" không hợp lệ với ${on} (chỉ nhận: ${allowed.join(", ")})`);
+			// A multi-value field (`flags`) holds an ARRAY, so membership has to be
+			// checked per element: testing the array itself never matches and would
+			// report every seat's capability list as invalid.
+			const offending = Array.isArray(value)
+				? value.filter((entry) => !allowed.includes(entry))
+				: value !== undefined && value !== null && value !== "" && !allowed.includes(value)
+					? [value]
+					: [];
+			if (allowed.length > 0 && offending.length > 0) {
+				problems.push(
+					`${base || field.path}: ${field.label} "${offending.join(", ")}" không hợp lệ với ${on} (chỉ nhận: ${allowed.join(", ")})`,
+				);
 			}
 		}
 		if (field.type === "map" && field.item) {

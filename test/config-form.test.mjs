@@ -180,4 +180,62 @@ import {
 	assert.deepEqual(dependentOptionProblems(undefined, {}), [], "a section without a schema reports nothing");
 }
 
+// --- dependentOptionProblems on a MULTI-value field (seat capabilities) -----
+// A `flags` field holds an array. Testing the array itself against the allowed
+// list never matches, so before per-element checking every seat reported its
+// whole capability list as invalid and the form refused to save a correct one.
+{
+	const schema = {
+		groups: [
+			{
+				fields: [
+					{
+						path: "seats",
+						type: "map",
+						item: {
+							fields: [
+								{ path: "base", type: "enum", enum: ["claude-peer", "claude-supervisor"] },
+								{
+									path: "capabilities",
+									type: "flags",
+									label: "Năng lực",
+									enum: ["web-research", "lead-write"],
+									optionsBy: { path: "base", map: { "claude-peer": ["web-research"], "claude-supervisor": [] } },
+								},
+							],
+						},
+					},
+				],
+			},
+		],
+	};
+
+	assert.deepEqual(
+		dependentOptionProblems(schema, { seats: { r: { base: "claude-peer", capabilities: ["web-research"] } } }),
+		[],
+		"a capability the base really allows passes",
+	);
+
+	const problems = dependentOptionProblems(schema, {
+		seats: { r: { base: "claude-peer", capabilities: ["web-research", "lead-write"] } },
+	});
+	assert.equal(problems.length, 1);
+	assert.match(problems[0], /seats\.r/);
+	assert.match(problems[0], /lead-write/);
+	assert.match(problems[0], /"lead-write"/, "only the offending entry is quoted as the bad value");
+	assert.match(problems[0], /chỉ nhận: web-research/, "the allowed list is still shown");
+
+	assert.deepEqual(
+		dependentOptionProblems(schema, { seats: { r: { base: "claude-supervisor", capabilities: ["web-research"] } } }),
+		[],
+		"an empty allowed list means the form has nothing to check against (the CLI still refuses on apply)",
+	);
+
+	assert.deepEqual(
+		dependentOptionProblems(schema, { seats: { r: { base: "claude-peer", capabilities: [] } } }),
+		[],
+		"granting nothing is a valid seat",
+	);
+}
+
 console.log("config-form tests passed");
