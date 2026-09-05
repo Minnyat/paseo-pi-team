@@ -32,6 +32,15 @@ const ORIGINAL = `    validateProtocolVersion(req) {
     }
 `;
 
+// The SAME check from the CJS build of the same version, where tsc namespaces
+// the constant through its generated import alias. Live-run finding: matching
+// the ESM spelling literally patched dist/esm and then threw on dist/cjs,
+// leaving the daemon with one build patched and one not.
+const ORIGINAL_CJS = ORIGINAL.replace(
+	"!SUPPORTED_PROTOCOL_VERSIONS.includes",
+	"!types_js_1.SUPPORTED_PROTOCOL_VERSIONS.includes",
+);
+
 const SUPPORTED = [
 	"2025-11-25",
 	"2025-06-18",
@@ -76,10 +85,44 @@ assert.equal(reverted.source, ORIGINAL);
 assert.equal(revertSource(ORIGINAL).state, "already");
 
 // An SDK whose guard we do not recognise must fail loudly rather than be
-// half-patched: the whole point of matching the condition literally.
+// half-patched: the whole point of anchoring on the condition's full text.
 assert.throws(
 	() => patchSource("function validateProtocolVersion() { return undefined; }"),
 	(err) => err instanceof PatchError && err.code === "PATTERN_NOT_FOUND",
+);
+// Two occurrences in one file is a shape this patch was not designed for, and
+// picking one is not a decision a script gets to make.
+assert.throws(
+	() => patchSource(ORIGINAL + ORIGINAL),
+	(err) => err instanceof PatchError && err.code === "PATTERN_NOT_FOUND",
+);
+
+// --- the CJS spelling of the very same check ----------------------------------
+
+const cjs = patchSource(ORIGINAL_CJS);
+assert.equal(cjs.state, "patched");
+assert.ok(cjs.source.includes(PATCH_MARKER));
+// The generated alias is replayed, never hardcoded and never dropped: writing
+// a bare SUPPORTED_PROTOCOL_VERSIONS into the CJS build would throw at runtime.
+assert.ok(
+	cjs.source.includes("types_js_1.SUPPORTED_PROTOCOL_VERSIONS[0]"),
+	"the captured qualifier must be replayed in the added clause",
+);
+// Every mention in the patched CJS source stays namespaced -- a bare one would
+// be a ReferenceError the moment the daemon served a request.
+assert.equal(
+	(cjs.source.match(/SUPPORTED_PROTOCOL_VERSIONS/g) ?? []).length,
+	(cjs.source.match(/types_js_1\.SUPPORTED_PROTOCOL_VERSIONS/g) ?? []).length,
+);
+assert.equal(revertSource(cjs.source).source, ORIGINAL_CJS);
+assert.equal(patchSource(cjs.source).state, "already");
+
+// PATCHED_RE interpolates the marker into a regex unescaped, which is only safe
+// while the marker carries no metacharacter.
+assert.equal(
+	/[.*+?^${}()|[\]\\]/.test(PATCH_MARKER),
+	false,
+	"PATCH_MARKER must stay free of regex metacharacters, or PATCHED_RE must escape it",
 );
 
 // --- the decision the patched condition makes ---------------------------------
@@ -159,6 +202,53 @@ assert.throws(
 	() => runPatch({ sdkDir: join(sdkDir, "nope"), mode: "verify" }),
 	(err) => err instanceof PatchError && err.code === "SDK_NOT_FOUND",
 );
+
+// --- all files, or none -------------------------------------------------------
+//
+// The two dist builds spell the check differently, so a transform that writes
+// as it goes can rewrite the first file and throw on the second, leaving one
+// build patched and one not. That is worse than either end, and silent.
+{
+	const mixed = mkdtempSync(join(tmpdir(), "paseo-mcp-mixed-"));
+	const [first, second] = PATCH_TARGETS;
+	mkdirSync(dirname(join(mixed, first)), { recursive: true });
+	mkdirSync(dirname(join(mixed, second)), { recursive: true });
+	writeFileSync(join(mixed, first), ORIGINAL);
+	writeFileSync(join(mixed, second), "nothing this patch recognises");
+
+	assert.throws(
+		() => runPatch({ sdkDir: mixed, mode: "apply" }),
+		(err) => err instanceof PatchError && err.code === "PATTERN_NOT_FOUND",
+	);
+	assert.equal(
+		readFileSync(join(mixed, first), "utf8"),
+		ORIGINAL,
+		"a file that COULD be patched must be left alone when a sibling cannot",
+	);
+	assert.ok(
+		!existsSync(join(mixed, `${first}.paseo-team-backup`)),
+		"and no backup is written for a write that never happened",
+	);
+}
+
+// A mixed ESM/CJS install — the real layout — patches both.
+{
+	const both = mkdtempSync(join(tmpdir(), "paseo-mcp-both-"));
+	const [esmTarget, cjsTarget] = PATCH_TARGETS;
+	mkdirSync(dirname(join(both, esmTarget)), { recursive: true });
+	mkdirSync(dirname(join(both, cjsTarget)), { recursive: true });
+	writeFileSync(join(both, esmTarget), ORIGINAL);
+	writeFileSync(join(both, cjsTarget), ORIGINAL_CJS);
+
+	assert.equal(runPatch({ sdkDir: both, mode: "apply" }).patched, true);
+	assert.equal(runPatch({ sdkDir: both, mode: "verify" }).patched, true);
+	assert.ok(
+		readFileSync(join(both, cjsTarget), "utf8").includes("types_js_1.SUPPORTED_PROTOCOL_VERSIONS[0]"),
+	);
+	runPatch({ sdkDir: both, mode: "revert" });
+	assert.equal(readFileSync(join(both, esmTarget), "utf8"), ORIGINAL);
+	assert.equal(readFileSync(join(both, cjsTarget), "utf8"), ORIGINAL_CJS);
+}
 
 // --- locating the SDK ---------------------------------------------------------
 
