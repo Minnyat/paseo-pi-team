@@ -31,13 +31,26 @@
  * unparseable or unreadable throws instead of returning zero rows.
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 /** Where the board lives when nothing overrides it. */
 export const LEDGER_FILE_NAME = "lease-ledger.jsonl";
+
+/**
+ * How long a lock may be held before the next caller treats it as abandoned.
+ *
+ * A lock file outlives the process that made it, so a Lead killed mid-claim
+ * would otherwise wedge the board for every other Lead until someone noticed
+ * and deleted a file by hand. Ten seconds is far longer than a read-decide-
+ * append takes and far shorter than a working session, so breaking it can only
+ * happen to a writer that is already gone.
+ */
+export const DEFAULT_STALE_LOCK_MS = 10_000;
+/** How long to wait for a live holder before giving up rather than writing anyway. */
+export const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 
 function bad(code, message) {
 	return Object.assign(new Error(message), { code });
@@ -99,7 +112,74 @@ function parseLine(line, lineNumber, path) {
  * second cluster — can hold two boards at once without either of them reaching
  * for process state.
  */
-export function createLedger({ path = defaultLedgerPath() } = {}) {
+export function createLedger({
+	path = defaultLedgerPath(),
+	staleLockMs = DEFAULT_STALE_LOCK_MS,
+	lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+} = {}) {
+	const lockPath = `${path}.lock`;
+	const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+	/**
+	 * Take the board's lock, or fail rather than proceed without it.
+	 *
+	 * `wx` is the whole mechanism: an exclusive create is one syscall that both
+	 * tests and takes, so two writers racing cannot both believe they won. The
+	 * loser waits and retries; a lock old enough to be provably abandoned is
+	 * broken instead of waited on.
+	 */
+	async function acquire() {
+		const deadline = Date.now() + lockTimeoutMs;
+		for (;;) {
+			try {
+				mkdirSync(dirname(lockPath), { recursive: true });
+				const fd = openSync(lockPath, "wx");
+				try {
+					writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+				} finally {
+					closeSync(fd);
+				}
+				return;
+			} catch (error) {
+				if (error?.code !== "EEXIST") {
+					throw bad("LEASE_LEDGER_LOCK_FAILED", `could not lock ${path}: ${String(error?.message ?? error)}`);
+				}
+				let age = 0;
+				try {
+					age = Date.now() - statSync(lockPath).mtimeMs;
+				} catch {
+					// It vanished between the failed create and the stat: the holder
+					// released it, so the next attempt is the one that wins.
+					continue;
+				}
+				if (age >= staleLockMs) {
+					// Break it, then loop. Unlink can lose its own race with the real
+					// holder releasing; either way the next `wx` decides the winner.
+					try {
+						unlinkSync(lockPath);
+					} catch {
+						/* someone else broke it first */
+					}
+					continue;
+				}
+				if (Date.now() >= deadline) {
+					throw bad(
+						"LEASE_LEDGER_LOCK_TIMEOUT",
+						`another writer has held ${lockPath} for ${age}ms — refusing to write to a board we could not lock`,
+					);
+				}
+				await sleep(15);
+			}
+		}
+	}
+
+	function release() {
+		try {
+			unlinkSync(lockPath);
+		} catch {
+			/* already gone */
+		}
+	}
 	/**
 	 * Append one record and hand back exactly what was written.
 	 *
@@ -169,5 +249,30 @@ export function createLedger({ path = defaultLedgerPath() } = {}) {
 		return { path, messages, count: messages.length };
 	}
 
-	return { path, append, read };
+	/**
+	 * Run `fn` with the board locked, so a read and the append that depends on it
+	 * cannot have another writer slip between them.
+	 *
+	 * This is what the chat room could not offer. There, every CLAIM succeeded —
+	 * including the losing one — because a post could not be made conditional on
+	 * what the board said a microsecond earlier; arbitration on read was the only
+	 * honest answer available. Owning the file changes that: a claim can now
+	 * decide and write as one step, so a scope that is already held is refused
+	 * instead of contested.
+	 *
+	 * Read-side arbitration stays exactly where it was. It is the backstop for
+	 * everything this lock cannot cover — a record written by an older build, a
+	 * lease that expired since, a board reached over a filesystem where locking
+	 * is advisory at best.
+	 */
+	async function transaction(fn) {
+		await acquire();
+		try {
+			return await fn({ read, append, path });
+		} finally {
+			release();
+		}
+	}
+
+	return { path, append, read, transaction };
 }

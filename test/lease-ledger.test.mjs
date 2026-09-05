@@ -166,4 +166,74 @@ const body = (action, scope) => `LEASE_V1\nACTION: ${action}\nSCOPE: ${scope}\nT
 	}
 }
 
+// --- transaction: read and append under one lock ------------------------------
+// Arbitration on read is honest but it is not exclusion: two Leads that both
+// read "free" both write a winning claim. A file can do better than the chat
+// room could, and this is the primitive that lets it — the decision and the
+// write happen with nobody else able to slip between them.
+{
+	const ledger = createLedger({ path: tempPath() });
+	const order = [];
+	const slow = async (tag) =>
+		ledger.transaction(async (tx) => {
+			order.push(`${tag}:in`);
+			const before = await tx.read({ since: new Date(0).toISOString(), limit: 100 });
+			// Yield: without a lock the other transaction would interleave here,
+			// read the same empty board, and both would append.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			await tx.append({ author: AUTHOR, body: body("claim", `n-${before.count}`), now: NOW + before.count });
+			order.push(`${tag}:out`);
+		});
+
+	await Promise.all([slow("a"), slow("b")]);
+	assert.deepEqual(
+		order.filter((_, i) => i % 2 === 0).length,
+		2,
+		"both transactions ran",
+	);
+	// Whoever went first must have finished before the other started.
+	assert.ok(
+		order.join(",") === "a:in,a:out,b:in,b:out" || order.join(",") === "b:in,b:out,a:in,a:out",
+		`transactions must not interleave, got ${order.join(",")}`,
+	);
+	const read = await ledger.read({ since: new Date(0).toISOString(), limit: 100 });
+	assert.equal(read.count, 2);
+	assert.notEqual(read.messages[0].body, read.messages[1].body, "the second transaction saw the first one's write");
+}
+
+// --- a crashed holder must not wedge the board forever ------------------------
+// A lock file outlives the process that made it. Waiting on one for the rest of
+// the day turns one crash into a repository nobody can claim in; breaking it
+// after it is provably stale keeps the failure to the run that caused it.
+{
+	const path = tempPath();
+	const ledger = createLedger({ path, staleLockMs: 50 });
+	writeFileSync(`${path}.lock`, "pid 999999 that no longer exists");
+	await new Promise((resolve) => setTimeout(resolve, 60));
+
+	const written = await ledger.transaction(async (tx) =>
+		tx.append({ author: AUTHOR, body: body("claim", "src/auth"), now: NOW }),
+	);
+	assert.ok(written.id, "a stale lock is broken, not waited on forever");
+}
+
+// --- a live lock is waited for, then times out --------------------------------
+// The other side of the same coin: a lock young enough to be real must be
+// respected, and a caller that cannot get in must be told so rather than
+// writing anyway.
+{
+	const path = tempPath();
+	const ledger = createLedger({ path, staleLockMs: 60_000, lockTimeoutMs: 100 });
+	writeFileSync(`${path}.lock`, "held by a live writer");
+
+	await assert.rejects(
+		() => ledger.transaction(async () => "never runs"),
+		(error) => {
+			assert.match(String(error.code), /LOCK/);
+			return true;
+		},
+		"a board we cannot lock is not a board we may write to",
+	);
+}
+
 console.log("lease-ledger tests passed");

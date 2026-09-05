@@ -82,8 +82,9 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    team_lease { action: "claim", scope: "<OWNED_SCOPE>", ttlMs: <work window> }
    ```
 
-   Check `granted` in the result — a claim is written even when it loses,
-   because the ledger has no locking and arbitration happens on read.
+   Check `granted` in the result, never merely `ok`. A claim that collides
+   with a live lease is REFUSED and writes nothing: the board is locked, read
+   and appended to as one step, so asking is not the same as taking.
 
    - `granted: true` → continue the cycle.
    - `granted: false` → another Lead owns ground that covers your scope; the

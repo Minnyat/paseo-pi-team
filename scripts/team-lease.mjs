@@ -14,9 +14,16 @@
  * lapse from a surface the vendor was in the middle of deleting is the mistake
  * that swap corrects; nothing about the lease itself changed.
  *
- * The ledger is append-only evidence and arbitration happens on READ, in
- * policy-core's resolveLeases() — which is pure, and therefore the part that is
- * actually tested. This file only fetches and appends.
+ * A claim is compare-and-swap: the board is locked, read, arbitrated and only
+ * then appended to, so a scope that is already held is REFUSED rather than
+ * contested. The chat room could not do this — every CLAIM succeeded there,
+ * including the losing one — and that gap is why the rule was advisory.
+ *
+ * Read-side arbitration stays exactly where it was, in policy-core's pure
+ * resolveLeases(). It is still the backstop the guard trusts: it covers records
+ * written by an older build, leases that expired since, and any filesystem where
+ * the lock turns out to be advisory. The lock removes the race; it does not
+ * replace the rule.
  *
  * The rule is enforced where it can be enforced: the adapters call the pure
  * guard before a Lead's create_agent, so a Lead that skips the claim is stopped
@@ -148,7 +155,7 @@ function leaseBody(action, scope, ttlMs, cluster) {
 export async function fetchLeases(options = {}) {
 	const now = options.now ?? Date.now();
 	try {
-		const board = await readBoard(options, now);
+		const board = await readBoard(ledgerFor(options), options, now);
 		return { ok: true, leases: resolveLeases(board.messages, { now }) };
 	} catch (error) {
 		return {
@@ -164,9 +171,9 @@ export async function fetchLeases(options = {}) {
  * Read the ledger over a window that cannot hide a live lease, and refuse to
  * pretend a possibly-truncated answer is the whole board.
  */
-async function readBoard(options, now) {
+async function readBoard(reader, options, now) {
 	const limit = options.maxMessages ?? LEDGER_MAX_MESSAGES;
-	const board = await ledgerFor(options).read({
+	const board = await reader.read({
 		since: new Date(now - (options.windowMs ?? LEDGER_WINDOW_MS)).toISOString(),
 		limit,
 	});
@@ -220,13 +227,55 @@ async function postLease(action, input, options = {}) {
 			? selfCluster()
 			: normalizeCluster(options.cluster);
 
-	// A lease event is a record, not a request. Under the chat room it was
-	// posted with notify:false so no Lead was woken for bookkeeping; a file
-	// wakes nobody by construction, which is the same guarantee for free.
-	const written = await ledger.append({ author: self, body: leaseBody(action, scope, ttlMs, cluster), now });
+	// Decide and write as one step, under the board's lock.
+	//
+	// This is the part the chat room could not do. There the ledger had no
+	// compare-and-swap, so a claim was posted unconditionally and the loser found
+	// out on the next read — two Leads could both be told they had won until
+	// somebody re-read the board. Owning the file means a claim that would
+	// collide is REFUSED rather than contested, and nothing is written for it.
+	//
+	// A release is exempt: it only ever gives ground up, so there is nothing to
+	// lose a race for.
+	const outcome = await ledger.transaction(async (tx) => {
+		let board;
+		try {
+			board = await readBoard(tx, options, now);
+		} catch (error) {
+			// Fail closed and write NOTHING. A board we could not read is not a
+			// board we know to be free, and a lease taken on a guess is the exact
+			// two-writer outcome this mechanism exists to prevent.
+			return { blocked: { code: error?.code ?? "LEASE_LEDGER_UNREADABLE", message: String(error?.message ?? error) } };
+		}
+		const incumbent = leaseHolderFor(resolveLeases(board.messages, { now }), scope, cluster);
+		if (action !== "release" && incumbent && incumbent.agentId !== self) {
+			return { written: null, holder: incumbent };
+		}
+		// A lease event is a record, not a request. Under the chat room it was
+		// posted with notify:false so no Lead was woken for bookkeeping; a file
+		// wakes nobody by construction, which is the same guarantee for free.
+		const written = await tx.append({ author: self, body: leaseBody(action, scope, ttlMs, cluster), now });
+		const after = resolveLeases([...board.messages, written], { now });
+		return { written, holder: leaseHolderFor(after, scope, cluster) };
+	});
 
-	const after = await fetchLeases({ ...options, ledger, now });
-	const holder = after.ok ? leaseHolderFor(after.leases, scope, cluster) : null;
+	if (outcome.blocked) {
+		return {
+			ok: false,
+			action,
+			scope,
+			cluster,
+			ttlMs,
+			ledger: ledger.path,
+			code: outcome.blocked.code,
+			message: outcome.blocked.message,
+			ledgerReadable: false,
+			holder: null,
+			granted: false,
+		};
+	}
+
+	const holder = outcome.holder;
 	return {
 		ok: true,
 		action,
@@ -234,8 +283,10 @@ async function postLease(action, input, options = {}) {
 		cluster,
 		ttlMs,
 		ledger: ledger.path,
-		recordId: written.id,
-		ledgerReadable: after.ok,
+		// Null when the claim was refused before it could be written — the caller
+		// has a holder to talk to instead of a record to cite.
+		recordId: outcome.written?.id ?? null,
+		ledgerReadable: true,
 		holder,
 		// The only field a caller should branch on: did WE end up holding it.
 		granted: Boolean(holder && holder.agentId === self),
@@ -255,7 +306,7 @@ export const releaseScope = (input, options) => postLease("release", input, opti
  */
 export async function leaseLedger(_input = {}, options = {}) {
 	try {
-		const board = await readBoard(options, options.now ?? Date.now());
+		const board = await readBoard(ledgerFor(options), options, options.now ?? Date.now());
 		return {
 			ok: true,
 			ledger: board.path,

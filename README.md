@@ -364,9 +364,12 @@ team_lease { action: "claim", scope: "src/auth", ttlMs: <work window> }
 team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
 ```
 
-- The ledger is an append-only file this pack owns (`scripts/lease-ledger.mjs`)
-  and has **no locking**, so a claim is written even when it loses. Read
-  `granted`, not merely `ok`.
+- The ledger is an append-only file this pack owns (`scripts/lease-ledger.mjs`).
+  A claim is **compare-and-swap**: the board is locked, read and appended to as
+  one step, so a claim that collides with a live lease is refused and writes
+  nothing. Read `granted`, not merely `ok`. Read-side arbitration
+  (`resolveLeases`) stays as the backstop — it covers expiry, older records and
+  any filesystem where the lock turns out to be advisory.
 - Scopes nest: holding `src` holds `src/auth`. Claim the narrowest scope the
   writer needs, or you block Leads you did not mean to.
 - Read-only dispositions (scout, researcher, architect, reviewer) take no lease

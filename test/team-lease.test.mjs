@@ -55,6 +55,11 @@ function fakeLedger(initial = []) {
 			messages.push(written);
 			return written;
 		},
+		async transaction(fn) {
+			// In-memory: nothing else can reach this board, so the lock is a no-op.
+			// The real one is exercised in lease-ledger.test.mjs.
+			return fn(this);
+		},
 		async read({ since, limit }) {
 			reads.push({ since, limit });
 			const floor = Date.parse(since);
@@ -68,6 +73,9 @@ function fakeLedger(initial = []) {
 /** A board that cannot be read at all — the "we do not know" case. */
 const brokenLedger = (code = "LEASE_LEDGER_UNREADABLE") => ({
 	path: "<broken>",
+	async transaction(fn) {
+		return fn(this);
+	},
 	append: async () => {
 		throw Object.assign(new Error("board unwritable"), { code: "LEASE_LEDGER_UNWRITABLE" });
 	},
@@ -116,17 +124,64 @@ const opts = (ledger, extra = {}) => ({
 	assert.ok(!written.body.startsWith("@"), "a bookkeeping entry must not pull a Lead out of its work");
 }
 
-// --- losing the race ---------------------------------------------------------
-// The write still succeeds — the board is append-only evidence, not a lock — so
-// the caller must be told who actually holds the scope rather than that the
-// write worked.
+// --- losing the race: refused, not contested ---------------------------------
+// Under the chat room every CLAIM was written, including the losing one, because
+// a post could not be made conditional on what the board said. The claim now
+// decides and writes under one lock, so a scope that is already held is refused
+// and NOTHING is appended for it — asking is not the same as taking.
 {
 	const ledger = fakeLedger([record(OTHER, "claim", "src/auth", NOW - 1000)]);
 	const result = await claimScope({ scope: "src/auth/login" }, opts(ledger));
-	assert.equal(result.ok, true, "writing an intent is not an error");
+	assert.equal(result.ok, true, "asking about a held scope is not an error");
 	assert.equal(result.granted, false, "but it did not win");
 	assert.equal(result.holder.agentId, OTHER);
 	assert.equal(result.holder.scope, "src/auth", "and the report names the covering scope, not the requested one");
+	assert.equal(ledger.appended.length, 0, "a refused claim leaves no record behind");
+	assert.equal(result.recordId, null, "and has none to cite");
+}
+
+// --- a claim cannot be taken on a board we could not read --------------------
+// Fail closed. "We do not know who holds this" and "nobody holds this" lead to
+// opposite decisions, and writing a claim on the first one is how two writers
+// end up on one tree.
+{
+	const ledger = brokenLedger();
+	const result = await claimScope({ scope: "src/auth" }, opts(ledger));
+	assert.equal(result.ok, false, "an unreadable board refuses the claim");
+	assert.equal(result.granted, false);
+	assert.equal(result.holder, null);
+	assert.equal(result.ledgerReadable, false);
+	assert.match(String(result.code), /LEDGER/);
+}
+
+// --- two Leads claiming at once: exactly one wins ----------------------------
+// The measurement that started this: four concurrent claims against the chat
+// room ALL succeeded, so the lease was advisory in the one situation it existed
+// for. Against a real file board, run for real, the loser must lose.
+{
+	const path = join(mkdtempSync(join(tmpdir(), "pteam-lease-race-")), "board.jsonl");
+	const contenders = [SELF, OTHER, "33333333-3333-4333-8333-333333333333"];
+	const results = await Promise.all(
+		contenders.map((agent) =>
+			claimScope(
+				{ scope: "src/auth" },
+				{ ledger: createLedger({ path }), selfAgentId: agent, role: "lead", now: NOW },
+			),
+		),
+	);
+	const winners = results.filter((r) => r.granted);
+	assert.equal(winners.length, 1, `exactly one claim may be granted, got ${winners.length}`);
+
+	// And every loser is told the same story: who actually holds it.
+	const holder = winners[0].holder.agentId;
+	for (const loser of results.filter((r) => !r.granted)) {
+		assert.equal(loser.ok, true);
+		assert.equal(loser.holder.agentId, holder, "the losers all name the real holder");
+		assert.equal(loser.recordId, null, "and none of them wrote a record");
+	}
+
+	const board = await createLedger({ path }).read({ since: new Date(0).toISOString(), limit: 100 });
+	assert.equal(board.count, 1, "the board holds one claim, not three");
 }
 
 // --- release and renew -------------------------------------------------------
