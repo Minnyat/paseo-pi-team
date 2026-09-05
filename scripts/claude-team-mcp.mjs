@@ -1,11 +1,11 @@
 // claude-team-mcp.mjs — stdio MCP server exposing the pack's team tools
 // to Claude Code, which has no extension API to register tools directly.
 //
-// Pi gets `peer_ask_lead`, `lead_ask_supervisor`, `team_watchdog` and `team_chat` from the policy
+// Pi gets `peer_ask_lead`, `lead_ask_supervisor` and `team_watchdog` from the policy
 // extension (registerTeamTools). Claude gets the SAME tools from this server, with
 // the same role gate and the same underlying support scripts, so a Peer talks
 // to its Lead identically on both runtimes. Claude sees them as
-// `mcp__paseo-team__peer_ask_lead` / `__team_watchdog` / `__team_chat`.
+// `mcp__paseo-team__peer_ask_lead` / `__lead_ask_supervisor` / `__team_watchdog`.
 //
 // Zero dependencies on purpose (the pack ships no runtime deps): this speaks
 // the MCP stdio framing — one JSON-RPC message per line — directly.
@@ -22,12 +22,6 @@ import { fileURLToPath } from "node:url";
 import { isEntrypoint } from "./lib-common.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-/**
- * The advertised payload ceiling. team-chat.mjs enforces the real one, so drift
- * here would only desynchronize what the schema promises from what the tool
- * accepts — fail-closed, but confusing. The parity test keeps them equal.
- */
-export const TEAM_CHAT_MAX_BODY_BYTES = 8192;
 
 export const SERVER_NAME = "paseo-team";
 export const SERVER_VERSION = "1.0.0";
@@ -108,50 +102,6 @@ export const TEAM_TOOLS = [
 				globalDeadlineMs: { type: "integer", minimum: 1000, maximum: 120000 },
 				commandTimeoutMs: { type: "integer", minimum: 250, maximum: 30000 },
 			},
-			additionalProperties: false,
-		},
-	},
-	{
-		name: "team_chat",
-		// Mirrors policy-core's teamChatToolDescription(). This file is plain .mjs
-		// and cannot import the TypeScript core, so the text is duplicated and
-		// claude-team-mcp.test.mjs asserts the two never drift. Deliberately does
-		// NOT claim the chat surface is sealed: the bash rules are heuristics and
-		// rooms are unrestricted unless PASEO_TEAM_ROOMS is set.
-		description:
-			"Coordinate with other Leads and Supervisors through a Paseo chat room. `post` delivers a TEAM_MESSAGE_V1 envelope and wakes each recipient by mention; `read` returns the room with envelopes parsed; `rooms` lists rooms. Recipients are agent ids/short-ids, or 'domain:<name>' to reach every agent carrying that domain label. Use this instead of the Paseo chat CLI, which the bash guard redirects here. Rooms are unrestricted unless PASEO_TEAM_ROOMS is set.",
-		roles: ["lead", "supervisor"],
-		script: "team-chat.mjs",
-		timeoutMs: 30_000,
-		// `rooms` takes no payload; post/read carry theirs as one JSON argument,
-		// matching how the Pi extension invokes the same script.
-		buildArgs: (params) => {
-			const { action, ...rest } = params ?? {};
-			const command = action === "post" ? "post" : action === "read" ? "read" : "rooms";
-			return command === "rooms" ? [command] : [command, JSON.stringify(rest)];
-		},
-		inputSchema: {
-			type: "object",
-			properties: {
-				action: { type: "string", enum: ["post", "read", "rooms"] },
-				room: { type: "string", maxLength: 128 },
-				kind: {
-					type: "string",
-					enum: ["handoff", "dependency", "claim", "release", "question", "decision", "progress"],
-				},
-				topic: { type: "string", maxLength: 128 },
-				// Mirrors MAX_BODY_BYTES in team-chat.mjs (and TEAM_CHAT_MAX_BODY_BYTES
-				// in policy-core). claude-team-mcp.test.mjs pins the three together.
-				message: { type: "string", minLength: 1, maxLength: TEAM_CHAT_MAX_BODY_BYTES },
-				to: { type: "array", items: { type: "string", maxLength: 136 }, minItems: 1, maxItems: 64 },
-				correlationId: { type: "string", maxLength: 128 },
-				replyTo: { type: "string", maxLength: 128 },
-				hop: { type: "integer", minimum: 0, maximum: 7 },
-				ttl: { type: "integer", minimum: 1, maximum: 8 },
-				since: { type: "string", maxLength: 64 },
-				limit: { type: "integer", minimum: 1, maximum: 500 },
-			},
-			required: ["action"],
 			additionalProperties: false,
 		},
 	},

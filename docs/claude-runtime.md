@@ -20,6 +20,14 @@ carry `env` and `disallowedTools`:
 }
 ```
 
+A **seat** is that same shape with a name and a curated grant on top —
+`claude-peer-researcher`, still `PASEO_PI_ROLE=peer`, plus
+`PASEO_TEAM_EXTRA_TOOLS=WebFetch,WebSearch` and those two names removed from
+`disallowedTools`. `pteam seats apply` generates it; the deny list is recomputed
+by `claudeDisallowedTools(role)` **under the seat's own environment**, so the
+static and dynamic layers can never disagree about a grant. See README, *Custom
+seats*.
+
 The daemon runs that provider through the Claude Agent SDK with
 `settingSources: ["user", "project", "local"]`, so hooks configured in
 `~/.claude/settings.json` are loaded, and with a `canUseTool` callback, so
@@ -146,7 +154,7 @@ The notice is context, not a deny: nothing here blocks a tool.
 | Bash | no | yes | yes, guarded |
 | Write/Edit | no | only with `PASEO_TEAM_LEAD_WRITE=1` | only with `MODE: write` + `EDIT_AUTHORITY: allowed` |
 | `mcp__paseo__*` | monitoring + `create_heartbeat`/`delete_heartbeat` + gated lead-recovery `create_agent` | full Lead allowlist + permissions | none |
-| `mcp__paseo-team__*` | `team_watchdog`, `team_chat`, `team_fork`, `team_lease` (`status` only) — it RECEIVES `lead_ask_supervisor` consults, never sends one | those four with `team_lease` unrestricted, plus `lead_ask_supervisor` | `peer_ask_lead` only |
+| `mcp__paseo-team__*` | `team_watchdog`, `team_fork`, `team_lease` (`status` only) — it RECEIVES `lead_ask_supervisor` consults, never sends one | those three with `team_lease` unrestricted, plus `lead_ask_supervisor` | `peer_ask_lead` only |
 | `mcp__agent-browser__*` | no | yes | only with `BROWSER_MCP_AUTHORITY: allowed` |
 | `Task` (Claude subagents) | no | no | no |
 

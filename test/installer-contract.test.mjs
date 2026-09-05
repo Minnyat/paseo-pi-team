@@ -11,7 +11,6 @@ import { isMainModule as isRoutingMain } from "../scripts/model-routing.mjs";
 import { isMainModule as isOcrMain } from "../scripts/ocr-setup.mjs";
 import { isMainModule as isOcrReviewMain } from "../scripts/ocr-review.mjs";
 import { isMainModule as isCommunicationMain } from "../scripts/team-communication.mjs";
-import { isMainModule as isChatMain } from "../scripts/team-chat.mjs";
 import { isMainModule as isLeaseMain } from "../scripts/team-lease.mjs";
 import { isMainModule as isWatchdogMain } from "../scripts/watchdog.mjs";
 import { isMainModule as isPathMain } from "../scripts/team-scripts-path.mjs";
@@ -20,7 +19,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "scripts");
 const installed = mkdtempSync(join(tmpdir(), "paseo-installed-support-"));
 const unrelatedCwd = mkdtempSync(join(tmpdir(), "paseo-unrelated-cwd-"));
-for (const file of ["lib-common.mjs", "remote-paseo.mjs", "model-routing.mjs", "reliability.mjs", "team-communication.mjs", "team-chat.mjs", "team-lease.mjs", "watchdog.mjs", "ocr-review.mjs", "ocr-setup.mjs", "team-scripts-path.mjs"]) {
+for (const file of ["lib-common.mjs", "remote-paseo.mjs", "model-routing.mjs", "reliability.mjs", "team-communication.mjs", "team-lease.mjs", "lease-ledger.mjs", "watchdog.mjs", "ocr-review.mjs", "ocr-setup.mjs", "team-scripts-path.mjs"]) {
   cpSync(join(source, file), join(installed, file));
 }
 
@@ -69,7 +68,6 @@ const symlinkCases = [
   [join(installed, "ocr-setup.mjs"), isOcrMain],
   [join(installed, "ocr-review.mjs"), isOcrReviewMain],
   [join(installed, "team-communication.mjs"), isCommunicationMain],
-  [join(installed, "team-chat.mjs"), isChatMain],
   [join(installed, "team-lease.mjs"), isLeaseMain],
   [join(installed, "watchdog.mjs"), isWatchdogMain],
   [join(installed, "team-scripts-path.mjs"), isPathMain],
@@ -173,8 +171,11 @@ for (const installer of ["install.sh", "install.ps1"]) {
     // is right in a checkout and wrong here — and it fails at IMPORT time,
     // where the caller reports it as something else entirely (a Lead unable to
     // staff any writer, blamed on an unreadable lease ledger).
-    "team-chat.mjs",
     "team-lease.mjs",
+    // Not a core-toucher itself — it is the board team-lease.mjs writes to, and
+    // a dependency travels with the script that imports it or the import fails
+    // in exactly the confusing way described above.
+    "lease-ledger.mjs",
     "team-fork.mjs",
     // remote-paseo.mjs joined this list when its `run` command started
     // resolving policy-core (§PR-G, cluster-label auto-fill) — its own
@@ -241,7 +242,6 @@ for (const installer of ["install.sh", "install.ps1"]) {
   assert.deepEqual(tools.sort(), [
     "lead_ask_supervisor",
     "peer_ask_lead",
-    "team_chat",
     "team_fork",
     "team_lease",
     "team_watchdog",

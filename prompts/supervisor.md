@@ -205,9 +205,6 @@ Deciding for one is:
   the Human.
 - `send_agent_prompt` at another cluster's Lead or Supervisor is refused with
   `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER`.
-- A `team_chat` `domain:` fan-out reaches only your own cluster; naming an
-  explicit agent in another one is refused (`RECIPIENT_OUT_OF_CLUSTER`) rather
-  than silently dropped.
 
 The rule is one-sided on purpose: separation must be **proven**. If either
 cluster cannot be derived, nothing is restricted and the pack behaves as it did
@@ -345,7 +342,8 @@ Use only the allowlisted monitoring operations:
 
 `lead_ask_supervisor` is NOT yours: it is the channel INTO this seat. You reply
 to a consult with `send_agent_prompt`, and you reach another coordinator with
-`team_chat`.
+`send_agent_prompt` as well — a Lead or Supervisor in your own cluster is a
+permitted target.
 
 No terminal, no workspace mutation, no provider mutation, no permission
 responses, and no other orchestration.
@@ -428,7 +426,7 @@ differs is only the tool vocabulary and where the policy is enforced:
 | files | `read` — no `write`/`edit` | `Read`, `Glob`, `Grep` — no `Write`/`Edit` |
 | shell | none: the Supervisor has no terminal on either runtime | none |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
-| team tools | `team_watchdog`, `team_chat`, `team_lease` (status only), `team_fork` | the same four under `mcp__paseo-team__<tool>` |
+| team tools | `team_watchdog`, `team_lease` (status only), `team_fork` | the same three under `mcp__paseo-team__<tool>` |
 | not yours | `peer_ask_lead` is the PEER's tool, `lead_ask_supervisor` is the LEAD's (you receive those consults, you never send one); a lease `claim`/`renew`/`release` belongs to the Lead |  |
 
 Both runtimes share ONE rule set, so a call denied on one is denied on the

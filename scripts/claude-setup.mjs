@@ -336,8 +336,15 @@ function applyToFile(path, transform, { label, createIfMissing = true }) {
  * (disallowedTools) computed from the policy modules so config and code cannot
  * drift. The dynamic half — peer write/git/browser authority — is the hook's job.
  */
-export async function buildProviderSnippet(env = process.env) {
-	const claudePolicy = await import(
+/**
+ * The Claude dialect of the role policy, loaded from wherever this copy of the
+ * pack lives. Exported because more than one caller needs the SAME module
+ * instance: the seat generator (cli/paseo-team.mjs) asks it for a deny list
+ * computed under a seat's own environment, and a second import path would risk
+ * answering from a different checkout than the one being installed.
+ */
+export async function loadClaudePolicy(env = process.env) {
+	return import(
 		pathToFileURL(
 			join(
 				env.PASEO_TEAM_POLICY_DIR?.trim() ||
@@ -346,6 +353,10 @@ export async function buildProviderSnippet(env = process.env) {
 			),
 		).href
 	);
+}
+
+export async function buildProviderSnippet(env = process.env) {
+	const claudePolicy = await loadClaudePolicy(env);
 	const labels = {
 		supervisor: "Claude Governance Supervisor",
 		lead: "Claude Project Lead",
@@ -401,7 +412,7 @@ export async function install(env = process.env, { cdpPort = null } = {}) {
 		// A browser conflict must NOT take the team server down with it. The two
 		// entries are independent — `agent-browser` is a general-purpose tool the
 		// user may already run on their own port, `paseo-team` is ours and is the
-		// only way a Lead or Peer reaches team_chat, team_lease, lead_ask_supervisor
+		// only way a Lead or Peer reaches team_lease, lead_ask_supervisor
 		// or peer_ask_lead.
 		// Skipping both left hooks ALREADY written (mergeHooks runs first) beside
 		// a fleet with no team tools at all: the seats come up governed and

@@ -54,8 +54,8 @@ TEAM_SUPPORT_FILES=(
   reliability.mjs
   watchdog.mjs
   team-communication.mjs
-  team-chat.mjs
   team-lease.mjs
+  lease-ledger.mjs
   team-fork.mjs
   ocr-review.mjs
   remote-paseo.mjs

@@ -326,9 +326,9 @@ test("the consult tool belongs to the Lead alone", () => {
 	// A Peer with a second escalation path routes around its own Lead.
 	assert.match(String(leadConsultToolBlockReason("peer")), /peer_ask_lead/);
 	// A Supervisor holding it would be consulting itself.
-	assert.match(String(leadConsultToolBlockReason("supervisor")), /team_chat/);
+	assert.match(String(leadConsultToolBlockReason("supervisor")), /prompt them directly/);
 	// Unrelated tool names fall straight through.
-	assert.equal(leadConsultToolBlockReason("peer", "team_chat"), null);
+	assert.equal(leadConsultToolBlockReason("peer", "team_lease"), null);
 
 	// And the coarse gate both runtimes call agrees.
 	assert.equal(teamToolBlockReason("lead", LEAD_CONSULT_TOOL, null), null);

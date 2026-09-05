@@ -23,6 +23,10 @@ import {
 	THINKING_LEVELS_BY_FAMILY,
 	providerFamily,
 } from "../scripts/model-routing.mjs";
+import {
+	SEAT_CAPABILITY_IDS,
+	capabilitiesForBase,
+} from "../scripts/seat-profiles.mjs";
 
 /** The route card of a section, wherever it is nested. */
 function routeItemFields(schema) {
@@ -169,5 +173,40 @@ for (const section of ROUTING_SECTIONS) {
 		"~/.pi/agent/settings.json is pi's own file: a Claude-only level there means nothing",
 	);
 }
+
+// --- the seats form describes the SAME catalog the generator enforces --------
+// Same failure this file was written for, one section later: a hand-typed
+// capability list in the form would offer grants `pteam seats apply` refuses,
+// or hide ones it allows. The schema must be built FROM seat-profiles.mjs.
+{
+	const schema = schemaForSection("seats");
+	assert.ok(schema, "the seats section has a form schema");
+	const seatsField = schema.groups
+		.flatMap((group) => group.fields ?? [])
+		.find((field) => field.path === "seats");
+	assert.equal(seatsField?.type, "map");
+
+	const base = seatsField.item.fields.find((f) => f.path === "base");
+	assert.deepEqual([...base.enum].sort(), [...ROLE_PROVIDERS].sort(), "every durable role provider is offerable as a base");
+
+	const caps = seatsField.item.fields.find((f) => f.path === "capabilities");
+	assert.equal(caps.type, "flags");
+	assert.deepEqual(caps.enum, [...SEAT_CAPABILITY_IDS]);
+	assert.deepEqual(
+		caps.options.map((option) => option.id),
+		[...SEAT_CAPABILITY_IDS],
+		"every catalog entry is described for the renderer",
+	);
+	for (const option of caps.options) {
+		assert.ok(option.label, `${option.id} has no label to render`);
+	}
+	// The per-base option lists come from the catalog's own role/family rules,
+	// so a capability the generator would reject is never even offered.
+	assert.equal(caps.optionsBy.path, "base");
+	for (const provider of ROLE_PROVIDERS) {
+		assert.deepEqual(caps.optionsBy.map[provider], capabilitiesForBase(provider), `optionsBy disagrees for ${provider}`);
+	}
+}
+
 
 console.log("[paseo-team] config-schema tests passed");

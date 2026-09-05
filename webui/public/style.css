@@ -394,7 +394,7 @@ button.preset:hover:not(:disabled) { background: color-mix(in srgb, var(--accent
 }
 .cfg-field:last-child { border-bottom: none; padding-bottom: 2px; }
 .cfg-field-wide { display: block; padding-bottom: 12px; }
-.cfg-field-wide .cfg-map { margin-top: 8px; }
+.cfg-field-wide .cfg-map, .cfg-field-wide .cfg-flags { margin-top: 8px; }
 
 .cfg-label { display: flex; flex-direction: column; gap: 2px; }
 .cfg-label label { font-size: 14px; font-weight: 570; }
@@ -429,6 +429,14 @@ textarea.cfg-lines {
 
 .cfg-kv { display: flex; flex-direction: column; gap: 6px; }
 .cfg-kv-row { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: center; }
+
+.cfg-flags { display: flex; flex-direction: column; gap: 10px; }
+.cfg-flag { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
+.cfg-flag input { margin-top: 3px; }
+.cfg-flag-body { display: flex; flex-direction: column; gap: 3px; }
+.cfg-flag-label { font-weight: 600; }
+.cfg-flag-grant { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.cfg-flag .cfg-hint { margin: 0; }
 
 .cfg-map { display: flex; flex-direction: column; gap: 10px; }
 .cfg-card {

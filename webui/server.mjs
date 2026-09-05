@@ -42,7 +42,7 @@ export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 // --- request -> argv -------------------------------------------------------
 
-const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings"];
+const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings", "seats"];
 const ROLES = ["supervisor", "lead", "peer"];
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -110,17 +110,25 @@ export const ROUTES = {
 				"graph",
 				...(q.all === "1" ? ["--all"] : []),
 				...(q.maxInspect ? ["--max-inspect", match(q.maxInspect, /^\d{1,3}$/, "maxInspect")] : []),
-				// Coordination view: each room costs one round trip, so it is
-				// opt-in and the room list is pattern-checked before it reaches
-				// argv — the CLI validates again, but a WebUI that forwards
-				// arbitrary text into a command line is a bug on its own.
-				...(q.withChat ? ["--with-chat", match(q.withChat, /^[A-Za-z0-9._-]{1,128}(,[A-Za-z0-9._-]{1,128}){0,7}$/, "withChat")] : []),
 			],
 		}),
 		// Slightly under the UI's poll interval so a poll usually gets a fresh
 		// snapshot rather than the same one twice.
 		cacheMs: 4_000,
 		tag: "graph",
+	},
+
+	// Seats: reading is a plain config section (above); applying is the write
+	// that turns the seat document into Paseo providers. It gets its own route
+	// rather than riding on POST /api/config because the two are different acts
+	// — saving a seat changes a file the user owns, applying it rewrites the
+	// daemon's provider set.
+	"GET /api/seats": { build: () => ({ args: ["seats", "list"] }), cacheMs: 5_000, tag: "seats" },
+	"POST /api/seats/apply": {
+		build: (q, body) => ({
+			args: ["seats", "apply", ...(body?.dryRun === true ? ["--dry-run"] : [])],
+		}),
+		invalidates: ["seats", "config", "status", "preflight", "env"],
 	},
 
 	"GET /api/permits": { build: () => ({ args: ["permits", "list"] }), cacheMs: 3_000, tag: "permits" },
@@ -150,7 +158,7 @@ export const ROUTES = {
 			args: ["config", "write", pick(q.section, CONFIG_SECTIONS, "section")],
 			stdin: raw,
 		}),
-		invalidates: ["config", "env", "status", "preflight"],
+		invalidates: ["config", "env", "status", "preflight", "seats"],
 	},
 	"GET /api/prompts": {
 		build: (q) => ({ args: ["prompts", "read", pick(q.role, ROLES, "role")] }),
@@ -172,22 +180,6 @@ export const ROUTES = {
 			stdin: String(body?.content ?? ""),
 		}),
 		invalidates: ["skills"],
-	},
-
-	"GET /api/chat": { build: () => ({ args: ["chat", "list"] }), cacheMs: 5_000, tag: "chat" },
-	"GET /api/chat/read": {
-		build: (q) => ({
-			args: ["chat", "read", match(q.room, TOKEN_LIKE, "room"), ...(q.limit ? ["--limit", match(q.limit, /^\d{1,4}$/, "limit")] : [])],
-		}),
-		cacheMs: 2_000,
-		tag: "chat",
-	},
-	"POST /api/chat/post": {
-		build: (q, body) => ({
-			args: ["chat", "post", match(body?.room, TOKEN_LIKE, "room")],
-			stdin: String(body?.message ?? ""),
-		}),
-		invalidates: ["chat"],
 	},
 
 	"GET /api/watchdog": { build: () => ({ args: ["watchdog"] }), cacheMs: 10_000, tag: "watchdog" },
@@ -263,7 +255,7 @@ export function createCache() {
 			return value;
 		},
 		// A POST drops only the reads its write can reach (ROUTES `invalidates`),
-		// so posting a chat message no longer throws away a 60s preflight answer.
+		// so one write no longer throws away a 60s preflight answer.
 		invalidate(tags) {
 			for (const [key, entry] of entries) {
 				if (entry.tag !== null && tags.includes(entry.tag)) entries.delete(key);

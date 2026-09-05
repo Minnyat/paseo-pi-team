@@ -135,13 +135,13 @@ paseo-pi-team/
 
 | Profile | `PASEO_PI_ROLE` | Default tools |
 |---|---|---|
-| `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog`, `team_chat`, `team_lease` (status), `team_fork` |
-| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog`, `team_chat`, `team_lease`, `team_fork`, `lead_ask_supervisor` |
+| `pi-supervisor` | `supervisor` | `read`, monitoring `mcp`, `team_watchdog`, `team_lease` (status), `team_fork` |
+| `pi-lead` | `lead` | `read`, `bash`, Paseo orchestration set, `team_watchdog`, `team_lease`, `team_fork`, `lead_ask_supervisor` |
 | `pi-peer` | `peer` | `read`, `bash`, `peer_ask_lead` (+ `write`/`edit` under `MODE: write`) |
 
 The `claude-*` profiles carry the same three roles and the same team tools,
 reached as `mcp__paseo-team__<tool>`. A Peer gets `peer_ask_lead` and nothing
-else: `team_chat`, `team_lease`, `team_fork`, `team_watchdog` and
+else: `team_lease`, `team_fork`, `team_watchdog` and
 `lead_ask_supervisor` are all refused for it, because a Peer coordinates
 through its Lead. `lead_ask_supervisor` is the Lead's alone — the Supervisor
 receives those consults and never sends one.
@@ -159,6 +159,65 @@ Per-role exceptions:
   `multi` a domain no wider than the Lead's own).
 - **Peer** gets no Paseo MCP or orchestration tools at all. Browser MCP is
   granted only by the current V3 brief.
+
+### Custom seats — named variants of the three roles
+
+A **seat** is not a fourth role. It is one of the six durable role providers
+plus a name and a set of capabilities from a catalog that lives in code
+(`scripts/seat-profiles.mjs`), materialized into an ordinary Paseo provider:
+
+```jsonc
+// ~/.paseo-pi-team/seat-profiles.local.json — edited by hand or in the WebUI
+{ "version": 1, "seats": {
+  "researcher": { "base": "claude-peer", "label": "Claude Peer (Researcher)",
+                  "capabilities": ["web-research"] }
+} }
+```
+
+```bash
+pteam seats list                # what the seats generate, and why one is refused
+pteam seats apply --dry-run     # the plan, writing nothing
+pteam seats apply               # merge into ~/.paseo/config.json, then: paseo daemon restart
+```
+
+The generated provider is `claude-peer-researcher`, carrying
+`PASEO_PI_ROLE=peer` and `PASEO_TEAM_EXTRA_TOOLS=WebFetch,WebSearch`, with those
+two tools removed from its `disallowedTools`. The rule core is untouched: it
+decides authority from `PASEO_PI_ROLE`, never from a provider name, so a seat
+can only ever be one of the three roles it already knows.
+
+| Capability | Base roles | Grants |
+|---|---|---|
+| `web-research` | `claude-lead`, `claude-peer` | `WebFetch`, `WebSearch` |
+| `lead-write` | `pi-lead`, `claude-lead` | `PASEO_TEAM_LEAD_WRITE=1` (Write/Edit) |
+
+Four rules make this safe to expose in a browser:
+
+- **The catalog is the allowlist.** The form offers what
+  `scripts/seat-profiles.mjs` describes and nothing else; adding a capability is
+  a code change with a test, never a text box someone types `Task` into.
+- **A capability declares its roles and runtime family.** `web-research` is
+  refused for a Supervisor (observation-only) and for pi seats (no web tool
+  exists there) — refused loudly at `apply`, not hidden in the UI.
+- **Both policy layers are recomputed together.** `disallowedTools` is asked of
+  the real policy *under the seat's own environment*, so a grant expressed as an
+  env knob (`lead-write`) cannot leave the static layer stripping the tool it
+  just enabled.
+- **Generation never overwrites what it did not create.** `seats apply` keeps a
+  ledger (`~/.paseo-pi-team/seat-providers.json`) and touches only names in it;
+  a hand-written provider whose name collides is reported as `skipped`. One
+  consequence: `pteam uninstall --purge` deletes that ledger, so any seat
+  providers still in `~/.paseo/config.json` become unowned and must be removed
+  by hand.
+
+Seats are deliberately **not** routable: `routing`/`cluster` still accept only
+the six durable role providers, so a seat takes whatever model its creator
+passes to `create_agent`.
+
+A seat provider is also still governed by every provider-name gate — a
+`claude-supervisor-audit` seat hits the same Supervisor-creation guard a bare
+`claude-supervisor` does, because `parseRoleProvider` resolves a seat to its
+base role.
 
 ### How authority is decided
 
@@ -206,7 +265,7 @@ its own contract had already delegated to it.
 
 `lead_ask_supervisor` closes that. It resolves the Supervisor seat of the Lead's
 own **cluster** from Paseo's agent state (narrowed by `team.domain` under
-`multi`), and delivers a `LEAD_CONSULT_V1` **prompt** — not a chat post, because
+`multi`), and delivers a `LEAD_CONSULT_V1` **prompt**, because
 a prompt wakes an idle Supervisor and opens a turn, which is what makes the
 receiving runtime inject its verdict.
 
@@ -305,8 +364,12 @@ team_lease { action: "claim", scope: "src/auth", ttlMs: <work window> }
 team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
 ```
 
-- The ledger is a Paseo chat room (`leases`) and has **no locking**, so a claim
-  is written even when it loses. Read `granted`, not merely `ok`.
+- The ledger is an append-only file this pack owns (`scripts/lease-ledger.mjs`).
+  A claim is **compare-and-swap**: the board is locked, read and appended to as
+  one step, so a claim that collides with a live lease is refused and writes
+  nothing. Read `granted`, not merely `ok`. Read-side arbitration
+  (`resolveLeases`) stays as the backstop — it covers expiry, older records and
+  any filesystem where the lock turns out to be advisory.
 - Scopes nest: holding `src` holds `src/auth`. Claim the narrowest scope the
   writer needs, or you block Leads you did not mean to.
 - Read-only dispositions (scout, researcher, architect, reviewer) take no lease
@@ -315,25 +378,21 @@ team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
 - TTL is capped at 12h, so a smuggled `TTL_MS` cannot lock the repo root
   indefinitely.
 
-### `team_chat` — the Lead ↔ Lead / Supervisor ↔ Lead bus
+### Lead ↔ Lead / Supervisor ↔ Lead — a direct prompt
 
 `peer_ask_lead` is one-way and parent-scoped; it cannot reach another Lead.
-`team_chat` is the many-to-many channel, built on Paseo chat rooms because a
-post is queryable (so the graph draws a **confirmed** `message` edge) and a
-mention **wakes** an idle recipient — the room is both ledger and doorbell.
+Between coordinating seats there is no bus: prompt the other seat directly with
+`send_agent_prompt`. A Lead or Supervisor **in your own cluster** is a permitted
+target; only another Lead's *Peer* is refused
+(`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and the answer to that is to prompt the
+Lead who owns it.
 
-```text
-team_chat { action: "post", room, recipients: ["<agent-id|short-id|domain:<name>>"], body }
-team_chat { action: "read", room }
-team_chat { action: "rooms" }
-```
-
-Bounds are transport-imposed: an 8192-byte payload ceiling (`paseo chat post`
-takes the body as ARGV and Windows caps a command line near 32K), a
-**cooperative** hop/TTL bound (it stops a well-behaved relay loop and makes a
-bad one visible — it cannot prevent one), and a room allowlist via
-`PASEO_TEAM_ROOMS` (chat rooms have no ACL of their own). Typing `paseo chat`
-in bash is redirected to the tool, the only path that enforces any of this.
+This pack used to run a many-to-many bus on Paseo chat rooms. Paseo retired chat
+rooms in 0.4.0 — upstream PR #3053 removed them "instead of migrating" them
+ahead of a storage change — so the bus went with them. Two consequences: a
+broadcast is N prompts rather than one post (N is the number of coordinators,
+not of engineers), and a prompt is not a record, so anything that must be
+readable later belongs in the plan, the PR or the task brief.
 
 ### Multi-supervisor governance — `PASEO_TEAM_TOPOLOGY`
 
@@ -387,7 +446,7 @@ fact — these catch mistakes, not forgery.
 `team.domain` says what a seat **governs**. It never said where a seat
 **lives**, and every governance read in the pack is host-global on purpose:
 `$PASEO_HOME/agents` is indexed by agent id across every cwd-slug, and the
-`team_chat` domain fan-out runs `paseo ls -g` — the flag whose whole job is to
+a domain fan-out runs `paseo ls -g` — the flag whose whole job is to
 escape cwd scoping. With one project per host that gap never showed. With two
 it did, three ways: two unrelated repos that both label a seat `backend` made
 each other's Supervisors contenders (so `JURISDICTION_OVERLAP` fired on a
@@ -439,8 +498,6 @@ live in:
 |---|---|
 | `SUPERVISOR_DECISION` from another cluster | `CLUSTER_MISMATCH` (refused; a bare observation only warns) |
 | `send_agent_prompt` at another cluster's Lead/Supervisor | `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER` |
-| `team_chat` `domain:` fan-out | foreign seats drop out of the audience; `NO_RECIPIENTS` if that empties it |
-| `team_chat` explicit agent ref | `RECIPIENT_OUT_OF_CLUSTER` — a deliberate address fails loudly rather than being dropped |
 | scope lease | `LEASE_V1` carries `CLUSTER:`; scopes collide only inside one cluster |
 
 `CLUSTER_MISMATCH` and `PROMPT_TARGET_OUT_OF_CLUSTER` are **not** gated on
@@ -566,7 +623,7 @@ When the `claude` CLI is present, the installers also run
 skips that step; it is not an error.
 
 The support scripts are `lib-common`, `reliability`, `watchdog`,
-`team-communication`, `team-chat`, `team-lease`, `ocr-review`, `remote-paseo`,
+`team-communication`, `team-lease`, `lease-ledger`, `ocr-review`, `remote-paseo`,
 `model-routing`, `team-scripts-path`, `claude-hook` and `claude-team-mcp`.
 They are copied **flat**, so every import between them
 must stay `./<name>.mjs`. `installer-contract.test.mjs` guards that: every
@@ -849,6 +906,8 @@ node cli/paseo-team.mjs --help          # or `npm link` once, then `pteam`
 pteam status                            # paths + presence, machine readable
 pteam graph                             # agents, spawn tree, pending permits
 pteam permits list
+pteam seats list                        # custom seats + the providers they generate
+pteam seats apply                       # write those providers into ~/.paseo/config.json
 pteam web --port 4321 --open            # prints http://127.0.0.1:PORT/#token=...
 ```
 
@@ -866,8 +925,12 @@ Two different things are called "permission", and the UI keeps them apart:
   delegate call then fails.
 - **Policy authority** — what a role may do at all: the allowlists in
   `extensions/paseo-team-policy.ts`, `PASEO_TEAM_LEAD_WRITE`,
-  `PASEO_TEAM_EXTRA_TOOLS`, and the V3 brief authority fields. The UI shows this
-  read-only; there is no "grant everything" button.
+  `PASEO_TEAM_EXTRA_TOOLS`, and the V3 brief authority fields. The UI renders
+  this read-only, with one deliberate exception: the **Ghế tuỳ biến** tab builds
+  seats (see [Custom seats](#custom-seats--named-variants-of-the-three-roles)),
+  and a seat grants only capabilities from a catalog that lives in code. There
+  is still no way to type a tool name into the browser and have it granted, and
+  no "grant everything" button.
 
 Cost note, because it shapes the whole design: every `paseo` invocation costs
 ~3s of process startup on Windows regardless of the query. `paseo-team graph`

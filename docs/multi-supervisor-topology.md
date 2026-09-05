@@ -1,5 +1,28 @@
 # Mở rộng topology: nhiều Supervisor, nhiều Lead, fork/handoff
 
+> **TRẠNG THÁI (2026-09-05): PR-B đã bị GỠ.**
+>
+> Toàn bộ tầng `team_chat` — chat room, envelope broadcast, `domain:` fan-out,
+> hop/TTL, room allowlist — đã được gỡ khỏi pack. Lý do: Paseo **bỏ hẳn chat
+> room ở 0.4.0**; upstream PR #3053 ("Remove chat rooms and agent loops before
+> storage migration", merge 2026-08-10) retire chúng *"instead of migrating"*
+> trước một đợt đổi storage, và giữ lại schema cũ chỉ dưới tag `COMPAT` có ngày
+> hết hạn. Không bản CLI nào từ 0.4.0 trở đi còn lệnh `chat` (đã kiểm tra tận
+> file: 0.5.2, 0.6.0, 0.6.1, 0.7.0-beta.1/2/3, 0.7.0, 0.7.2 — zero). Kèm theo,
+> issue #625 ("paseo chat commands timeout under concurrent agent load") vẫn
+> OPEN từ 2026-04-29 — chính pattern dùng của pack này.
+>
+> Thay thế: Lead ↔ Lead và Lead ↔ Supervisor nói chuyện bằng `send_agent_prompt`
+> trực tiếp (policy vốn đã cho phép nhắm một Lead/Supervisor cùng cluster —
+> chỉ Peer của Lead khác mới bị chặn). Sổ cái scope-lease chuyển sang kho riêng
+> của pack: `scripts/lease-ledger.mjs`.
+>
+> **§1.5, §1.6, §1.7, §1.8 và §PR-B bên dưới giữ nguyên làm bằng chứng lịch
+> sử** — chúng ghi lại phép đo thật tại thời điểm đó và là lý do các quyết định
+> khác được chốt. Đừng thi hành chúng.
+
+---
+
 Plan cho bước mở rộng từ mô hình hiện tại (1 Supervisor → 1 Lead → N Peer) sang
 **N Supervisor ↔ N Lead ↔ N Peer**, cộng cơ chế fork/handoff context giữa các
 Lead cùng vai.

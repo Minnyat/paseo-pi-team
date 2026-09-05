@@ -82,14 +82,14 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    team_lease { action: "claim", scope: "<OWNED_SCOPE>", ttlMs: <work window> }
    ```
 
-   Check `granted` in the result — a claim is written even when it loses,
-   because the ledger room has no locking and arbitration happens on read.
+   Check `granted` in the result, never merely `ok`. A claim that collides
+   with a live lease is REFUSED and writes nothing: the board is locked, read
+   and appended to as one step, so asking is not the same as taking.
 
    - `granted: true` → continue the cycle.
    - `granted: false` → another Lead owns ground that covers your scope; the
-     result names it. Coordinate through the `leases` room — see
-     "Coordinating with the other seats" below. Do NOT create the
-     writer, do NOT narrow the scope to sneak under the holder, and do NOT wait
+     result names it. Prompt that Lead directly — see "Coordinating with the
+     other seats" below. Do NOT create the writer, do NOT narrow the scope to sneak under the holder, and do NOT wait
      out the TTL as a strategy.
    - Ledger unreadable → `BLOCKED: LEASE_UNVERIFIABLE`. This is a real blocker,
      not a warning.
@@ -205,7 +205,7 @@ This is the exact failure mode the cluster config exists to prevent.
    already created. Without this label a reviewer worktree Peer (different
    `workspaceId` AND `cwd` from you by construction) reads as a FOREIGN
    cluster to every cluster-scoped rule: `SUPERVISOR_DECISION` verdicts,
-   `team_chat` recipient resolution, the scope-lease board. A label naming a
+   the scope-lease board. A label naming a
    DIFFERENT cluster than your own is refused too — that would be stamping a
    new seat into another project's authority, not a typo to silently correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
@@ -475,45 +475,35 @@ Give the new Supervisor a `create_heartbeat` cadence in its briefing so it
 observes as well as answers; a Supervisor that only ever replies to consults is
 half a seat.
 
-## Coordinating with the other seats (`team_chat`)
+## Coordinating with the other seats
 
 `peer_ask_lead` is how a Peer reaches YOU, and `lead_ask_supervisor` is how you
 reach the Supervisor — both are one-way, addressed, and expect an answer. Use
-the consult for a question you need DECIDED; use the room below for everything
-else. The channel between coordinating seats — Lead ↔ Lead, Supervisor ↔ Lead —
-is `team_chat`, a many-to-many bus built on Paseo chat rooms:
+the consult for a question you need DECIDED.
 
-```text
-team_chat { action: "post", room: "<room>", recipients: ["<agent-id|short-id|domain:<name>>"], body: "<text>" }
-team_chat { action: "read", room: "<room>" }     # envelopes parsed
-team_chat { action: "rooms" }                    # what rooms exist
-```
+For everything else between coordinating seats — Lead ↔ Lead, Supervisor ↔ Lead
+— prompt the other seat directly with `send_agent_prompt`. A Lead or Supervisor
+**in your own cluster** is a permitted target; only another Lead's *Peer* is
+refused (`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and the answer to that refusal is
+to prompt the Lead who owns it and let it staff its own engineer.
 
-Why a room and not `send_agent_prompt`: a post is **queryable** (so
-`pteam graph` can draw a `message` edge as confirmed rather than suspected)
-and a mention **wakes** an idle recipient, so the room is both the ledger and
-the doorbell. Use it for:
+There is no room, no bus and no broadcast. This pack used to run one on Paseo
+chat rooms; Paseo retired chat rooms in 0.4.0 (upstream PR #3053 removed them
+"instead of migrating" them to its new storage), and a coordination surface
+rented from a vendor that is deleting it is not a surface. Two consequences to
+work with rather than around:
 
-- lease arbitration — the `leases` room is the ledger `team_lease` reads and
-  writes; when a claim comes back `granted: false`, the holder is named there
-  and you talk to that Lead in that room;
-- anything you would have sent to another Lead's Peer — that call is refused
-  (`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and the room reaches the Lead who owns it;
-- a domain broadcast: `domain:<name>` is expanded here into one mention per
-  agent carrying that label, because Paseo's `mentionLabels` does not fan out.
+- **A broadcast is N prompts, not one post.** Expand the audience yourself and
+  address each seat. N here is the number of coordinators, not the number of
+  engineers, so this is cheap.
+- **A prompt is not a record.** If a decision has to be readable later, it
+  belongs in the artefact it is about — the plan, the PR description, the task
+  brief — not in a message anyone would have to go looking for.
 
-Bounds the transport forces, not preferences:
-
-| Bound | Value | Why |
-|---|---|---|
-| payload | `8192` bytes | `paseo chat post` takes the body as ARGV; Windows caps a command line near 32K, and the protocol budgets for the lowest platform |
-| hop / TTL | cooperative | Lead ↔ Lead is symmetric, so a relay without a bound ping-pongs. A relaying agent supplies its own `hop`: this stops a well-behaved loop and makes a bad one VISIBLE, it does not prevent one |
-| rooms | unrestricted unless `PASEO_TEAM_ROOMS` is set | chat rooms have no ACL of their own, so confinement has to come from this side |
-| audience | your own **cluster** | the fan-out runs `paseo ls -g`, the flag that escapes cwd scoping, so `domain:backend` used to mention every `backend` seat on the HOST — and a mention wakes an idle agent. Foreign seats drop out of a `domain:` broadcast; an explicit agent ref outside your cluster is refused (`RECIPIENT_OUT_OF_CLUSTER`) rather than dropped, because a deliberate address must fail loudly |
-
-Never type `paseo chat` in bash: the guard redirects it here, because the CLI
-carries none of the envelope, allowlist, ceiling or loop protection above.
-Peers are refused `team_chat` by design — a Peer coordinates through you.
+The scope lease is the one exception, and it is not a conversation: it is a
+board this pack owns (`lease-ledger.mjs`). `team_lease` reads and writes it, and
+when a claim comes back `granted: false` the holder is named in the result —
+prompt that Lead directly.
 
 ## Multi-supervisor topology (`PASEO_TEAM_TOPOLOGY`)
 

@@ -161,14 +161,13 @@ implementation still goes to an Engineer Peer.
      nobody resolved.
    Also under `multi`: you may prompt an agent you created, or another
    Lead/Supervisor. Prompting another Lead's Peer is refused
-   (`BLOCKED: PROMPT_TARGET_NOT_OWNED`) — use `team_chat` to reach that Lead
-   instead. Note that parentage and provider are declared labels rather than
+   (`BLOCKED: PROMPT_TARGET_NOT_OWNED`) — prompt that Lead directly and let it
+   staff its own Peer. Note that parentage and provider are declared labels rather than
    authenticated facts, so these guards catch mistakes and drift, not forgery.
    On EVERY topology, "another Lead/Supervisor" means one in **your own
    cluster**: prompting a coordinator in another workspace is refused with
-   `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER`, a `team_chat` `domain:` fan-out
-   reaches only your cluster, and naming an explicit agent outside it is
-   refused (`RECIPIENT_OUT_OF_CLUSTER`) rather than quietly dropped. Your own
+   `BLOCKED: PROMPT_TARGET_OUT_OF_CLUSTER`, and naming an explicit agent outside
+   it is refused (`RECIPIENT_OUT_OF_CLUSTER`) rather than quietly dropped. Your own
    subagents stay reachable wherever they run, so staffing a reviewer worktree
    is unaffected. Scope leases are cluster-qualified too — `src/api` in your
    repo no longer collides with `src/api` in somebody else's.
@@ -294,7 +293,7 @@ differs is only the tool vocabulary and where the policy is enforced:
 | files | `read` / `write` / `edit` | `Read`, `Glob`, `Grep` / `Write` / `Edit`, `NotebookEdit` |
 | shell | `bash` | `Bash` |
 | Paseo tools | `mcp({ tool, args })` | `mcp__paseo__<tool>` |
-| team tools | `team_watchdog`, `team_chat`, `team_lease`, `team_fork`, `lead_ask_supervisor` | the same five under `mcp__paseo-team__<tool>` |
+| team tools | `team_watchdog`, `team_lease`, `team_fork`, `lead_ask_supervisor` | the same four under `mcp__paseo-team__<tool>` |
 | not yours | `peer_ask_lead` is the PEER's tool — you receive those messages, you never call it |  |
 
 Both runtimes share ONE rule set, so a call denied on one is denied on the

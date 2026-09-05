@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildGraph, chatEdges, collectGraph, describeClusterMismatches, inferFamily, inferRole, inferRoleProvider, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
+import { buildGraph, collectGraph, describeClusterMismatches, inferFamily, inferRole, inferRoleProvider, inferSeat, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
 import * as cache from "../cli/lib/graph-cache.mjs";
 
 // --- role inference --------------------------------------------------------
@@ -19,9 +19,46 @@ assert.equal(inferRole("claude-supervisor/claude-opus-5"), "supervisor");
 assert.equal(inferFamily("claude-lead/claude-opus-5"), "claude");
 assert.equal(inferFamily("pi-lead/Minnyat/deepseek-v4-flash"), "pi");
 assert.equal(inferFamily("claude"), null);
-assert.deepEqual(inferRoleProvider("claude-peer/claude-fable-5"), { family: "claude", role: "peer" });
+assert.deepEqual(inferRoleProvider("claude-peer/claude-fable-5"), { family: "claude", role: "peer", seat: null });
 assert.equal(inferRoleProvider("codex-peer"), null);
 assert.equal(inferRole(undefined), null);
+
+// --- seat variants resolve to their BASE role ------------------------------
+// A custom seat ("claude-peer-researcher") is a peer with extra capabilities,
+// not an unknown provider: the graph must colour it as the peer it is, and the
+// same split has to hold in policy-core's parseRoleProvider, where it decides
+// whether a provider-name gate applies at all.
+assert.deepEqual(inferRoleProvider("claude-peer-researcher"), { family: "claude", role: "peer", seat: "researcher" });
+assert.deepEqual(inferRoleProvider("pi-lead-audit/Minnyat/deepseek-v4-flash"), { family: "pi", role: "lead", seat: "audit" });
+assert.equal(inferRole("CLAUDE-SUPERVISOR-AUDIT"), "supervisor", "case-folded seat names still resolve");
+assert.equal(inferSeat("claude-peer-researcher"), "researcher");
+assert.equal(inferSeat("claude-peer"), null, "a base provider has no seat");
+// A tail the seat vocabulary would refuse must not be read as a seat: an
+// unparseable provider stays unknown rather than silently becoming a peer.
+assert.equal(inferRoleProvider("claude-peer-"), null);
+assert.equal(inferRoleProvider("claude-peer-9lives"), null, "a seat id may not start with a digit");
+assert.equal(inferRoleProvider("claude-peerresearcher"), null);
+
+// The two implementations of this split must agree, or a seat could be shown
+// as one role by the UI and treated as another by the rule core.
+{
+	const { parseRoleProvider } = await import("../extensions/paseo-team-core/policy-core.js");
+	for (const name of [
+		"claude-peer",
+		"claude-peer-researcher",
+		"pi-lead-audit",
+		"claude-supervisor-audit",
+		"claude-peer-",
+		"claude-peer-9lives",
+		"codex-peer",
+	]) {
+		assert.deepEqual(
+			parseRoleProvider(name),
+			inferRoleProvider(name),
+			`policy-core and graph disagree on "${name}"`,
+		);
+	}
+}
 
 // --- PEER_MESSAGE_V1 parsing ----------------------------------------------
 {
@@ -348,105 +385,6 @@ function fakeRunner(overrides = {}) {
 	assert.equal(result.ok, true);
 	assert.equal(result.counts.agents, 4);
 	assert.ok(result.degraded.some((f) => f.reason === "AGENT_STATE_ROOT_UNREADABLE"));
-}
-
-// --- chat rooms as confirmed message edges --------------------------------
-// `paseo chat read --json` reports the real author agent id, so unlike the
-// log-scraped Lead→Peer guesses these edges are facts, not suspicions.
-{
-	const LEAD_A = "aaaaaaaa-1111-4111-8111-111111111111";
-	const LEAD_B = "bbbbbbbb-2222-4222-8222-222222222222";
-	const roster = [
-		{ id: LEAD_A, shortId: "aaaaaaa" },
-		{ id: LEAD_B, shortId: "bbbbbbb" },
-	];
-	const envelope = (from, corr) =>
-		[
-			"@bbbbbbb",
-			"TEAM_MESSAGE_V1",
-			"KIND: dependency",
-			`CORRELATION_ID: ${corr}`,
-			"TOPIC: T-7",
-			`FROM_AGENT_ID: ${from}`,
-			"FROM_ROLE: lead",
-			"FROM_DOMAIN: payments",
-			"HOP: 0",
-			"TTL: 8",
-			"",
-			"who owns the migration?",
-		].join("\n");
-
-	// B17 — a real author id yields a confirmed edge.
-	{
-		const edges = chatEdges([{ id: "m1", author: LEAD_A, createdAt: "t0", body: envelope(LEAD_A, "c1") }], roster, "coord");
-		assert.equal(edges.length, 1);
-		assert.equal(edges[0].type, "message");
-		assert.equal(edges[0].from, LEAD_A);
-		assert.equal(edges[0].to, LEAD_B, "the mention resolves from short id to the full agent id");
-		assert.equal(edges[0].confidence, "confirmed");
-		assert.equal(edges[0].kind, "dependency");
-		assert.equal(edges[0].taskId, "T-7");
-		assert.equal(edges[0].room, "coord");
-		assert.equal(edges[0].origin, "agent");
-	}
-
-	// B18 — a human posting in the room is not an agent edge.
-	{
-		const edges = chatEdges([{ id: "m2", author: "manual", createdAt: "t1", body: envelope(LEAD_A, "c2") }], roster, "coord");
-		assert.equal(edges[0].origin, "human", "author 'manual' is a person at a terminal, not an agent");
-		assert.equal(edges[0].from, "human");
-	}
-
-	// B19 — the same correlation id seen twice draws once.
-	{
-		const messages = [
-			{ id: "m3", author: LEAD_A, createdAt: "t2", body: envelope(LEAD_A, "c3") },
-			{ id: "m4", author: LEAD_A, createdAt: "t3", body: envelope(LEAD_A, "c3") },
-		];
-		const graph = buildGraph({
-			agents: [
-				{ id: LEAD_A, shortId: "aaaaaaa", provider: "pi-lead/o/m", status: "idle" },
-				{ id: LEAD_B, shortId: "bbbbbbb", provider: "pi-lead/o/m", status: "idle" },
-			],
-			messages: chatEdges(messages, roster, "coord"),
-			now: 0,
-		});
-		assert.equal(graph.edges.filter((e) => e.type === "message").length, 1, "dedup is by correlation id");
-	}
-
-	// A message with no envelope is room chatter, not a protocol edge.
-	assert.deepEqual(chatEdges([{ id: "m5", author: LEAD_A, body: "just talking" }], roster, "coord"), []);
-
-	// B21 — a mention nobody in the listing answers to is kept and flagged,
-	// never silently dropped.
-	{
-		const edges = chatEdges([{ id: "m6", author: LEAD_A, body: envelope(LEAD_A, "c6").replace("@bbbbbbb", "@zzzzzzz") }], roster, "coord");
-		assert.equal(edges.length, 1);
-		assert.equal(edges[0].to, "zzzzzzz");
-		assert.equal(edges[0].unresolvedRecipient, true);
-	}
-}
-
-{
-	// B20 — a room that cannot be read degrades that room only.
-	const result = await collectGraph({
-		runPaseoJson: async (args) => {
-			if (args[0] === "ls") return AGENTS;
-			if (args[0] === "permit") return [];
-			if (args[0] === "chat" && args[2] === "broken") throw Object.assign(new Error("no such room"), { code: "CLI_ERROR" });
-			if (args[0] === "chat") return [];
-			return { Id: args[1], ParentAgentId: null };
-		},
-		readStates: () => ({ states: {}, degraded: [] }),
-		chatRooms: ["coord", "broken"],
-		cache: { version: cache.CACHE_VERSION, parents: {} },
-		persistCache: false,
-		maxInspect: 0,
-		now: 0,
-	});
-	assert.equal(result.ok, true);
-	assert.equal(result.counts.agents, 4, "the graph still renders");
-	assert.ok(result.degraded.some((f) => f.reason === "CHAT_READ_FAILED" && f.detail.includes("broken")));
 }
 
 // --- OCR-005: dedup must not let one message erase another -----------------

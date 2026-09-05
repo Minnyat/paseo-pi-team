@@ -30,6 +30,16 @@ import {
 	THINKING_LEVELS_BY_FAMILY,
 	providerFamily,
 } from "../../scripts/model-routing.mjs";
+// Seat vocabulary has exactly ONE definition too: scripts/seat-profiles.mjs.
+// The capability catalog IS the allowlist, so the form must render what that
+// module describes rather than a second list that can quietly disagree with
+// what `seats apply` will actually grant.
+import {
+	SEAT_CAPABILITIES,
+	SEAT_CAPABILITY_IDS,
+	SEATS_SEED,
+	capabilitiesByBase,
+} from "../../scripts/seat-profiles.mjs";
 
 /**
  * Fallback list for `thinking`: the union of every family's levels. A renderer
@@ -473,6 +483,64 @@ export const CONFIG_SCHEMAS = {
 									keyLabel: "Lớp việc",
 									fixedKeys: [...MODEL_CLASSES],
 									item: { fields: routeFields() },
+								},
+							],
+						},
+					},
+				],
+			},
+		],
+	},
+
+	seats: {
+		label: "Ghế tuỳ biến (biến thể vai trò)",
+		intro:
+			"Một ghế là một biến thể có tên của MỘT trong ba vai trò gốc, không phải vai trò thứ tư. Luật vẫn đọc vai trò gốc; ghế chỉ thêm năng lực trong danh mục đã kiểm duyệt. Lưu xong bấm \"Áp dụng ghế\" để sinh provider, rồi chạy 'paseo daemon restart'.",
+		seed: { ...SEATS_SEED },
+		groups: [
+			{
+				id: "seats",
+				label: "Danh sách ghế",
+				hint:
+					"Tên ghế trở thành đuôi của provider: base \"claude-peer\" + ghế \"researcher\" → provider \"claude-peer-researcher\". Chữ thường, 2–24 ký tự, chỉ a-z 0-9 và dấu gạch ngang.",
+				fields: [
+					{
+						path: "seats",
+						type: "map",
+						keyLabel: "Tên ghế",
+						addLabel: "+ Thêm ghế",
+						item: {
+							fields: [
+								{
+									path: "base",
+									type: "enum",
+									enum: [...ROLE_PROVIDERS],
+									label: "Vai trò gốc",
+									hint: "Quyết định PASEO_PI_ROLE của ghế, tức toàn bộ luật áp lên nó.",
+								},
+								{
+									path: "label",
+									type: "string",
+									label: "Nhãn hiển thị",
+									hint: "Tên Paseo hiển thị trong 'provider ls'. Bỏ trống thì sinh tự động.",
+								},
+								{
+									path: "capabilities",
+									type: "flags",
+									enum: [...SEAT_CAPABILITY_IDS],
+									// Options follow the sibling `base`: a capability the
+									// catalog refuses for that role must not even be offered,
+									// because `seats apply` would reject the document anyway.
+									optionsBy: { path: "base", map: capabilitiesByBase() },
+									options: SEAT_CAPABILITIES.map((c) => ({
+										id: c.id,
+										label: c.label,
+										hint: c.hint,
+										tools: [...c.tools],
+										env: { ...c.env },
+									})),
+									label: "Năng lực được cấp",
+									hint: "Chỉ những năng lực có trong danh mục của code. Muốn thêm loại mới phải sửa scripts/seat-profiles.mjs kèm test.",
 								},
 							],
 						},

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // fake-paseo-live.mjs — a paseo stand-in for the live-plane CLI tests
-// (agents / permits / chat / graph).
+// (agents / permits / graph).
 //
 // Separate from fake-paseo.mjs on purpose: that one echoes argv back for the
 // remote-paseo wrapper tests, while these tests need CLI-shaped *results*.
@@ -85,9 +85,6 @@ if (argv[0] === "provider" && argv[1] === "models") {
 	]);
 }
 
-if (argv[0] === "chat" && argv[1] === "ls") say([{ id: "room_1", name: "team" }]);
-if (argv[0] === "chat" && argv[1] === "read") say([{ agentId: "peer", body: "hello", createdAt: "2026-08-21T00:00:00.000Z" }]);
-if (argv[0] === "chat" && argv[1] === "post") say({ posted: true, room: argv[2], body: argv[3] });
 
 if (argv[0] === "send") {
 	// The prompt must arrive through a file, never as one giant argv element.

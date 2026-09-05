@@ -15,7 +15,6 @@
 				<button data-tab="permissions">
 					Chờ duyệt<span id="permit-badge" class="badge hidden">0</span>
 				</button>
-				<button data-tab="chat">Trao đổi</button>
 				<button data-tab="roles" data-advanced>Vai trò</button>
 				<button data-tab="config" data-advanced>Cấu hình</button>
 			</nav>
@@ -90,16 +89,6 @@
 						<input type="checkbox" id="graph-all" /> Hiện cả agent đã lưu trữ
 					</label>
 					<label class="check" data-advanced>
-						Phòng chat
-						<input
-							type="text"
-							id="graph-rooms"
-							placeholder="ví dụ: leases,coord"
-							size="18"
-							title="Đọc thêm các phòng chat để vẽ đường nhắn tin giữa các Trưởng nhóm. Mỗi phòng tốn thêm một lượt gọi daemon."
-						/>
-					</label>
-					<label class="check" data-advanced>
 						Phạm vi
 						<select id="graph-domain"><option value="">tất cả</option></select>
 					</label>
@@ -133,7 +122,6 @@
 					<span><i class="swatch role-peer"></i>Thành viên</span>
 					<span><i class="swatch role-unknown"></i>Chưa rõ vai trò</span>
 					<span><i class="line solid"></i>giao việc</span>
-					<span><i class="line dashed"></i>nhắn tin (phòng chat)</span>
 					<span><i class="line forked"></i>bàn giao (fork phiên)</span>
 				</div>
 			</section>
@@ -149,16 +137,6 @@
 					Đây là quyền cho <em>một hành động cụ thể, ngay lúc này</em>. Quyền chung
 					của từng vai trò nằm ở tab “Vai trò”.
 				</p>
-			</section>
-
-			<!-- ------------------------------------------------------------ -->
-			<section id="tab-chat" class="tab">
-				<div class="toolbar">
-					<select id="chat-room" aria-label="Chọn phòng"></select>
-					<button id="chat-load">Đọc tin nhắn</button>
-					<span class="meta">Nơi các agent trao đổi với nhau.</span>
-				</div>
-				<div id="chat-body" class="body">Đang tải…</div>
 			</section>
 
 			<!-- ------------------------------------------------------------ -->
@@ -201,6 +179,7 @@
 						<option value="providers">Paseo — nhà cung cấp</option>
 						<option value="routing">Định tuyến mô hình</option>
 						<option value="cluster">Nhiều máy (cluster)</option>
+						<option value="seats">Ghế tuỳ biến</option>
 					</select>
 					<div class="segmented" role="group" aria-label="Kiểu chỉnh">
 						<button id="config-mode-form" class="active" type="button">Form</button>
@@ -208,6 +187,7 @@
 					</div>
 					<button id="config-load">Tải lại</button>
 					<button id="config-save" class="primary">Lưu</button>
+					<button id="seats-apply" class="hidden" title="Sinh provider Paseo từ danh sách ghế đã lưu">Áp dụng ghế</button>
 					<span id="config-meta" class="meta"></span>
 				</div>
 				<p class="lead-in" id="config-intro"></p>
