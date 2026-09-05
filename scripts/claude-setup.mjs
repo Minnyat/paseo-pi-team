@@ -10,11 +10,12 @@
 //   ~/.claude.json           mcpServers["paseo-team"]
 //                            → scripts/claude-team-mcp.mjs (peer_ask_lead,
 //                              lead_ask_supervisor, team_watchdog, …)
-//                            mcpServers["agent-browser"]
-//                            → the same stdio server browser-setup.mjs gives
-//                              pi. The Lead may drive a browser and a granted
-//                              Peer may too, but a server the runtime never
-//                              registered leaves that policy unreachable.
+//
+// The browser is NOT among them any more. This installer used to register an
+// `agent-browser` stdio server here; both runtimes now use a browser they
+// already have — Paseo Browser Control, which the daemon injects into every
+// seat, and Claude in Chrome — so an install removes an agent-browser entry
+// this installer previously wrote and registers none.
 //
 // Both files belong to the user and already carry entries from other tools
 // (Paseo installs its own hooks there), so every write MERGES: our entries are
@@ -23,7 +24,6 @@
 //
 // Usage:
 //   node scripts/claude-setup.mjs --install [--claude-home <dir>] [--json]
-//                                           [--attach-cdp-port <port>]
 //   node scripts/claude-setup.mjs --verify  [--json]
 //   node scripts/claude-setup.mjs --uninstall [--json]
 //   node scripts/claude-setup.mjs --print-providers [--json]
@@ -41,13 +41,12 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isEntrypoint } from "./lib-common.mjs";
-import {
-	AGENT_BROWSER_MCP_SERVER,
-	assertCdpPort,
-	browserMcpConfig,
-	isValidAgentBrowserMcpServer,
-	resolveExistingEntryDecision,
-} from "./browser-setup.mjs";
+
+/**
+ * The MCP server name this installer used to write, kept only so an upgrade can
+ * clean up after the version that wrote it. Nothing registers it any more.
+ */
+export const LEGACY_BROWSER_MCP_SERVER = "agent-browser";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -193,71 +192,44 @@ export function removeMcpServer(config) {
 }
 
 /**
- * Add the agent-browser server only when the user has not configured it.
+ * Remove ONLY an agent-browser entry THIS installer wrote.
  *
- * The paseo-team entry above is ours and is rewritten on every install; this
- * one is not. agent-browser is a general-purpose tool a user may already run
- * with their own flags (a pinned --cdp port, a narrowed tool set), and the pi
- * installer has always treated such an entry as untouchable. Same rule here,
- * so the two runtimes cannot disagree about who owns the entry.
- */
-export function mergeBrowserMcpServer(config, { cdpPort = null } = {}) {
-	const next = { ...(config ?? {}) };
-	const servers = { ...(next.mcpServers ?? {}) };
-	if (isValidAgentBrowserMcpServer(servers[AGENT_BROWSER_MCP_SERVER])) return config ?? {};
-	next.mcpServers = {
-		...servers,
-		[AGENT_BROWSER_MCP_SERVER]: browserMcpConfig({ cdpPort, dialect: "claude" }),
-	};
-	return next;
-}
-
-/**
- * Remove ONLY an entry this installer wrote.
- *
- * `mergeBrowserMcpServer` deliberately never rewrites a pre-existing entry, on
- * the grounds that agent-browser is a general-purpose tool a user may already
- * run with their own flags. Remove has to honour the same ownership rule or the
- * pair is asymmetric in the destructive direction: install would respectfully
- * leave a user's config alone and uninstall would delete it, recoverable only
- * from the .bak-* sibling by someone who thought to look. We never took
- * ownership of that entry, so we do not get to take it away.
+ * The pack no longer ships a browser server, so an install now converges the
+ * user's config to "none of ours". It still does not touch an entry the user
+ * configured themselves: agent-browser is a general-purpose tool someone may
+ * run with their own flags, we never took ownership of that entry, and we do
+ * not get to take it away just because we stopped writing our own.
  */
 export function removeBrowserMcpServer(config) {
 	const next = { ...(config ?? {}) };
-	const existing = next.mcpServers?.[AGENT_BROWSER_MCP_SERVER];
+	const existing = next.mcpServers?.[LEGACY_BROWSER_MCP_SERVER];
 	if (!existing) return next;
 	if (!isOwnBrowserMcpServer(existing)) return next;
 	const servers = { ...next.mcpServers };
-	delete servers[AGENT_BROWSER_MCP_SERVER];
+	delete servers[LEGACY_BROWSER_MCP_SERVER];
 	next.mcpServers = servers;
 	return next;
 }
 
 /**
- * Ours iff it is EXACTLY what `browserMcpConfig({dialect:"claude"})` writes for
- * the port the entry itself names. The port is the one field the installer
- * varies (`--attach-cdp-port`), so it is read back off the entry rather than
- * guessed; everything else — the `type`, the command, the arg order, the
- * absence of any key we never write — has to match a freshly rendered config.
- * Comparing against the real renderer, instead of a hand-listed set of fields,
- * means this cannot drift the next time that shape changes.
+ * Ours iff it is EXACTLY one of the two shapes this installer ever wrote:
+ * launch mode, or attach mode on the port the entry itself names. Anything
+ * else — an extra key, a different command, a reordered arg list — is the
+ * user's and stays.
  */
 export function isOwnBrowserMcpServer(server) {
 	if (!server || typeof server !== "object" || Array.isArray(server)) return false;
 	const args = Array.isArray(server.args) ? server.args : null;
 	if (!args) return false;
 	const at = args.indexOf("--cdp");
-	let ours;
-	try {
-		ours = browserMcpConfig({
-			cdpPort: at === -1 ? null : args[at + 1],
-			dialect: "claude",
-		});
-	} catch {
-		// An unusable port is not something this installer ever wrote.
-		return false;
-	}
+	const ours =
+		at === -1
+			? { type: "stdio", command: "agent-browser", args: ["mcp"] }
+			: {
+					type: "stdio",
+					command: "agent-browser",
+					args: ["--cdp", String(args[at + 1] ?? ""), "mcp"],
+				};
 	return stableJson(server) === stableJson(ours);
 }
 
@@ -271,16 +243,6 @@ function stableJson(value) {
 			.join(",")}}`;
 	}
 	return JSON.stringify(value) ?? "null";
-}
-
-/**
- * A usable browser surface, not merely a present key: a disabled entry
- * registers no tools, so reporting it as installed would put the silence back
- * exactly where this check exists to remove it.
- */
-export function browserMcpInstalled(config) {
-	const server = config?.mcpServers?.[AGENT_BROWSER_MCP_SERVER];
-	return isValidAgentBrowserMcpServer(server) && server.disabled !== true;
 }
 
 // ---------------------------------------------------------------------------
@@ -378,59 +340,21 @@ export async function buildProviderSnippet(env = process.env) {
 // Commands
 // ---------------------------------------------------------------------------
 
-/**
- * Why an existing entry can make the install FAIL rather than shrug: the merge
- * never rewrites an entry the user owns, which would otherwise turn
- * --attach-cdp-port into a knob that silently does nothing on the second run.
- * Mirrors resolveExistingEntryDecision on the pi side.
- */
-function browserMcpConflict(userConfigPath, cdpPort) {
-	if (cdpPort === null) return null;
-	const config = readJsonOrNull(userConfigPath);
-	if (!config || typeof config !== "object") return null;
-	const server = config.mcpServers?.[AGENT_BROWSER_MCP_SERVER];
-	if (!isValidAgentBrowserMcpServer(server)) return null;
-	const decision = resolveExistingEntryDecision(
-		{ path: userConfigPath, server },
-		cdpPort,
-	);
-	return decision.action === "conflict" ? decision.message : null;
-}
-
-export async function install(env = process.env, { cdpPort = null } = {}) {
+export async function install(env = process.env) {
 	const settingsPath = claudeSettingsPath(env);
 	const userConfigPath = claudeUserConfigPath(env);
-	const port = cdpPort === null || cdpPort === undefined ? null : assertCdpPort(cdpPort);
-	const conflict = browserMcpConflict(userConfigPath, port);
 	const results = {
 		hooks: applyToFile(settingsPath, (current) => mergeHooks(current, env), {
 			label: "~/.claude/settings.json",
 		}),
-		// Both servers go through ONE transform: two passes over the same file
+		// One transform over the file: registering the team server and dropping a
+		// browser entry a previous version of this installer wrote. Two passes
 		// would mean two backups and two writes for a single install.
-		//
-		// A browser conflict must NOT take the team server down with it. The two
-		// entries are independent — `agent-browser` is a general-purpose tool the
-		// user may already run on their own port, `paseo-team` is ours and is the
-		// only way a Lead or Peer reaches team_lease, lead_ask_supervisor
-		// or peer_ask_lead.
-		// Skipping both left hooks ALREADY written (mergeHooks runs first) beside
-		// a fleet with no team tools at all: the seats come up governed and
-		// mute. So the conflict skips exactly the entry it is about.
 		mcp: applyToFile(
 			userConfigPath,
-			(current) => {
-				const withTeam = mergeMcpServer(current, env);
-				return conflict ? withTeam : mergeBrowserMcpServer(withTeam, { cdpPort: port });
-			},
+			(current) => removeBrowserMcpServer(mergeMcpServer(current, env)),
 			{ label: "~/.claude.json" },
 		),
-		// Reported separately so the conflict is still visible and still fails
-		// the install — the user has to resolve the port before the browser
-		// surface works — without pretending the team server failed too.
-		browserMcp: conflict
-			? { path: userConfigPath, status: "skipped", error: conflict }
-			: { path: userConfigPath, status: "ok" },
 	};
 	return {
 		action: "install",
@@ -438,10 +362,7 @@ export async function install(env = process.env, { cdpPort = null } = {}) {
 		mcpScript: mcpScriptPath(env),
 		...results,
 		providers: await buildProviderSnippet(env),
-		ok:
-			results.hooks.status !== "failed" &&
-			results.mcp.status !== "failed" &&
-			results.browserMcp.status !== "skipped",
+		ok: results.hooks.status !== "failed" && results.mcp.status !== "failed",
 	};
 }
 
@@ -514,13 +435,11 @@ export function verify(env = process.env) {
 	const missingScripts = checkedScripts.filter((script) => !existsSync(script));
 	const scriptPresent = missingScripts.length === 0;
 	const mcpPresent = Boolean(userConfig?.mcpServers?.[TEAM_MCP_SERVER_NAME]);
-	const browserPresent = browserMcpInstalled(userConfig);
 	const missing = [
 		...Object.entries(hookState)
 			.filter(([, installed]) => !installed)
 			.map(([event]) => `hook:${event}`),
 		...(mcpPresent ? [] : [`mcp:${TEAM_MCP_SERVER_NAME}`]),
-		...(browserPresent ? [] : [`mcp:${AGENT_BROWSER_MCP_SERVER}`]),
 		...missingScripts.map((script) => `script:${script}`),
 	];
 	return {
@@ -529,7 +448,6 @@ export function verify(env = process.env) {
 		userConfigPath: claudeUserConfigPath(env),
 		hooks: hookState,
 		mcpServer: mcpPresent,
-		browserMcpServer: browserPresent,
 		hookScript: scriptPresent ? checkedScripts[0] : null,
 		hookScripts: checkedScripts,
 		missing,
@@ -542,8 +460,7 @@ function usage() {
 		"usage: node scripts/claude-setup.mjs <--install|--verify|--uninstall|--print-providers> [--json]",
 		"",
 		"  --install          merge hooks into ~/.claude/settings.json and the",
-		"                     paseo-team + agent-browser MCP servers into ~/.claude.json",
-		"  --attach-cdp-port  with --install: register agent-browser in attach mode",
+		"                     paseo-team MCP server into ~/.claude.json",
 		"                     on that CDP port instead of launch mode",
 		"  --verify           report what is installed (exit 1 when incomplete)",
 		"  --uninstall        remove only this pack's tagged entries",
@@ -562,12 +479,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		return;
 	}
 	let result;
-	if (mode === "--install") {
-		const index = argv.indexOf("--attach-cdp-port");
-		result = await install(env, {
-			cdpPort: index >= 0 ? assertCdpPort(argv[index + 1]) : null,
-		});
-	}
+	if (mode === "--install") result = await install(env);
 	else if (mode === "--verify") result = verify(env);
 	else if (mode === "--uninstall") result = uninstall(env);
 	else result = { action: "print-providers", ...(await buildProviderSnippet(env)), ok: true };
@@ -587,7 +499,6 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 					([event, installed]) => `    ${installed ? "✓" : "✗"} ${event}`,
 				),
 				`  mcp   -> ${result.mcpServer ? "✓" : "✗"} ${TEAM_MCP_SERVER_NAME} in ${result.userConfigPath}`,
-				`  mcp   -> ${result.browserMcpServer ? "✓" : "✗"} ${AGENT_BROWSER_MCP_SERVER} in ${result.userConfigPath}`,
 				...(result.hookScripts ?? []).map(
 					(script) => `  script -> ${result.missing.includes(`script:${script}`) ? "✗ MISSING" : "✓"} ${script}`,
 				),

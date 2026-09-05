@@ -98,10 +98,10 @@ paseo-pi-team/
 │   ├── watchdog.mjs                # observation-only running-agent watchdog
 │   ├── ocr-review.mjs              # deterministic OCR exact-SHA preflight manifest
 │   ├── ocr-setup.mjs               # installs/verifies the OCR CLI (capability probe, never downgrades)
-│   ├── browser-setup.mjs           # installs agent-browser CLI + Chrome runtime + MCP entry
 │   ├── claude-hook.mjs             # Claude Code hook: role prompt + PreToolUse policy
 │   ├── claude-team-mcp.mjs         # stdio MCP server: the team tools for Claude
 │   ├── claude-setup.mjs            # installs/verifies/removes the Claude side (hooks + MCP)
+│   ├── patch-paseo-mcp.mjs         # lets Paseo's bundled MCP SDK accept a newer protocol header
 │   ├── team-scripts-path.mjs       # durable support-script path resolver
 │   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
 ├── test/                           # `npm test` runs every test/*.test.{mjs,mts}
@@ -115,7 +115,7 @@ paseo-pi-team/
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
 │   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity
-│   ├── browser-setup.test.mjs      # MCP config merge + skill install
+│   ├── patch-paseo-mcp.test.mjs    # the MCP protocol-header patch for Paseo's bundled SDK
 │   ├── installer-contract.test.mjs # shipped files must exist and carry their dependencies
 │   ├── paseo-contract.test.mjs     # Paseo JSON field contract (needs a live daemon — see below)
 │   ├── paseo-bridge.test.mjs       # argv validation, error codes, bounded concurrency
@@ -237,10 +237,19 @@ Every authority is recomputed from the brief of the **current turn**:
   `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, nothing else.
 - Force-push is blocked in every spelling (`-f`, `-uf`, `-fu`, `--force*`,
   refspec `+`), and so are Peer merges.
-- `BROWSER_MCP_AUTHORITY` is a current-turn grant scoped to the
-  `agent-browser` server: only agent-browser-prefixed targets plus
-  `connect`/`search`. The agent-browser CLI through bash is always blocked.
-- Paseo MCP and every other MCP server stay blocked for Peers.
+- `BROWSER_MCP_AUTHORITY` is a current-turn field scoped to the browser
+  surface: Paseo Browser Control (`browser_*`) on either runtime, plus Claude
+  in Chrome (`mcp__claude-in-chrome__*`) on a Claude seat. Unlike every other
+  authority it defaults to **allowed** on a valid V3 brief — browsing reads
+  pages, and everything it could change is still behind edit/commit/push
+  authority — so `denied` is what a Lead writes to withhold it. A missing or
+  malformed brief still grants nothing at all.
+- Paseo ORCHESTRATION MCP and every other MCP server stay blocked for Peers.
+  Browser Control is not orchestration, even though Paseo registers it on the
+  same MCP server.
+- `AskUserQuestion` is denied for Lead and Peer, on both runtimes: the chain is
+  Peer → Lead → Supervisor → Human, and only the Supervisor's escalation target
+  is the Human.
 
 ## Communication and watchdog
 
@@ -605,16 +614,12 @@ What the installers copy:
 | `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` |
 | `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` |
 | support scripts (see below) | `~/.pi/agent/extensions/paseo-team-scripts/` |
-| bundled `agent-browser` skill | `~/.pi/agent/skills/agent-browser/` |
 
-It also installs the `agent-browser` CLI and Chrome runtime when missing, and
-merges an MCP entry for **every runtime installed on the host** when it is
-absent: `{ command: "agent-browser", args: ["mcp"], lifecycle: "lazy" }` into
-`~/.pi/agent/mcp.json` for pi, and `{ type: "stdio", command: "agent-browser",
-args: ["mcp"] }` into `~/.claude.json` for Claude Code. Same server, two config
-dialects — pi ignores `type`, Claude ignores `lifecycle`. Registering only one
-of them leaves the other runtime's Lead and Peers with no browser tool at all,
-while the role policy still says they may use one.
+It installs no browser: both runtimes use one they already have — see
+[The browser surface](#the-browser-surface). An earlier version registered an
+`agent-browser` MCP server in `~/.pi/agent/mcp.json` and `~/.claude.json`; an
+install now REMOVES that entry when this pack wrote it, and leaves it alone
+when the user configured it themselves.
 
 When the `claude` CLI is present, the installers also run
 `scripts/claude-setup.mjs --install`, which merges this pack's hooks into
@@ -623,88 +628,49 @@ When the `claude` CLI is present, the installers also run
 skips that step; it is not an error.
 
 The support scripts are `lib-common`, `reliability`, `watchdog`,
-`team-communication`, `team-lease`, `lease-ledger`, `ocr-review`, `remote-paseo`,
-`model-routing`, `team-scripts-path`, `claude-hook` and `claude-team-mcp`.
+`team-communication`, `team-lease`, `lease-ledger`, `team-fork`, `ocr-review`,
+`remote-paseo`, `model-routing`, `team-scripts-path`, `claude-hook`,
+`claude-team-mcp` and `patch-paseo-mcp`.
 They are copied **flat**, so every import between them
 must stay `./<name>.mjs`. `installer-contract.test.mjs` guards that: every
 shipped file must exist, and every support script it imports must be shipped
 too.
 
-### agent-browser browser MCP
+### The browser surface
 
-The installer probes four things:
+The pack installs no browser. Both runtimes already have one, and shipping a
+third bought nothing while costing a CLI to pin, a Chrome runtime to probe, a
+skill to copy, an MCP entry to merge into two config files, and a CDP attach
+mode whose documented risk was handing a Peer every logged-in session in a real
+profile.
 
-- `agent-browser --version`
-- `agent-browser doctor --offline --quick`
-- the bundled skill (`agent-browser skills path agent-browser`)
-- the standard MCP config locations, per runtime (`~/.pi/agent/mcp.json` and,
-  when `claude` is installed, `~/.claude.json`)
+| Browser | Tool names | Available on |
+|---|---|---|
+| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes |
+| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected |
 
-Whatever is missing, it then repairs: installs OCR (current pin `1.9.2`, keeping
-any `>= 1.8.10` that passes the capability probe), runs `npm install -g
-agent-browser` followed by `agent-browser install` (`--with-deps` on Linux),
-copies the skill, and merges the `agent-browser` entry into
-`~/.pi/agent/mcp.json` — and into `~/.claude.json` through
-`scripts/claude-setup.mjs`, which owns that file — without overwriting other
-servers. An `agent-browser` entry that already exists is never rewritten in
-either file; asking for an `--attach-cdp-port` that contradicts it is a visible
-error, not a silent no-op. `preflight` reports the registration per runtime
-(`agent-browser-mcp`, `agent-browser-mcp:claude`), so a half-installed browser
-surface fails a check instead of passing one.
+Paseo registers Browser Control on its own `/mcp/agents` server — the same one
+that carries `create_agent` — gated on `daemon.browserTools.enabled` plus a
+broker, never on the provider. The daemon injects that server into every agent
+it starts, pi and Claude alike, so a pi seat reaches the browser through the
+mcp proxy (`mcp({ tool: "browser_navigate" })`) exactly as it already reaches
+`create_agent`.
 
-Re-running the installer is safe.
+That shared server is the one thing to be careful about, and the policy is
+built around it: **the browser is classified by tool family, not by MCP
+server.** Classifying by server is what used to switch a Peer's browser off
+along with the orchestration wall. A Peer with the browser still cannot call
+`create_agent` or any other Paseo tool on that server, and still cannot reach
+an unrelated MCP server at all.
 
-The Lead grants access to a Peer through a V3 brief field:
+Because Browser Control rides the Paseo MCP server, it is also subject to
+`paseo-mcp-protocol` (see [Preflight](#preflight)): when Paseo's bundled MCP
+SDK refuses Claude Code's protocol header, the browser goes down with the rest
+of the Paseo tool surface.
 
-```text
-BROWSER_MCP_AUTHORITY: allowed
-```
-
-The default is `denied`, and the grant does not persist across turns. Once
-granted, the Peer may only search/connect the `agent-browser` server and call
-targets prefixed `agent_browser_` / `agent-browser_` (plus the compatible
-normalized prefixes); Paseo MCP and other servers stay off-limits.
-`node scripts/preflight.mjs --json` covers the CLI, Chrome/runtime, skill and
-MCP entry checks.
-
-#### Launch mode vs. CDP attach mode
-
-By default the MCP entry is `args: ["mcp"]` — **launch mode**. agent-browser
-starts its own browser, which carries no cookies and no logged-in sessions.
-That emptiness is what makes a per-turn `BROWSER_MCP_AUTHORITY` grant a real
-bound: the worst a granted Peer can do is browse as a stranger.
-
-**Attach mode** points agent-browser at a browser that is already running,
-through the Chrome DevTools Protocol:
-
-```bash
-scripts/install.sh --attach-cdp-port 9222
-# or, directly:
-node scripts/browser-setup.mjs --install --attach-cdp-port 9222
-```
-
-That writes `args: ["--cdp", "9222", "mcp"]` (agent-browser takes `--cdp` as a
-global flag, before the subcommand). It is faster and reuses the profile's auth
-— which is exactly the cost: a Peer holding the grant inherits **every session
-open in that profile**, and agent-browser refuses `--allowed-domains` while CDP
-is in use, so per-domain restriction is off the table too. Point it at a
-dedicated automation profile, never your daily browser.
-
-The rules around it:
-
-- **Opt-in, explicit port, no env fallback.** A setting this consequential has
-  to be visible in the command that caused it.
-- **Existing MCP entries are still never rewritten.** If one already exists with
-  a different target, the installer *fails* rather than silently ignoring the
-  flag — re-running `--attach-cdp-port` on an already-installed host is an
-  error you can see, not a no-op you cannot.
-- **Preflight probes it.** `agent-browser-cdp` reports launch mode, or dials
-  `127.0.0.1:<port>/json/version` and fails when nothing answers, so a dead
-  attach target surfaces as host unreadiness instead of a browser call dying
-  mid-turn. `agent-browser-cdp-exposure` warns when the same port also answers
-  on a non-loopback address — a browser started with
-  `--remote-debugging-address=0.0.0.0` is unauthenticated remote control of
-  that profile for anyone on the network.
+`daemon.browserTools.enabled: false` in `~/.paseo/config.json` removes the
+browser from every seat on both runtimes; preflight reports that as a failure
+rather than letting `BROWSER_MCP_AUTHORITY` silently grant nothing.
 
 ### Paseo inspect contract test
 
@@ -888,6 +854,34 @@ mode). No secret is ever printed.
 serve; with no flag it detects them from the installed CLIs, so a Claude-only
 host is not reported as a broken pi host. In Claude scope it also verifies the
 three hooks and the `paseo-team` MCP registration.
+
+Two of those checks are about the browser and the tool surface it shares:
+
+- **`paseo-browser-tools`** — `daemon.browserTools.enabled` in
+  `~/.paseo/config.json`. `false` means no seat has a browser on either
+  runtime, so `BROWSER_MCP_AUTHORITY` grants nothing.
+- **`paseo-mcp-protocol`** — Paseo injects its MCP server into every agent over
+  HTTP, and its bundled `@modelcontextprotocol/sdk` rejects a protocol header
+  newer than the revisions it knows. Claude Code sends its own latest rather
+  than the negotiated version, so every post-handshake request 400s and a
+  Claude seat loses `create_agent`, `send_agent_prompt`, `list_agents`,
+  `respond_to_permission` and Browser Control at once — with nothing in the
+  seat's transcript to explain it, only a line in `~/.paseo/daemon.log`. Fix:
+
+  ```bash
+  node scripts/patch-paseo-mcp.mjs --apply     # then restart the daemon
+  node scripts/patch-paseo-mcp.mjs --verify    # exit 1 when unpatched
+  node scripts/patch-paseo-mcp.mjs --revert
+  ```
+
+  It relaxes exactly one condition, in the two dist builds that carry it: a
+  header version is still rejected unless it is a well-formed `YYYY-MM-DD`
+  revision NEWER than everything the SDK knows. `SUPPORTED_PROTOCOL_VERSIONS`
+  is untouched, so the handshake still negotiates the SDK's real latest — the
+  server never claims a protocol it does not implement. A pristine backup is
+  written beside each file on the first apply. **Re-run it after every
+  `npm i -g @getpaseo/cli`**: an upgrade replaces `node_modules` and silently
+  reverts the patch.
 
 ## CLI and WebUI
 

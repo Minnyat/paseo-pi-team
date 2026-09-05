@@ -726,7 +726,7 @@ OWNED_SCOPE: <files>
 EXCLUDED_SCOPE: <files>
 
 EDIT_AUTHORITY: allowed | denied        # default: follows MODE
-BROWSER_MCP_AUTHORITY: allowed | denied # default: denied; agent-browser only
+BROWSER_MCP_AUTHORITY: allowed | denied # DEFAULT: allowed (the only one)
 COMMIT_AUTHORITY: allowed | denied      # default: denied
 PUSH_TASK_BRANCH_AUTHORITY: allowed | denied  # default: denied
 FORCE_PUSH_AUTHORITY: denied            # always denied for peers
@@ -744,13 +744,21 @@ CONSTRAINTS / REQUIRED HANDOFF
 TASK_BODY_END
 ```
 
-`BROWSER_MCP_AUTHORITY: allowed` is a narrow, current-turn grant: it permits
-only MCP targets prefixed by `agent_browser_`/`agent-browser_` (and compatible
-adapter prefixes) plus an explicitly scoped `connect`/`search server=agent-browser`.
-It never grants Paseo orchestration or unrelated MCP servers. Repeat the full V3
-brief on every follow-up that needs browser access; otherwise the extension
-revokes it fail-closed. The Peer may never invoke the `agent-browser` CLI through
-bash; this field only permits the typed MCP surface.
+`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed`, and the
+only one: omit it and the Peer keeps the browser its runtime already provides —
+Paseo Browser Control (`browser_*`, which the daemon registers on its own MCP
+server and injects into every seat) and, on a Claude seat, Claude in Chrome
+(`mcp__claude-in-chrome__*`). Browsing reads pages; everything it could change
+is still behind edit/commit/push authority. The pack no longer installs an
+`agent-browser` server, and that server now gets no special treatment.
+
+Write `BROWSER_MCP_AUTHORITY: denied` when you have a reason to withhold it —
+network egress you do not want, a task with no business leaving the repo — not
+as a reflex. Either way the setting is per-turn: repeat the full V3 brief on
+every authority-bearing follow-up, or the extension falls back to no valid
+brief at all, which grants nothing (browser included). It never grants Paseo
+orchestration or unrelated MCP servers, even though Browser Control shares a
+server with `create_agent`.
 
 PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
 extension permits is exactly

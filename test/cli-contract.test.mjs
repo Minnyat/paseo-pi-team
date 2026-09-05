@@ -275,7 +275,7 @@ try {
 		for (const role of ["supervisor", "lead", "peer"]) {
 			mk(join("extensions", "prompts", `${role}.md`), "prompt");
 		}
-		for (const skill of ["paseo-team-lead", "paseo-ocr-reviewer", "agent-browser"]) {
+		for (const skill of ["paseo-team-lead", "paseo-ocr-reviewer"]) {
 			mk(join("skills", skill, "SKILL.md"), "skill");
 		}
 		mk(join("extensions", "paseo-team-scripts", "preflight.mjs"), "// support");
@@ -297,7 +297,10 @@ try {
 		assert.equal(out.json.claude.status, "missing");
 		assert.ok(!existsSync(join(sandbox, "claude", "settings.json")));
 		const mcpAfter = JSON.parse(readFileSync(mcpPath, "utf8"));
-		assert.equal(mcpAfter.mcpServers["agent-browser"], undefined, "own MCP entry removed");
+		// The pack stopped installing this server, but uninstall must still clear
+		// one an older version left behind, or an upgraded host keeps a dangling
+		// entry pointing at a CLI nothing installs any more.
+		assert.equal(mcpAfter.mcpServers["agent-browser"], undefined, "legacy MCP entry removed");
 		assert.ok(mcpAfter.mcpServers["other-tool"], "other tools' MCP entries must survive");
 		assert.ok(
 			readdirSync(agentRoot).some((f) => /^mcp\.json\.bak-\d+$/.test(f)),

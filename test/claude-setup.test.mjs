@@ -25,14 +25,13 @@ import {
 	removeMcpServer,
 	uninstall,
 	verify,
-	mergeBrowserMcpServer,
+	LEGACY_BROWSER_MCP_SERVER,
 	isOwnBrowserMcpServer,
 	removeBrowserMcpServer,
 	HOOK_EVENTS,
 	PASEO_TEAM_HOOK_TAG,
 	TEAM_MCP_SERVER_NAME,
 } from "../scripts/claude-setup.mjs";
-import { AGENT_BROWSER_MCP_SERVER, browserMcpConfig } from "../scripts/browser-setup.mjs";
 
 const home = mkdtempSync(join(tmpdir(), "paseo-claude-setup-"));
 const claudeDir = join(home, ".claude");
@@ -261,142 +260,78 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 	assert.ok(example.agents.providers["pi-peer"], "pi providers stay in the example");
 }
 
-// --- agent-browser on the Claude side -----------------------------------------
+// --- the browser server is GONE, and an old one gets cleaned up --------------
 //
-// The Lead may drive a browser and a granted Peer may too (claude-policy.ts
-// classifies mcp__agent-browser__* before the role allowlist), but a tool the
-// runtime never registered cannot be called. Pi got its entry from
-// browser-setup.mjs; ~/.claude.json is owned by this module, so the same
-// server has to be registered here or the Claude half of that policy is dead.
+// The pack used to register an `agent-browser` stdio server here so that a Lead
+// (and a granted Peer) had something to call. Both runtimes now use a browser
+// they already have — Paseo Browser Control, injected into every seat by the
+// daemon, and Claude in Chrome — so this installer registers no browser, and an
+// install has to clear the entry an older version wrote or every upgraded host
+// keeps a dangling server pointing at an uninstalled CLI.
 {
-	const merged = mergeBrowserMcpServer({ mcpServers: { other: { command: "x" } } });
-	assert.deepEqual(merged.mcpServers.other, { command: "x" });
-	assert.deepEqual(merged.mcpServers[AGENT_BROWSER_MCP_SERVER], {
-		type: "stdio",
-		command: "agent-browser",
-		args: ["mcp"],
-	});
-
-	// Attach mode reaches Claude through the same flag the pi entry gets.
-	assert.deepEqual(
-		mergeBrowserMcpServer({}, { cdpPort: 9222 }).mcpServers[AGENT_BROWSER_MCP_SERVER].args,
-		["--cdp", "9222", "mcp"],
-	);
-
-	// An entry the user already owns is never rewritten — same rule as pi.
-	const owned = {
-		mcpServers: {
-			[AGENT_BROWSER_MCP_SERVER]: { command: "agent-browser", args: ["--cdp", "9333", "mcp"] },
-		},
-	};
-	assert.deepEqual(mergeBrowserMcpServer(owned), owned);
-
-	const removed = removeBrowserMcpServer(merged);
-	assert.deepEqual(Object.keys(removed.mcpServers), ["other"]);
-	assert.deepEqual(removeBrowserMcpServer({}), {});
-}
-
-// install/verify/uninstall must cover BOTH servers, on a fresh config file.
-{
-	const browserDir = mkdtempSync(join(tmpdir(), "paseo-claude-browser-"));
-	const browserConfig = join(browserDir, ".claude.json");
-	const browserEnv = {
+	const legacyDir = mkdtempSync(join(tmpdir(), "paseo-claude-browser-"));
+	const legacyConfig = join(legacyDir, ".claude.json");
+	const legacyEnv = {
 		...process.env,
-		CLAUDE_CONFIG_DIR: browserDir,
-		PASEO_TEAM_CLAUDE_USER_CONFIG: browserConfig,
+		CLAUDE_CONFIG_DIR: legacyDir,
+		PASEO_TEAM_CLAUDE_USER_CONFIG: legacyConfig,
 	};
-
-	const before = await verify(browserEnv);
-	assert.equal(before.browserMcpServer, false);
-	assert.ok(
-		before.missing.includes(`mcp:${AGENT_BROWSER_MCP_SERVER}`),
-		"a missing browser server is reported, not silently passed",
-	);
-
-	const installed = await install(browserEnv);
-	assert.equal(installed.ok, true);
-	const config = JSON.parse(readFileSync(browserConfig, "utf8"));
-	assert.ok(config.mcpServers[TEAM_MCP_SERVER_NAME], "the team server is still installed");
-	assert.equal(config.mcpServers[AGENT_BROWSER_MCP_SERVER].command, "agent-browser");
-
-	const after = await verify(browserEnv);
-	assert.equal(after.browserMcpServer, true);
-	assert.equal(after.ok, true, JSON.stringify(after.missing));
-
-	// Idempotent: the second install writes nothing.
-	assert.equal((await install(browserEnv)).mcp.status, "unchanged");
-
-	// A disabled entry is present but unusable — verify must not call it ok.
-	const disabled = JSON.parse(readFileSync(browserConfig, "utf8"));
-	disabled.mcpServers[AGENT_BROWSER_MCP_SERVER].disabled = true;
-	writeFileSync(browserConfig, JSON.stringify(disabled, null, 2), "utf8");
-	assert.equal((await verify(browserEnv)).browserMcpServer, false);
-	writeFileSync(browserConfig, JSON.stringify(config, null, 2), "utf8");
-
-	await uninstall(browserEnv);
-	const cleaned = JSON.parse(readFileSync(browserConfig, "utf8"));
-	assert.equal(cleaned.mcpServers[AGENT_BROWSER_MCP_SERVER], undefined);
-	assert.equal(cleaned.mcpServers[TEAM_MCP_SERVER_NAME], undefined);
-	rmSync(browserDir, { recursive: true, force: true });
-}
-
-// A requested attach port that contradicts the entry already on disk is an
-// error you can see, not an install that silently keeps the old mode.
-{
-	const conflictDir = mkdtempSync(join(tmpdir(), "paseo-claude-cdp-"));
-	const conflictConfig = join(conflictDir, ".claude.json");
+	// A host set up by the previous version: our launch-mode entry, plus one
+	// unrelated server that must survive untouched.
 	writeFileSync(
-		conflictConfig,
-		JSON.stringify({
-			mcpServers: {
-				[AGENT_BROWSER_MCP_SERVER]: { command: "agent-browser", args: ["mcp"] },
+		legacyConfig,
+		JSON.stringify(
+			{
+				mcpServers: {
+					other: { command: "x" },
+					[LEGACY_BROWSER_MCP_SERVER]: {
+						type: "stdio",
+						command: "agent-browser",
+						args: ["mcp"],
+					},
+				},
 			},
-		}, null, 2),
+			null,
+			2,
+		),
 		"utf8",
 	);
-	const conflictEnv = {
-		...process.env,
-		CLAUDE_CONFIG_DIR: conflictDir,
-		PASEO_TEAM_CLAUDE_USER_CONFIG: conflictConfig,
-	};
-	const result = await install(conflictEnv, { cdpPort: 9222 });
-	// The conflict still fails the install — the user has to resolve the port
-	// before the browser surface works — but it is reported against the entry it
-	// is ABOUT, and it no longer takes the team server down with it.
-	assert.equal(result.ok, false);
-	assert.equal(result.browserMcp.status, "skipped");
-	assert.match(result.browserMcp.error, /9222/);
-	assert.notEqual(
-		result.mcp.status,
-		"failed",
-		"a browser-port conflict must not fail the paseo-team registration",
+
+	const installed = await install(legacyEnv);
+	assert.equal(installed.ok, true);
+	const config = JSON.parse(readFileSync(legacyConfig, "utf8"));
+	assert.ok(config.mcpServers[TEAM_MCP_SERVER_NAME], "the team server is installed");
+	assert.equal(
+		config.mcpServers[LEGACY_BROWSER_MCP_SERVER],
+		undefined,
+		"the browser entry this installer used to write is cleaned up",
 	);
-	const written = JSON.parse(readFileSync(conflictConfig, "utf8"));
-	assert.deepEqual(
-		written.mcpServers[AGENT_BROWSER_MCP_SERVER].args,
-		["mcp"],
-		"the user's entry is left exactly as it was",
-	);
-	// The regression this guards: mergeHooks runs FIRST and has already written
-	// settings.json by now, so skipping the whole mcp transform left a fleet
-	// governed by hooks with no team_lease or peer_ask_lead at all —
-	// seats that come up policed and mute.
-	assert.ok(
-		written.mcpServers[TEAM_MCP_SERVER_NAME],
-		"paseo-team must be registered even when the browser entry conflicts",
-	);
-	rmSync(conflictDir, { recursive: true, force: true });
+	assert.deepEqual(config.mcpServers.other, { command: "x" }, "other servers are untouched");
+
+	// verify no longer knows about a browser server at all, and must still pass.
+	const after = await verify(legacyEnv);
+	assert.equal(after.ok, true, JSON.stringify(after.missing));
+	assert.equal(after.browserMcpServer, undefined);
+	assert.ok(!after.missing.some((entry) => entry.includes("agent-browser")));
+
+	// Idempotent: the second install writes nothing.
+	assert.equal((await install(legacyEnv)).mcp.status, "unchanged");
+
+	await uninstall(legacyEnv);
+	const cleaned = JSON.parse(readFileSync(legacyConfig, "utf8"));
+	assert.equal(cleaned.mcpServers[TEAM_MCP_SERVER_NAME], undefined);
+	assert.deepEqual(cleaned.mcpServers.other, { command: "x" });
+	rmSync(legacyDir, { recursive: true, force: true });
 }
 
-// --- uninstall is symmetric with merge: we only remove what we wrote ---------
+// --- cleanup is still ownership-bounded --------------------------------------
 {
-	// mergeBrowserMcpServer deliberately never rewrites a valid pre-existing
-	// entry — agent-browser is a general-purpose tool a user may already run
-	// with their own flags. Remove has to honour the same ownership rule, or the
-	// pair is asymmetric in the DESTRUCTIVE direction: install politely leaves
-	// the user's config alone and uninstall deletes it.
-	const mine = browserMcpConfig({ dialect: "claude" });
-	const attached = browserMcpConfig({ cdpPort: 9333, dialect: "claude" });
+	// The installer never rewrote a valid pre-existing entry, on the grounds
+	// that agent-browser is a general-purpose tool a user may already run with
+	// their own flags. Dropping our own integration does not license us to
+	// delete theirs: we never took ownership of that entry.
+	const mine = { type: "stdio", command: "agent-browser", args: ["mcp"] };
+	const attached = { type: "stdio", command: "agent-browser", args: ["--cdp", "9333", "mcp"] };
 
 	assert.ok(isOwnBrowserMcpServer(mine), "a launch-mode entry we wrote is ours");
 	assert.ok(isOwnBrowserMcpServer(attached), "an --attach-cdp-port entry is ours too");
@@ -413,7 +348,7 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 
 	const theirs = {
 		mcpServers: {
-			[AGENT_BROWSER_MCP_SERVER]: {
+			[LEGACY_BROWSER_MCP_SERVER]: {
 				type: "stdio",
 				command: "agent-browser",
 				args: ["--cdp", "9222", "mcp"],
@@ -422,16 +357,17 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		},
 	};
 	assert.deepEqual(
-		removeBrowserMcpServer(theirs).mcpServers[AGENT_BROWSER_MCP_SERVER],
-		theirs.mcpServers[AGENT_BROWSER_MCP_SERVER],
-		"uninstall leaves an entry the user configured",
+		removeBrowserMcpServer(theirs).mcpServers[LEGACY_BROWSER_MCP_SERVER],
+		theirs.mcpServers[LEGACY_BROWSER_MCP_SERVER],
+		"an entry the user configured survives",
 	);
 	assert.equal(
-		removeBrowserMcpServer({ mcpServers: { [AGENT_BROWSER_MCP_SERVER]: mine } })
-			.mcpServers[AGENT_BROWSER_MCP_SERVER],
+		removeBrowserMcpServer({ mcpServers: { [LEGACY_BROWSER_MCP_SERVER]: mine } })
+			.mcpServers[LEGACY_BROWSER_MCP_SERVER],
 		undefined,
-		"uninstall still removes the entry we wrote",
+		"the entry we wrote is removed",
 	);
+	assert.deepEqual(removeBrowserMcpServer({}), {});
 }
 
 rmSync(home, { recursive: true, force: true });

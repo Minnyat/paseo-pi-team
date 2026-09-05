@@ -62,6 +62,7 @@
           "NotebookEdit",
           "Task",
           "Agent",
+          "AskUserQuestion",
           "WebFetch",
           "WebSearch"
         ]
@@ -75,6 +76,7 @@
         "disallowedTools": [
           "Task",
           "Agent",
+          "AskUserQuestion",
           "WebFetch",
           "WebSearch"
         ]

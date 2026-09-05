@@ -16,11 +16,15 @@
 param(
   [string]$PiHome = "$env:USERPROFILE\.pi",
   [string]$RolePackRoot = (Split-Path -Parent $PSScriptRoot),
-  # Optional: attach agent-browser to an already-running browser over CDP
-  # instead of letting it launch an isolated one. Opt-in with an explicit port
-  # - see scripts/browser-setup.mjs for why this is not a default.
+  # Accepted only to fail loudly. The pack installs no browser of its own any
+  # more: both runtimes use one they already have - Paseo Browser Control, which
+  # the daemon injects into every seat, and Claude in Chrome.
   [string]$AttachCdpPort = ""
 )
+
+if ($AttachCdpPort) {
+  throw "-AttachCdpPort is gone: the pack no longer installs agent-browser. Seats use Paseo Browser Control (daemon.browserTools) and Claude in Chrome."
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -49,7 +53,11 @@ $teamSupportFiles = @(
   # spawned by Claude with an absolute path, so they must live in the durable
   # support dir, not in a checkout that may be moved.
   "claude-hook.mjs",
-  "claude-team-mcp.mjs"
+  "claude-team-mcp.mjs",
+  # Re-appliable workaround for Paseo's bundled MCP SDK rejecting a newer
+  # protocol header. It has to ship: `npm i -g @getpaseo/cli` reverts the patch,
+  # and the person who then has to re-apply it usually has no checkout.
+  "patch-paseo-mcp.mjs"
 )
 
 # Policy modules shared by BOTH runtime adapters. They ship as a SUBDIRECTORY:
@@ -83,20 +91,9 @@ foreach ($supportFile in $teamSupportFiles) {
   Copy-Item (Join-Path $RolePackRoot "scripts\$supportFile") $teamScriptsDir -Force
 }
 
-# agent-browser is a CLI + bundled skill + stdio MCP server. The helper is
-# idempotent and merges only the missing agent-browser entry in Pi's MCP config;
-# the Claude half of that registration is done by claude-setup.mjs below, which
-# owns ~/.claude.json.
 & node (Join-Path $RolePackRoot "scripts\ocr-setup.mjs")
 if ($LASTEXITCODE -ne 0) {
   throw "OCR setup failed with exit code $LASTEXITCODE"
-}
-$browserSetupArgs = @("--install")
-if (-not $env:PI_CODING_AGENT_DIR) { $browserSetupArgs += @("--pi-home", $PiHome) }
-if ($AttachCdpPort) { $browserSetupArgs += @("--attach-cdp-port", $AttachCdpPort) }
-& node (Join-Path $RolePackRoot "scripts\browser-setup.mjs") @browserSetupArgs
-if ($LASTEXITCODE -ne 0) {
-  throw "agent-browser setup failed with exit code $LASTEXITCODE"
 }
 
 # Claude Code side. Skipped (not failed) when claude is not installed: a
@@ -108,15 +105,12 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
   $env:PASEO_TEAM_HOOK_SCRIPT = (Join-Path $teamScriptsDir "claude-hook.mjs")
   $env:PASEO_TEAM_MCP_SCRIPT  = (Join-Path $teamScriptsDir "claude-team-mcp.mjs")
   $env:PASEO_TEAM_POLICY_DIR  = $policyCoreTarget
-  # Same --attach-cdp-port the pi entry got: the two runtimes must reach the
-  # same browser, or a task moved between seats silently changes what it drives.
   $claudeSetupArgs = @("--install")
-  if ($AttachCdpPort) { $claudeSetupArgs += @("--attach-cdp-port", $AttachCdpPort) }
   & node (Join-Path $RolePackRoot "scripts\claude-setup.mjs") @claudeSetupArgs
   if ($LASTEXITCODE -ne 0) {
     throw "claude setup failed with exit code $LASTEXITCODE"
   }
-  $claudeSetupStatus = "installed (hooks + paseo-team and agent-browser MCP servers)"
+  $claudeSetupStatus = "installed (hooks + paseo-team MCP server)"
 }
 
 Write-Host ""
@@ -134,7 +128,7 @@ Write-Host "  support default -> `$env:PI_CODING_AGENT_DIR\extensions\paseo-team
 Write-Host "  env override is optional; no user-profile mutation is required"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing), agent-browser CLI, Chrome runtime, skill and the MCP entry for every installed runtime (Pi mcp.json, and ~/.claude.json when claude is present)."
+Write-Host "  1. The installer checked/installed OCR (capability-probed; >= v1.8.10 kept as-is, pinned v1.9.2 when repairing) and registered the paseo-team MCP server for every installed runtime (Pi mcp.json, and ~/.claude.json when claude is present). The browser is the runtime''s own: Paseo Browser Control on every seat, Claude in Chrome on Claude seats."
 Write-Host "  2. Verify OCR if needed: Get-Command ocr; ocr version"
 Write-Host "  3. Install the MCP adapter (PINNED version - Paseo tools depend on it):"
 Write-Host "     pi install npm:pi-mcp-adapter@2.19.0"

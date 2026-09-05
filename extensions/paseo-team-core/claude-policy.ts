@@ -26,7 +26,6 @@
 
 import {
 	ALL_PASEO_TOOLS,
-	callsAgentBrowserCli,
 	callsPaseoCli,
 	clusterLabelBlockReason,
 	leaseBlockReason,
@@ -40,7 +39,8 @@ import {
 	writerScopeFromCreateAgent,
 	extraTools,
 	gitAuthorityBlockReason,
-	isAgentBrowserMcpTarget,
+	isBrowserMcpTarget,
+	isPaseoBrowserTool,
 	leadCreateWorkspaceArgsBlockReason,
 	leadWriteEnabled,
 	matchesPaseoToolName,
@@ -95,7 +95,6 @@ const CLAUDE_SUBAGENT_TOOLS = ["Task", "Agent"];
  */
 const CLAUDE_NEUTRAL_TOOLS = [
 	"TodoWrite",
-	"AskUserQuestion",
 	"ExitPlanMode",
 	"Skill",
 	// ToolSearch only loads the SCHEMA of a deferred tool; every actual call
@@ -105,6 +104,24 @@ const CLAUDE_NEUTRAL_TOOLS = [
 	"ToolSearch",
 ];
 
+/**
+ * The structured "stop and ask the human" tool.
+ *
+ * Only the Supervisor may reach the Human that way. The escalation chain is
+ * Peer -> Lead (`peer_ask_lead`) -> Supervisor (`lead_ask_supervisor`) ->
+ * Human, and the role prompts already say so — but a tool the model can still
+ * call is the door it will use under pressure, which is how a delegated
+ * decision ends up back on the Human's desk. Pi never exposed an ask-the-user
+ * tool to any role, so leaving this one open to Lead and Peer was also a
+ * cross-runtime authority asymmetry, the one thing the shared core exists to
+ * prevent.
+ *
+ * This removes the structured interrupt, not the ability to speak: a Lead's
+ * own turn output still reaches the Human it is talking to, which is the right
+ * channel for the irreversible actions lead.md reserves for them.
+ */
+const CLAUDE_HUMAN_QUESTION_TOOL = "AskUserQuestion";
+
 export function classifyClaudeTool(name: string): ClaudeToolClass {
 	const tool = name.trim();
 	if (tool.startsWith("mcp__")) {
@@ -112,7 +129,15 @@ export function classifyClaudeTool(name: string): ClaudeToolClass {
 		const separator = rest.indexOf("__");
 		const server = separator < 0 ? rest : rest.slice(0, separator);
 		const target = separator < 0 ? "" : rest.slice(separator + 2);
-		if (isAgentBrowserMcpTarget(tool)) return { kind: "browser-mcp", target };
+		// Claude in Chrome — the runtime's own browser, and the one a Claude seat
+		// should reach for first.
+		if (isBrowserMcpTarget(tool)) return { kind: "browser-mcp", target };
+		// Paseo registers Browser Control on its own MCP server, alongside
+		// create_agent. Classify by tool family, not by server, or every role's
+		// browser surface disappears behind the orchestration wall.
+		if (server === PASEO_MCP_SERVER && isPaseoBrowserTool(target)) {
+			return { kind: "browser-mcp", target };
+		}
 		if (server === PASEO_MCP_SERVER) return { kind: "paseo-mcp", target };
 		if (server === TEAM_MCP_SERVER) return { kind: "team", target };
 		return { kind: "other-mcp", target };
@@ -148,7 +173,13 @@ export function teamToolName(toolName: string): string {
 export function claudeBaseTools(role: TeamRole): string[] {
 	switch (role) {
 		case "supervisor":
-			return [...CLAUDE_READ_TOOLS, ...CLAUDE_NEUTRAL_TOOLS];
+			return [
+				...CLAUDE_READ_TOOLS,
+				...CLAUDE_NEUTRAL_TOOLS,
+				// The Supervisor is the only seat whose escalation target IS the
+				// Human; see CLAUDE_HUMAN_QUESTION_TOOL.
+				CLAUDE_HUMAN_QUESTION_TOOL,
+			];
 		case "lead":
 			return [
 				...CLAUDE_READ_TOOLS,
@@ -184,6 +215,7 @@ const CLAUDE_KNOWN_TOOLS = [
 	...CLAUDE_BASH_TOOLS,
 	...CLAUDE_SUBAGENT_TOOLS,
 	...CLAUDE_NEUTRAL_TOOLS,
+	CLAUDE_HUMAN_QUESTION_TOOL,
 	"WebFetch",
 	"WebSearch",
 ];
@@ -235,6 +267,14 @@ export function claudeToolBlockReason(
 	const allowedExtra = new Set(extraTools());
 	const authority = peerAuthority(brief);
 	const peerMode = resolvePeerMode(brief);
+
+	// Checked before the generic allowlist so the seat gets the route to take,
+	// not a bare "blocked by the role policy" it cannot act on.
+	if (toolName === CLAUDE_HUMAN_QUESTION_TOOL && role !== "supervisor") {
+		return role === "lead"
+			? "A Lead does not put questions to the Human directly — the Supervisor decides them. Call lead_ask_supervisor with the question, the options and your recommendation. Reach the Human yourself only for something irreversible (merge, deploy, delete, external comms, spend), when the Supervisor answered HUMAN_DECISION_REQUIRED: yes, or when the consult reported NO_SUPERVISOR_SEAT — and then say in your own reply which of those it was, rather than opening a question box."
+			: "A Peer does not put questions to the Human. Send the question to your own Lead with peer_ask_lead (KIND: question | dependency | blocker); the Lead answers it or escalates to the Supervisor.";
+	}
 
 	if (classified.kind === "team") {
 		const named = teamToolName(toolName);
@@ -337,13 +377,13 @@ export function claudeToolBlockReason(
 		}
 		return authority.browserMcp
 			? null
-			: "Peer browser MCP is not authorized for this turn. Lead must send a V3 brief with BROWSER_MCP_AUTHORITY: allowed.";
+			: "This Peer's brief sets BROWSER_MCP_AUTHORITY: denied, so the browser is withheld for this turn. Report a DEPENDENCY_REQUEST to the Lead if the task needs it.";
 	}
 
 	if (classified.kind === "other-mcp") {
 		return allowedExtra.has(toolName)
 			? null
-			: `MCP tool "${toolName}" is outside the ${role} role surface (only the paseo, paseo-team and authorized agent-browser servers are in scope).`;
+			: `MCP tool "${toolName}" is outside the ${role} role surface (in scope: the paseo and paseo-team servers, plus the browser — Paseo Browser Control and Claude in Chrome).`;
 	}
 
 	if (classified.kind === "subagent") {
@@ -379,9 +419,11 @@ export function claudeToolBlockReason(
 		if (callsPaseoCli(command)) {
 			return "Peer cannot drive the Paseo CLI from bash (would bypass the tool policy). Report a DEPENDENCY_REQUEST to the Lead instead.";
 		}
-		if (callsAgentBrowserCli(command)) {
-			return "Peer cannot run agent-browser CLI through bash; BROWSER_MCP_AUTHORITY only permits the typed agent-browser MCP surface.";
-		}
+		// There is deliberately no browser-CLI guard here any more. It existed for
+		// the agent-browser npm package, which the pack no longer installs;
+		// neither browser that replaced it has a CLI to shell out to (Paseo's is
+		// an MCP surface over the daemon's broker, Claude's runs through the
+		// Chrome extension), so the typed check above is the whole surface.
 		const supportScriptReason = supportScriptBlockReason(role, command);
 		if (supportScriptReason) return supportScriptReason;
 		return gitAuthorityBlockReason(

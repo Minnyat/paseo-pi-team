@@ -98,7 +98,7 @@ export function rolePromptPath(role) {
  * Well-known skip/first-class skills installed by the pack. Anything else in
  * skillsDir() is still listable by generic name.
  */
-export const PACK_SKILLS = ["paseo-team-lead", "paseo-ocr-reviewer", "agent-browser"];
+export const PACK_SKILLS = ["paseo-team-lead", "paseo-ocr-reviewer"];
 
 export function skillDirPath(name) {
 	return join(skillsDir(), name);

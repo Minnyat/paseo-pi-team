@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	CLAUDE_DEFAULT_MODE,
 	REMOTE_ERROR_CODES,
 	RemoteError,
 	buildArgv,
@@ -608,6 +609,64 @@ const EP = "https://app.paseo.sh/#offer=tok";
 		],
 		t,
 	);
+}
+
+{
+	// Paseo refuses to inherit a permission mode across providers, so a claude-*
+	// create must carry one. The pack supplies "auto": what bounds the new seat
+	// is its role policy and its V3 brief, both enforced before Paseo's
+	// permission queue sees the call, and "default" parks every one of that
+	// seat's tool calls in the queue — the seat looks hung and its Lead spends
+	// the turn triaging instead of leading.
+	const t = "buildArgv: a claude-* route with no --mode defaults to auto";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "claude-peer/claude-opus-5",
+			thinking: "medium",
+			workspace: "wks-1",
+			label: ["team.cluster=d:/code/shop"],
+			prompt: "go",
+		},
+		EP,
+	);
+	assert.ok(argv.includes("--mode"), t);
+	assert.equal(argv[argv.indexOf("--mode") + 1], CLAUDE_DEFAULT_MODE, t);
+	assert.equal(CLAUDE_DEFAULT_MODE, "auto", t);
+}
+
+{
+	const t = "buildArgv: an explicit --mode still wins over the default";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "claude-peer/claude-opus-5",
+			thinking: "medium",
+			workspace: "wks-1",
+			mode: "plan",
+			label: ["team.cluster=d:/code/shop"],
+			prompt: "go",
+		},
+		EP,
+	);
+	assert.equal(argv[argv.indexOf("--mode") + 1], "plan", t);
+}
+
+{
+	// pi declares no modes at all, so nothing is required and nothing is added.
+	const t = "buildArgv: a pi route gets no --mode";
+	const argv = buildArgv(
+		"run",
+		{
+			provider: "pi-peer/testprov/model-b",
+			thinking: "medium",
+			workspace: "wks-1",
+			label: ["team.cluster=d:/code/shop"],
+			prompt: "go",
+		},
+		EP,
+	);
+	assert.ok(!argv.includes("--mode"), t);
 }
 
 {

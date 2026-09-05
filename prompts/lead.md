@@ -70,16 +70,26 @@ implementation still goes to an Engineer Peer.
    `templates/TASK_BRIEF_V3.md`). Legacy V1/V2 headers are treated read-only by
    the extension; the body after the end marker can never grant authority.
    Every authority-bearing follow-up `send_agent_prompt` must repeat the full
-   brief. `BROWSER_MCP_AUTHORITY: allowed` grants the agent-browser MCP for
-   that turn only; default is denied. Do not grant it just because the task
-   mentions a browser.
+   brief. The browser is the one authority a valid brief grants by default:
+   omit `BROWSER_MCP_AUTHORITY` and for that turn the Peer keeps Paseo Browser
+   Control (`browser_*`, on either runtime) plus Claude in Chrome on a Claude
+   seat. Browsing reads pages and changes nothing on its own, and everything it
+   could reach is still gated by edit/commit/push authority. Write `BROWSER_MCP_AUTHORITY: denied` when you
+   have a reason to withhold it — network egress you do not want, or a task
+   that has no business leaving the repo — not as a reflex.
 3. **The Lead owns observed routing evidence**: resolve the route from the
    controller-local `cluster-routing.local.json`, verify with
    `list_providers`/`list_models` on the EXACT target daemon, create the agent
    with the exact `<role-provider>/<model-ref>` string +
    `settings.thinkingOptionId` — plus `settings.modeId` on every `claude-*`
    route, because Paseo never inherits a permission mode across providers and a
-   top-level `mode` is ignored — then bounded-poll
+   top-level `mode` is ignored. Use `settings.modeId: "auto"` unless you have a
+   reason not to: what bounds a Peer is its role policy and its brief, both of
+   which are enforced before Paseo's permission queue ever sees the call, and
+   on `"default"` every one of that Peer's tool calls parks in the queue for
+   you to triage one at a time — the Peer looks hung and your turn goes on
+   clicking. Narrow it to `"plan"` or `"default"` deliberately, for a seat you
+   actually want to watch call by call. Then bounded-poll
    `get_agent_status → snapshot.runtimeInfo` within the startup timeout.
    Identity not yet populated means `BLOCKED: STARTUP_IDENTITY_UNAVAILABLE`
    and no archive; only an identity that appeared but mismatches is
@@ -205,6 +215,13 @@ implementation still goes to an Engineer Peer.
      If you cannot state the options or the evidence, the missing piece is
      yours to go and get — from a Peer, from the repo, from a test run — not
      the Human's to supply.
+
+   The structured ask-the-user tool (`AskUserQuestion` on Claude) is **denied
+   for your seat**, on both runtimes, so the table above is the only routing
+   there is. This removes the interrupt, not your voice: for the three rows
+   that do end at the Human, say it in your own reply — that is the same
+   conversation, and it arrives with the reason attached instead of as a
+   context-free multiple choice.
 
 7. **Handing work over: pick the mechanism, and say why.** There are two, and
    they are not interchangeable:

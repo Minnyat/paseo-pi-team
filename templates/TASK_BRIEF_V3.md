@@ -76,10 +76,16 @@ Field semantics:
 - `ASSIGNED_CANDIDATE_SHA` — mandatory only for `independent-reviewer`;
   the reviewer must refuse the review if `HEAD != ASSIGNED_CANDIDATE_SHA`.
 - `EXPECTED_BASE_SHA` — the writer must confirm the base SHA before editing.
-- `EDIT_AUTHORITY: denied` blocks write/edit even when `MODE: write`;
-  `BROWSER_MCP_AUTHORITY: allowed` grants the agent-browser MCP for that turn
-  only; when empty or `denied`, the Peer must not use the browser MCP/CLI.
-  (enforced by the extension).
+- `EDIT_AUTHORITY: denied` blocks write/edit even when `MODE: write`.
+- `BROWSER_MCP_AUTHORITY` is the one field whose DEFAULT IS `allowed`: leave it
+  out and for that turn the Peer keeps Paseo Browser Control (`browser_*`, on
+  either runtime) plus Claude in Chrome (`mcp__claude-in-chrome__*`) on a
+  Claude seat. Browsing reads pages; it writes nothing the edit/commit/push
+  gates do not already cover, and defaulting it closed shipped Peers with the
+  runtime's own browser switched off. Write
+  `BROWSER_MCP_AUTHORITY: denied` to withhold it. Every OTHER authority field
+  still defaults to denied, and a missing or malformed brief grants nothing at
+  all — including the browser. (Enforced by the extension / the Claude hook.)
 - `CANDIDATE_SHA` in the output is meaningful only with
   `COMMIT_AUTHORITY: allowed`.
 - `PUSH_TASK_BRANCH_AUTHORITY: allowed` is branch-scoped: the extension allows
