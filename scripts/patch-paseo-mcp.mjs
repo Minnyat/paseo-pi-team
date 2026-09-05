@@ -55,22 +55,45 @@ export const PATCH_TARGETS = [
 ];
 
 /**
- * The exact condition the SDK ships. Matched literally rather than by regex:
- * if a future SDK rewords it, this script must FAIL LOUDLY rather than patch
- * something it did not recognise.
+ * The condition the SDK ships, anchored on its full text so that a reworded
+ * upstream check FAILS LOUDLY instead of being patched blind.
+ *
+ * The one thing that legitimately varies is how the constant is referenced:
+ * the ESM build names it bare, the CJS build namespaces it through tsc's
+ * import alias (`types_js_1.SUPPORTED_PROTOCOL_VERSIONS`), and that alias is a
+ * generated name nobody should hardcode. So the qualifier is CAPTURED and
+ * replayed rather than matched literally — a literal match is what let this
+ * script patch the ESM build and then fail on the CJS one, which is worse than
+ * either patching both or refusing both.
  */
-const ORIGINAL_CONDITION =
-	"if (protocolVersion !== null && !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)) {";
+const CONDITION_RE =
+	/if \(protocolVersion !== null && !((?:[A-Za-z_$][\w$]*\.)?)SUPPORTED_PROTOCOL_VERSIONS\.includes\(protocolVersion\)\) \{/g;
+
+/**
+ * The same shape once patched, for revert. PATCH_MARKER is interpolated raw:
+ * it is a fixed literal with no regex metacharacter in it (`-` is only special
+ * inside a character class). A test pins that, so a marker later edited to
+ * contain one cannot slip through unnoticed.
+ */
+const PATCHED_RE = new RegExp(
+	String.raw`if \(protocolVersion !== null && !((?:[A-Za-z_$][\w$]*\.)?)SUPPORTED_PROTOCOL_VERSIONS\.includes\(protocolVersion\) && !\(/\* ` +
+		PATCH_MARKER +
+		String.raw` \*/ /\^\\d\{4\}-\\d\{2\}-\\d\{2\}\$/\.test\(protocolVersion\) && protocolVersion > (?:[A-Za-z_$][\w$]*\.)?SUPPORTED_PROTOCOL_VERSIONS\[0\]\)\) \{`,
+	"g",
+);
+
+const originalCondition = (qualifier) =>
+	`if (protocolVersion !== null && !${qualifier}SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)) {`;
 
 /**
  * `> SUPPORTED_PROTOCOL_VERSIONS[0]` is a string compare, which is exactly
  * right for zero-padded YYYY-MM-DD: element 0 is LATEST_PROTOCOL_VERSION in
  * every published build of this SDK.
  */
-const PATCHED_CONDITION =
-	"if (protocolVersion !== null && !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)" +
+const patchedCondition = (qualifier) =>
+	`if (protocolVersion !== null && !${qualifier}SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)` +
 	` && !(/* ${PATCH_MARKER} */ /^\\d{4}-\\d{2}-\\d{2}$/.test(protocolVersion)` +
-	" && protocolVersion > SUPPORTED_PROTOCOL_VERSIONS[0])) {";
+	` && protocolVersion > ${qualifier}SUPPORTED_PROTOCOL_VERSIONS[0])) {`;
 
 export class PatchError extends Error {
 	constructor(code, message) {
@@ -81,6 +104,23 @@ export class PatchError extends Error {
 }
 
 /**
+ * Exactly one match, or refuse: zero means the check moved or was reworded,
+ * and more than one means this file has a shape the patch was never designed
+ * for and guessing which occurrence to rewrite is not a decision a script gets
+ * to make.
+ */
+function soleMatch(source, re, what) {
+	const matches = [...source.matchAll(re)];
+	if (matches.length === 1) return matches[0];
+	throw new PatchError(
+		"PATTERN_NOT_FOUND",
+		matches.length === 0
+			? `${what} does not look the way this patch expects — refusing to guess. Report it rather than editing by hand: the check may have moved, or upstream may have fixed it, in which case this script is no longer needed`
+			: `${what} matched ${matches.length} times in one file; this patch rewrites exactly one occurrence and will not choose between them`,
+	);
+}
+
+/**
  * Rewrite one file's source. Pure, so the transform is testable without a
  * Paseo install on disk.
  *
@@ -88,14 +128,16 @@ export class PatchError extends Error {
  */
 export function patchSource(source) {
 	if (source.includes(PATCH_MARKER)) return { source, state: "already" };
-	if (!source.includes(ORIGINAL_CONDITION)) {
-		throw new PatchError(
-			"PATTERN_NOT_FOUND",
-			"the SDK's protocol-version check does not look the way this patch expects — refusing to guess. Report it rather than editing by hand: the check may have moved, or upstream may have fixed it, in which case this script is no longer needed",
-		);
-	}
+	const [, qualifier] = soleMatch(
+		source,
+		CONDITION_RE,
+		"the SDK's protocol-version check",
+	);
 	return {
-		source: source.replace(ORIGINAL_CONDITION, PATCHED_CONDITION),
+		source: source.replace(
+			originalCondition(qualifier),
+			patchedCondition(qualifier),
+		),
 		state: "patched",
 	};
 }
@@ -103,14 +145,16 @@ export function patchSource(source) {
 /** Undo patchSource. Returns the source unchanged when it was never patched. */
 export function revertSource(source) {
 	if (!source.includes(PATCH_MARKER)) return { source, state: "already" };
-	if (!source.includes(PATCHED_CONDITION)) {
-		throw new PatchError(
-			"PATTERN_NOT_FOUND",
-			"the file carries this patch's marker but not the text it writes — it was edited by something else. Reinstall Paseo instead of reverting blind",
-		);
-	}
+	const [, qualifier] = soleMatch(
+		source,
+		PATCHED_RE,
+		"this patch's own marker, but the text around it,",
+	);
 	return {
-		source: source.replace(PATCHED_CONDITION, ORIGINAL_CONDITION),
+		source: source.replace(
+			patchedCondition(qualifier),
+			originalCondition(qualifier),
+		),
 		state: "reverted",
 	};
 }
@@ -163,7 +207,13 @@ export function runPatch({ sdkDir, mode = "apply" } = {}) {
 			`no MCP SDK at ${sdkDir} — is @getpaseo/cli installed globally? Pass --sdk-dir <dir> if it lives elsewhere`,
 		);
 	}
-	const files = [];
+	// TWO PHASES, and the split is the point. The ESM and CJS builds of this SDK
+	// spell the same check differently, so transforming-and-writing in one pass
+	// let a first file be rewritten and a second one throw — leaving the daemon
+	// with one build patched and one not, which is a worse state than either
+	// end and a silent one. Every transform is computed first; nothing is
+	// written unless all of them succeeded.
+	const planned = [];
 	for (const relative of PATCH_TARGETS) {
 		const path = join(sdkDir, relative);
 		if (!existsSync(path)) {
@@ -174,7 +224,7 @@ export function runPatch({ sdkDir, mode = "apply" } = {}) {
 		}
 		const before = readFileSync(path, "utf8");
 		if (mode === "verify") {
-			files.push({
+			planned.push({
 				file: relative,
 				state: before.includes(PATCH_MARKER) ? "already" : "unpatched",
 			});
@@ -182,13 +232,21 @@ export function runPatch({ sdkDir, mode = "apply" } = {}) {
 		}
 		const { source, state } =
 			mode === "revert" ? revertSource(before) : patchSource(before);
-		if (source !== before) {
-			const backup = `${path}.paseo-team-backup`;
-			if (mode === "apply" && !existsSync(backup)) copyFileSync(path, backup);
-			writeFileSync(path, source);
-		}
-		files.push({ file: relative, state });
+		planned.push({ file: relative, state, path, before, source });
 	}
+	if (mode !== "verify") {
+		for (const entry of planned) {
+			if (entry.source === entry.before) continue;
+			const backup = `${entry.path}.paseo-team-backup`;
+			// Only on the first real write: a second apply must not overwrite the
+			// pristine copy with an already-patched one.
+			if (mode === "apply" && !existsSync(backup)) {
+				copyFileSync(entry.path, backup);
+			}
+			writeFileSync(entry.path, entry.source);
+		}
+	}
+	const files = planned.map(({ file, state }) => ({ file, state }));
 	const patched = files.every((entry) => entry.state !== "unpatched");
 	return { ok: mode !== "verify" || patched, sdkDir, mode, files, patched };
 }
