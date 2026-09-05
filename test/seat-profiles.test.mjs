@@ -232,4 +232,35 @@ for (const id of ["9lives", "-lead", "a", "UPPER", "with.dot", "with/slash"]) {
 	assert.notEqual(seatsPath(dir), seatLedgerPath(dir));
 }
 
+// --- a malformed `seats` must be reported, not silently emptied --------------
+// Found the hard way while verifying the feature end to end: a document whose
+// `seats` was an ARRAY produced zero seats and zero errors. `pteam seats list`
+// printed nothing, `apply` created nothing, and the operator had no sentence to
+// act on — the file looked accepted. That is the opposite of what this module
+// promises ("refuses the whole document rather than writing the seats it
+// happened to understand"), and it is the failure shape this pack treats as
+// worst: a confident empty answer.
+//
+// An absent or null `seats` stays legitimately empty — a file that declares no
+// seats is a valid file. Only a `seats` that is PRESENT and the wrong type is a
+// document nobody should act on.
+{
+	for (const wrong of [
+		[{ id: "researcher", base: "claude-peer" }],
+		"researcher",
+		42,
+		true,
+	]) {
+		const errors = validateSeats({ seats: wrong });
+		assert.equal(listSeats({ seats: wrong }).length, 0);
+		assert.ok(errors.length > 0, `a ${typeof wrong} seats block must be refused, not read as empty`);
+		assert.match(errors[0], /seats/i);
+	}
+
+	// Still valid, still silent: nothing declared is nothing to complain about.
+	assert.deepEqual(validateSeats({}), []);
+	assert.deepEqual(validateSeats({ seats: null }), []);
+	assert.deepEqual(validateSeats({ seats: {} }), []);
+}
+
 console.log("seat-profiles tests passed");

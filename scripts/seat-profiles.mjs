@@ -184,6 +184,18 @@ export function validateSeats(data) {
 	if (data !== null && data !== undefined && typeof data !== "object") {
 		return ["Tệp seat phải là một object JSON."];
 	}
+	// A `seats` of the wrong shape used to read as "no seats" with no error at
+	// all: `list` printed nothing, `apply` created nothing, and the file looked
+	// accepted. A confident empty answer is the failure this module exists to
+	// avoid, so a `seats` that is present and not a plain object is refused by
+	// name. Absent or null stays legitimately empty — a file may declare no
+	// seats.
+	const block = data?.seats;
+	if (block !== null && block !== undefined && (typeof block !== "object" || Array.isArray(block))) {
+		return [
+			`"seats" phải là một object khoá theo tên ghế, ví dụ {"seats":{"researcher":{"base":"claude-peer"}}} — đang là ${Array.isArray(block) ? "mảng" : `kiểu ${typeof block}`}.`,
+		];
+	}
 	const seats = listSeats(data);
 	const seen = new Set();
 	for (const seat of seats) {
