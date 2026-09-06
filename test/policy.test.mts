@@ -1918,4 +1918,60 @@ function restoreEnv(name: string, previous: string | undefined): void {
 	}
 }
 
+import {
+	parsePeerBlock,
+	peerMessageTurnNotice,
+} from "../extensions/paseo-team-core/policy-core.ts";
+
+// --- PEER_MESSAGE_V1 gets a parser, like every other cross-role block ---------
+// The Supervisor and consult channels each parse their block and hand the
+// receiver a verdict. The peer->lead direction wrote a header nothing read, so
+// a finished report landed in a Lead's turn as ordinary prose.
+{
+	const message = [
+		"PEER_MESSAGE_V1",
+		"KIND: report",
+		"CORRELATION_ID: peer-1-abc",
+		"TASK_ID: PR-X",
+		"FROM_AGENT_ID: 2110335f-8d7d-4ea9-9ab3-97217589798b",
+		"",
+		"PEER_REPORT: done.",
+	].join("\n");
+	const block = parsePeerBlock(message);
+	assert.ok(block, "a well-formed peer message parses");
+	assert.equal(block.kind, "report");
+	assert.equal(block.fields.get("TASK_ID"), "PR-X");
+	assert.equal(
+		block.fields.get("FROM_AGENT_ID"),
+		"2110335f-8d7d-4ea9-9ab3-97217589798b",
+	);
+	assert.deepEqual(block.malformed, []);
+
+	// The header must own its line: this repo's prompts discuss PEER_MESSAGE_V1
+	// in prose, and a mention of the contract is not an instance of it. Same
+	// rule parseSupervisorBlock already enforces.
+	assert.equal(parsePeerBlock("we use PEER_MESSAGE_V1 for reports"), null);
+	assert.equal(parsePeerBlock(""), null);
+	assert.equal(parsePeerBlock(null), null);
+
+	// Fail closed, do not guess: a duplicate field is named, not silently kept.
+	const dup = parsePeerBlock(
+		["PEER_MESSAGE_V1", "KIND: report", "TASK_ID: A", "TASK_ID: B", "", "x"].join("\n"),
+	);
+	assert.match(dup!.malformed.join("; "), /TASK_ID/);
+
+	// An unknown kind is reported rather than trusted — the receiving Lead is
+	// about to decide what this turn obliges it to do.
+	const bogus = parsePeerBlock(
+		["PEER_MESSAGE_V1", "KIND: broadcast", "TASK_ID: A", "", "x"].join("\n"),
+	);
+	assert.match(bogus!.malformed.join("; "), /kind/i);
+
+	const notice = peerMessageTurnNotice({ block });
+	assert.ok(notice, "a parsed peer message produces a notice");
+	assert.match(notice!, /peer message/i);
+	assert.match(notice!, /PR-X/);
+	assert.equal(peerMessageTurnNotice({ block: null }), null);
+}
+
 console.log("[paseo-team] policy tests passed");

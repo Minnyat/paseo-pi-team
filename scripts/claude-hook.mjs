@@ -308,6 +308,37 @@ const LEAD_STANDING_AUTHORITY = [
 	"which of those three it was.",
 ].join("\n");
 
+/**
+ * The Peer's standing block, and the twin of LEAD_STANDING_AUTHORITY above.
+ *
+ * The Pi adapter re-injects the whole role prompt into the SYSTEM prompt on
+ * every before_agent_start, so a Pi Peer carries its reporting duty into every
+ * turn. Claude injected the role prompt once and then set rolePromptInjected,
+ * which left a Peer from turn 2 onward with nothing but the write-authority
+ * line — a line that never names peer_ask_lead. The turn a Peer finishes on is
+ * never turn 1, so the duty was reliably absent at the only moment it mattered.
+ *
+ * Measured on a live fleet before this block existed: Claude Peers wrote
+ * PEER_REPORT into their own transcripts and called peer_ask_lead zero times,
+ * with zero errors, while Pi Peers on the same daemon delivered theirs. The
+ * tool worked, the parent link resolved — the instruction was simply gone.
+ *
+ * Short on purpose. A full second copy of the contract every turn would be the
+ * old injection with extra steps; this only has to survive as a reminder,
+ * because the contract itself is still in the transcript from turn 1.
+ */
+const PEER_STANDING_REPORT_DUTY = [
+	"## Paseo Team Reporting (standing)",
+	"",
+	"You are a Peer. Your Lead cannot see your transcript: work that ends only in",
+	"your own output has not been delivered. When you finish, are blocked, need",
+	"something outside your scope, or have a question you may not decide, call",
+	"`peer_ask_lead` (`mcp__paseo-team__peer_ask_lead`) — kind `report` when the",
+	"task is done and the PEER_REPORT is ready, `blocked` / `dependency` /",
+	"`question` when you need an answer, `progress` for an update that needs none.",
+	"Writing PEER_REPORT into your reply is not reporting; sending it is.",
+].join("\n");
+
 function authorityBlock(describe, role, brief) {
 	return [
 		"## Paseo Team Authority (this turn)",
@@ -446,12 +477,20 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			if (rolePrompt) blocks.push(roleContextBlock(rolePrompt, role));
 		} else if (role === "lead") {
 			blocks.push(LEAD_STANDING_AUTHORITY);
+		} else if (role === "peer") {
+			blocks.push(PEER_STANDING_REPORT_DUTY);
 		}
 		if (role === "peer") {
 			blocks.push(authorityBlock(claude.describeClaudePolicy, role, brief));
 		}
 		const notice = supervisorBlockNotice(core, role, supervisorTurn, env);
 		if (notice) blocks.push(notice);
+		// The third cross-role channel. Without this a Peer's finished report
+		// reached the Lead as anonymous prose, indistinguishable from the Human.
+		const peerNotice = core.peerMessageTurnNotice({
+			block: role === "lead" ? core.parsePeerBlock(prompt) : null,
+		});
+		if (peerNotice) blocks.push(peerNotice);
 		const consultNotice = leadConsultBlockNotice(core, role, consultTurn, env);
 		if (consultNotice) blocks.push(consultNotice);
 		if (blocks.length === 0) return null;

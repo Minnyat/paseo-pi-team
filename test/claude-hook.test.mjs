@@ -666,4 +666,79 @@ rmSync(home, { recursive: true, force: true });
 	}
 }
 
+// --- the reporting duty must survive past turn 1 -------------------------------
+// The Pi adapter re-injects the whole role prompt into the SYSTEM prompt on
+// every before_agent_start. Claude injected it once and then set
+// rolePromptInjected, so from turn 2 a Peer's only standing context was the
+// write-authority line — which never mentions peer_ask_lead. Measured effect on
+// a real fleet: Claude Peers wrote PEER_REPORT into their own transcript and
+// called peer_ask_lead zero times, while Pi Peers on the same daemon delivered
+// theirs. The duty has to be restated on the turn the Peer actually finishes,
+// and that is never turn 1.
+{
+	const env = { ...peerEnv };
+	const first = await handleEvent("user-prompt-submit", { session_id: "duty1", prompt: V3_WRITE }, env);
+	assert.match(
+		first.hookSpecificOutput.additionalContext,
+		/peer_ask_lead/,
+		"turn 1 carries the full role prompt",
+	);
+
+	for (const [turn, prompt] of [[2, "keep going"], [3, V3_WRITE], [4, "nearly done"]]) {
+		const later = await handleEvent("user-prompt-submit", { session_id: "duty1", prompt }, env);
+		assert.match(
+			later.hookSpecificOutput.additionalContext,
+			/peer_ask_lead/,
+			`turn ${turn} must still name the tool that delivers the report`,
+		);
+	}
+
+	// The standing block is a reminder, not a second copy of the contract: if it
+	// grew to the size of the role prompt it would just be the old injection
+	// with extra steps, and every turn would pay for it.
+	const later = await handleEvent("user-prompt-submit", { session_id: "duty1", prompt: "x" }, env);
+	assert.ok(
+		later.hookSpecificOutput.additionalContext.length < 2000,
+		"the per-turn reminder must stay small",
+	);
+}
+
+// --- a Lead is told when a turn IS a peer message ------------------------------
+// SUPERVISOR and LEAD_CONSULT blocks each get a parser and a per-turn notice on
+// both runtimes. PEER_MESSAGE_V1 was written by team-communication.mjs and read
+// by nobody, so a report arrived as anonymous prose in the middle of a Lead's
+// turn — indistinguishable from the Human typing.
+{
+	const leadOnly = { ...baseEnv, PASEO_PI_ROLE: "lead" };
+	await handleEvent("user-prompt-submit", { session_id: "pm1", prompt: "hello" }, leadOnly);
+	const peerTurn = await handleEvent(
+		"user-prompt-submit",
+		{
+			session_id: "pm1",
+			prompt: [
+				"PEER_MESSAGE_V1",
+				"KIND: report",
+				"CORRELATION_ID: peer-1-abc",
+				"TASK_ID: PR-X",
+				"FROM_AGENT_ID: 2110335f-8d7d-4ea9-9ab3-97217589798b",
+				"",
+				"PEER_REPORT: the work is done.",
+			].join("\n"),
+		},
+		leadOnly,
+	);
+	const context = peerTurn.hookSpecificOutput.additionalContext;
+	assert.match(context, /peer message/i, "the Lead is told what this turn is");
+	assert.match(context, /PR-X/, "the notice carries the task it belongs to");
+	assert.match(context, /report/i, "the notice carries the kind");
+
+	// An ordinary turn stays quiet: a notice on every turn is noise, and noise
+	// is how a Lead learns to skim the one turn that mattered.
+	const plain = await handleEvent("user-prompt-submit", { session_id: "pm1", prompt: "hello again" }, leadOnly);
+	assert.ok(
+		!/peer message/i.test(plain?.hookSpecificOutput?.additionalContext ?? ""),
+		"a turn with no peer message gets no peer notice",
+	);
+}
+
 console.log("claude hook tests passed");

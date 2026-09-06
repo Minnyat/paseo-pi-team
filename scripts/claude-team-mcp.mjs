@@ -31,7 +31,7 @@ export const TEAM_TOOLS = [
 	{
 		name: "peer_ask_lead",
 		description:
-			"Send a question, blocker, dependency request, or progress update to this Peer's parent Lead only.",
+			"Send a question, blocker, dependency request, progress update, or finished report to this Peer's parent Lead only.",
 		roles: ["peer"],
 		script: "team-communication.mjs",
 		timeoutMs: 30_000,
@@ -41,7 +41,7 @@ export const TEAM_TOOLS = [
 			properties: {
 				kind: {
 					type: "string",
-					enum: ["question", "blocked", "dependency", "progress"],
+					enum: ["question", "blocked", "dependency", "progress", "report"],
 				},
 				message: { type: "string", minLength: 1, maxLength: 12000 },
 				taskId: { type: "string" },

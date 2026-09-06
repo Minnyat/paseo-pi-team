@@ -106,7 +106,7 @@ Start editing only when both gates pass.
 Use the custom tool `peer_ask_lead` with message kinds:
 
 ```text
-kind: question | blocked | dependency | progress
+kind: question | blocked | dependency | progress | report
 message: evidence + the specific question/proposal
 ```
 
