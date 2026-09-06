@@ -341,18 +341,24 @@ Hard rules for a mixed fleet:
 
   ```jsonc
   create_agent({ provider: "claude-peer/claude-opus-5", /* ... */
-                 settings: { modeId: "default", thinkingOptionId: "high" } })
+                 settings: { modeId: "auto", thinkingOptionId: "high" } })
   ```
 
   The CLI and `remote-paseo.mjs run` spell it `--mode`; the wrapper refuses a
   `claude-*` route that has none.
 
-  Use `modeId: "default"` — every Peer tool call then raises a Paseo permission
-  you triage with `list_pending_permissions` / `respond_to_permission`, which is
-  the designed loop. `acceptEdits` is acceptable for a write Peer whose brief
-  already grants `EDIT_AUTHORITY` and whose round-trips you want to cut. NEVER
-  `bypassPermissions`: the role policy still applies, but the human loses the
-  permission gate entirely.
+  Use `modeId: "auto"` unless you have a reason not to. What bounds a Peer is
+  its role policy plus its V3 brief, and both are enforced in the `PreToolUse`
+  hook — before Paseo's permission queue ever sees the call. The queue only
+  decides how often a human is interrupted while the Peer does already-bounded
+  work, and on `"default"` the answer is "every call": the Peer parks in the
+  queue looking hung while you spend your turn on `list_pending_permissions` /
+  `respond_to_permission` instead of leading. Narrow it deliberately — `"plan"`
+  for a seat that should propose before acting, `"default"` for one you
+  genuinely intend to watch call by call, `"acceptEdits"` as the middle setting
+  for a write Peer whose brief already grants `EDIT_AUTHORITY`. NEVER
+  `bypassPermissions`: the role policy still applies, but Paseo's own
+  guardrails outside it are gone too.
 
 Model classes (decided by task risk + disposition, not by role name):
 

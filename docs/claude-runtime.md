@@ -271,7 +271,7 @@ fails with the message above:
 ```jsonc
 create_agent({
   provider: "claude-peer/claude-opus-5",
-  settings: { modeId: "default", thinkingOptionId: "high" },
+  settings: { modeId: "auto", thinkingOptionId: "high" },
   // ...
 })
 ```
@@ -318,6 +318,19 @@ A pi Lead never showed this: `pi-lead` declares no modes at all
 (`Mode=default AvailableModes=[]`) and its tool calls simply run. If a Claude
 Lead seems to be waiting on you for everything, check its mode before you
 suspect the policy.
+
+The Supervisor seat is the same story, started the same way:
+
+```bash
+paseo run --provider "claude-supervisor/<model>" --thinking high --mode auto "..."
+```
+
+Its tool surface is already the narrowest in the pack — no `Bash`, no `Write`,
+no `Task`, from the provider's static `disallowedTools` — so `default` buys no
+safety it does not already have. It only parks the reads and `mcp__paseo__*`
+calls the Supervisor needs to answer a Lead's consult, and a consult left
+unanswered parks the Lead, which escalates to the Human: exactly the round-trip
+that channel exists to prevent.
 
 ## Verifying
 
