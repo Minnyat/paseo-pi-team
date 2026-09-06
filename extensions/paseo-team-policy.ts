@@ -85,7 +85,9 @@ import {
 	classifyMcpInput,
 	leaseBlockReason,
 	matchesPaseoToolName,
+	parsePeerBlock,
 	parseSupervisorBlock,
+	peerMessageTurnNotice,
 	resolveLeases,
 	selfCluster,
 	sendAgentPromptTargetId,
@@ -293,6 +295,18 @@ function leadConsultNotice(prompt: string): string | null {
 	return leadConsultTurnNotice({ block, verdict, attribution });
 }
 
+/**
+ * The third cross-role channel, on the Lead's side.
+ *
+ * `supervisorNotice` and `leadConsultNotice` above each tell their receiver
+ * what an incoming block obliges it to do. A PEER_MESSAGE_V1 had no such
+ * function, so a Peer's report arrived as prose in the middle of a Lead's turn
+ * and competed with the Human for attention on equal terms.
+ */
+function peerNotice(prompt: string): string | null {
+	return peerMessageTurnNotice({ block: parsePeerBlock(prompt) });
+}
+
 function extractCreateAgentArgs(input: unknown): unknown {
 	if (!input || typeof input !== "object") return null;
 	const args = (input as Record<string, unknown>).args;
@@ -315,7 +329,7 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 		parameters: {
 			type: "object",
 			properties: {
-				kind: { type: "string", enum: ["question", "blocked", "dependency", "progress"] },
+				kind: { type: "string", enum: ["question", "blocked", "dependency", "progress", "report"] },
 				message: { type: "string", minLength: 1, maxLength: 12000 },
 				taskId: { type: "string" },
 				correlationId: { type: "string" },
@@ -556,7 +570,7 @@ export default function (pi: ExtensionAPI) {
 		const rolePrompt = loadRolePrompt(r);
 		const notice =
 			r === "lead"
-				? supervisorNotice(event.prompt)
+				? (supervisorNotice(event.prompt) ?? peerNotice(event.prompt))
 				: r === "supervisor"
 					? leadConsultNotice(event.prompt)
 					: null;

@@ -1662,6 +1662,153 @@ export function supervisorTurnNotice({
 }
 
 // ---------------------------------------------------------------------------
+// The peer -> lead direction, on the receiving side.
+//
+// `team-communication.mjs` has written a PEER_MESSAGE_V1 header since the
+// channel shipped, and until now nothing read it. Both other cross-role
+// channels — SUPERVISOR_OBSERVATION and LEAD_CONSULT — parse their block and
+// hand the receiver a verdict, and the asymmetry showed: a Peer's finished
+// report arrived in a Lead's turn as anonymous prose, indistinguishable from
+// the Human typing. A Lead that cannot tell the two apart cannot prioritise
+// between them.
+//
+// This is deliberately lighter than the supervisor path. There, the hard
+// question is standing — WHICH Supervisor is entitled to bind this Lead, so
+// jurisdiction, cluster and topology all have to be weighed. Here standing is
+// already settled by construction: the sender resolved its recipient from
+// Paseo's own ParentAgentId, so a message that arrives at all came from this
+// Lead's own Peer. What is left is telling the Lead what the turn IS.
+// ---------------------------------------------------------------------------
+
+export const PEER_MESSAGE_HEADER = "PEER_MESSAGE_V1";
+
+/**
+ * The kinds a Peer may send.
+ *
+ * `report` is the completion channel. Without it the set described every way a
+ * task can go sideways — question, blocked, dependency — plus `progress`, and
+ * no way for a Peer to say it had finished. The one Peer observed pushing a
+ * finished report had to label it `progress`, and a channel that can only be
+ * used by mislabelling it is not a channel a Peer can be instructed to use.
+ *
+ * `team-communication.mjs` MESSAGE_KINDS and both runtimes' tool schemas are
+ * copies of this list; team-communication.test.mjs asserts they never drift.
+ */
+export const PEER_MESSAGE_KINDS = Object.freeze([
+	"question",
+	"blocked",
+	"dependency",
+	"progress",
+	"report",
+] as const);
+
+export type PeerMessageKind = (typeof PEER_MESSAGE_KINDS)[number];
+
+export interface PeerBlock {
+	/** Null when KIND is absent or outside the set — see `malformed`. */
+	kind: PeerMessageKind | null;
+	/** Uppercase FIELD -> first occurrence value. */
+	fields: Map<string, string>;
+	malformed: string[];
+}
+
+const PEER_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
+
+/**
+ * Parse a PEER_MESSAGE_V1 message.
+ *
+ * Same two rules as `parseSupervisorBlock`, for the same two reasons. The
+ * header must be a line of its OWN, because this repo's prompts discuss the
+ * contract in prose and a mention of it is not an instance of it. And a
+ * duplicate field becomes an entry in `malformed` rather than a quietly
+ * chosen value, because the receiving Lead is about to act on it.
+ */
+export function parsePeerBlock(prompt: unknown): PeerBlock | null {
+	if (typeof prompt !== "string" || prompt.trim() === "") return null;
+	const lines = prompt.split(/\r?\n/);
+	const start = lines.findIndex((line) => line.trim() === PEER_MESSAGE_HEADER);
+	if (start < 0) return null;
+
+	const fields = new Map<string, string>();
+	const malformed: string[] = [];
+
+	for (const line of lines.slice(start + 1)) {
+		const trimmed = line.trim();
+		if (trimmed === "") continue;
+		if (trimmed === PEER_MESSAGE_HEADER) break;
+		const match = PEER_FIELD_RE.exec(trimmed);
+		if (!match) continue;
+		const key = match[1] as string;
+		const value = (match[2] ?? "").trim();
+		if (fields.has(key)) {
+			malformed.push(`duplicate field ${key}`);
+			continue;
+		}
+		fields.set(key, value);
+	}
+
+	const rawKind = fields.get("KIND") ?? null;
+	const kind = (PEER_MESSAGE_KINDS as readonly string[]).includes(rawKind ?? "")
+		? (rawKind as PeerMessageKind)
+		: null;
+	if (kind === null) {
+		malformed.push(
+			rawKind === null
+				? "missing kind"
+				: `unknown kind ${rawKind} — expected one of: ${PEER_MESSAGE_KINDS.join(", ")}`,
+		);
+	}
+
+	return { kind, fields, malformed };
+}
+
+/**
+ * What the Lead is told when a turn opens with a peer message.
+ *
+ * Short on purpose. This runs on the Lead's own turn, alongside its standing
+ * authority block, and a notice long enough to compete with the message it is
+ * introducing would bury the thing it exists to surface.
+ */
+export function peerMessageTurnNotice({
+	block,
+}: {
+	block: PeerBlock | null;
+}): string | null {
+	if (!block) return null;
+	const kind = block.kind ?? "unknown";
+	const task = block.fields.get("TASK_ID") || "unstated";
+	const from = block.fields.get("FROM_AGENT_ID") || "unstated";
+	return [
+		"## Paseo Team — peer message (this turn)",
+		"",
+		`This turn opens with a PEER_MESSAGE_V1 from one of YOUR Peers, not from the Human.`,
+		`Kind: ${kind}   Task: ${task}   From agent: ${from}`,
+		"",
+		block.malformed.length
+			? `The message is malformed (${block.malformed.join("; ")}). Treat it as unverified: ask the Peer to resend rather than acting on a field you cannot trust.`
+			: peerMessageDirective(block.kind),
+	].join("\n");
+}
+
+/** The obligation each kind puts on the Lead. */
+function peerMessageDirective(kind: PeerMessageKind | null): string {
+	switch (kind) {
+		case "report":
+			return "The Peer has FINISHED and this is its report. Accept it, correct it, or send follow-up work — that acceptance is your call, not the Human's. Do not leave the Peer waiting on a turn you never take.";
+		case "blocked":
+			return "The Peer is STOPPED until you answer. This is the one kind with a Peer idling behind it, so answer it before you start anything new.";
+		case "dependency":
+			return "The Peer needs something outside its own scope. Grant it, reassign it, or refuse it with a reason — a silent dependency request reads to the Peer as a refusal it cannot cite.";
+		case "question":
+			return "The Peer needs a decision it is not allowed to make. Answer it from your own authority; escalate to the Supervisor only if the call is genuinely not yours.";
+		case "progress":
+			return "Progress only: no answer is owed. Read it for drift against the brief you sent, and reply only if it has drifted.";
+		default:
+			return "The kind is unreadable. Ask the Peer to resend before acting on it.";
+	}
+}
+
+// ---------------------------------------------------------------------------
 // PR-H — the Lead's own escalation path.
 //
 // Everything above this line is Supervisor-INITIATED: the Supervisor observes

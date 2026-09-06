@@ -14,7 +14,50 @@ import {
 import * as core from "../extensions/paseo-team-core/policy-core.ts";
 import { classifyRemoteFailure } from "../scripts/reliability.mjs";
 
-assert.deepEqual([...MESSAGE_KINDS], ["question", "blocked", "dependency", "progress"]);
+// `report` is the completion channel. Without it the only way a Peer could
+// push a finished report was to mislabel it `progress` — which is what the one
+// Peer that ever did it actually had to do. A kind that names the thing is the
+// difference between a channel a Peer can be told to use and a convention it
+// has to invent.
+assert.deepEqual([...MESSAGE_KINDS], ["question", "blocked", "dependency", "progress", "report"]);
+
+// The kind list exists in four places: policy-core (source of truth), this
+// module, and one tool schema per runtime. A kind a Peer can send but cannot
+// ASK for on one runtime is the drift that matters — it would make the pack's
+// behaviour depend on which runtime happened to serve the seat.
+{
+	const { TEAM_TOOLS } = await import("../scripts/claude-team-mcp.mjs");
+	const { readFileSync } = await import("node:fs");
+	const { fileURLToPath } = await import("node:url");
+	const { dirname, join } = await import("node:path");
+	const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+	assert.deepEqual(
+		[...MESSAGE_KINDS],
+		[...core.PEER_MESSAGE_KINDS],
+		"team-communication must not drift from the core list",
+	);
+
+	const claudeKinds =
+		TEAM_TOOLS.find((tool) => tool.name === "peer_ask_lead").inputSchema.properties.kind.enum;
+	assert.deepEqual([...claudeKinds], [...MESSAGE_KINDS], "the Claude tool schema must not drift");
+
+	// The Pi schema lives inside the extension's default export, which needs a
+	// live `pi` to reach, so it is pinned at the source level instead. A guard
+	// that reads the actual bytes still catches the drift this is here for.
+	const piSource = readFileSync(join(root, "extensions", "paseo-team-policy.ts"), "utf8");
+	const piEnum = /kind: \{ type: "string", enum: \[([^\]]*)\] \}/.exec(piSource);
+	assert.ok(piEnum, "the Pi peer_ask_lead schema must still declare a kind enum");
+	assert.deepEqual(
+		piEnum[1].split(",").map((entry) => entry.trim().replace(/"/g, "")),
+		[...MESSAGE_KINDS],
+		"the Pi tool schema must not drift",
+	);
+}
+assert.deepEqual(
+  validatePeerMessage({ kind: "report", message: "PEER_REPORT STATUS: done", taskId: "T-9" }).kind,
+  "report",
+);
 assert.deepEqual(
   validatePeerMessage({ kind: "question", message: "Need clarification", taskId: "T-1", correlationId: "c-1" }),
   { kind: "question", message: "Need clarification", taskId: "T-1", correlationId: "c-1" },
