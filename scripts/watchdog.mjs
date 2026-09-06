@@ -4,8 +4,17 @@ import { isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
 import { retryWithBackoff } from "./reliability.mjs";
 
 export const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
-export const DEFAULT_GLOBAL_DEADLINE_MS = 30_000;
+export const DEFAULT_GLOBAL_DEADLINE_MS = 60_000;
 export const DEFAULT_INSPECT_CONCURRENCY = 6;
+// Budget for one `paseo` call. It is 20s rather than the 5s this started at
+// because `paseo ls -g --json` scales with the size of the daemon's agent
+// table: on a daemon holding a few hundred agents it takes ~6s, so every
+// attempt was killed and the watchdog answered `partial: true` forever. That
+// is the worst possible failure here — a watchdog that lists nothing is
+// indistinguishable from a fleet with nothing wrong, and the observation-only
+// verdict meant no stale agent was ever reclaimed. 20s matches the budget the
+// rest of the pack already gives a paseo call (paseo-bridge, team-communication).
+export const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
 
 export function classifyStaleAgents(agents, options = {}) {
   const now = options.now ?? Date.now();
@@ -136,7 +145,7 @@ export function classifyLeases(leases, agents, { now }) {
 export async function collectWatchdogSnapshot(options = {}) {
   const globalDeadlineMs = Math.max(1000, options.globalDeadlineMs ?? DEFAULT_GLOBAL_DEADLINE_MS);
   const deadline = Date.now() + globalDeadlineMs;
-  const commandTimeoutMs = Math.max(250, options.commandTimeoutMs ?? 5000);
+  const commandTimeoutMs = Math.max(250, options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
   const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 3));
   const concurrency = Math.max(1, Math.min(16, Math.floor(options.concurrency ?? DEFAULT_INSPECT_CONCURRENCY)));
   const controller = new AbortController();

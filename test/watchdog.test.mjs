@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { classifyLeases, classifyStaleAgents, DEFAULT_GLOBAL_DEADLINE_MS, DEFAULT_INSPECT_CONCURRENCY } from "../scripts/watchdog.mjs";
+import { classifyLeases, classifyStaleAgents, DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_GLOBAL_DEADLINE_MS, DEFAULT_INSPECT_CONCURRENCY } from "../scripts/watchdog.mjs";
 
 const now = Date.parse("2026-08-08T12:00:00.000Z");
 const result = classifyStaleAgents(
@@ -20,7 +20,48 @@ assert.equal(result.find((agent) => agent.id === "invalid").stale, false);
 assert.equal(result.find((agent) => agent.id === "unreachable").confidence, "unknown");
 assert.equal(result.find((agent) => agent.id === "unreachable").stale, false);
 assert.equal(DEFAULT_INSPECT_CONCURRENCY, 6);
-assert.equal(DEFAULT_GLOBAL_DEADLINE_MS, 30_000);
+assert.equal(DEFAULT_GLOBAL_DEADLINE_MS, 60_000);
+
+// --- the per-command budget must outlive a real `paseo ls` -------------------
+// This started as a 5s budget, which was fine until a daemon held a few hundred
+// agents: `paseo ls -g --json` then takes ~6s, every attempt was killed, and the
+// watchdog reported `partial: true` forever — permanently observation-only, so
+// no stale agent was ever reclaimed. The failure was silent in exactly the wrong
+// way: a watchdog that reports nothing looks the same as a healthy fleet.
+// The budget is asserted here rather than left inline so it cannot drift back
+// under the latency it exists to tolerate.
+assert.equal(DEFAULT_COMMAND_TIMEOUT_MS, 20_000);
+assert.ok(
+	DEFAULT_COMMAND_TIMEOUT_MS >= 15_000,
+	"per-command budget must leave room for a multi-hundred-agent `paseo ls`",
+);
+assert.ok(
+	DEFAULT_GLOBAL_DEADLINE_MS >= DEFAULT_COMMAND_TIMEOUT_MS * 2,
+	"the global deadline must fit a slow list AND the inspect fan-out after it",
+);
+
+{
+	// The constant is worthless if the default never reaches the transport, so
+	// assert the value the spawn actually receives, not merely the export.
+	const seen = [];
+	const snapshot = await (await import("../scripts/watchdog.mjs")).collectWatchdogSnapshot({
+		globalDeadlineMs: DEFAULT_GLOBAL_DEADLINE_MS,
+		maxAttempts: 1,
+		leases: false,
+		runPaseoJson: async (args, timeoutMs) => {
+			seen.push({ command: args[0], timeoutMs });
+			return args[0] === "ls"
+				? [{ id: "agent-0", status: "running" }]
+				: { Status: "running", UpdatedAt: "2026-08-08T11:00:00.000Z", PendingPermissions: [] };
+		},
+		now,
+	});
+	assert.equal(snapshot.partial, false);
+	const ls = seen.find((call) => call.command === "ls");
+	const inspect = seen.find((call) => call.command === "inspect");
+	assert.ok(ls.timeoutMs > 5_000, "the list call no longer inherits the old 5s budget");
+	assert.ok(inspect.timeoutMs > 5_000, "the inspect fan-out gets the same widened budget");
+}
 
 {
   let active = 0;
