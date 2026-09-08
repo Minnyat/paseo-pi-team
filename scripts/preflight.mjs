@@ -435,7 +435,16 @@ if (daemonUp) {
 		for (const role of expectedRoleProviders) {
 			const entry = providersById.get(role);
 			if (!entry)
-				fail(`role-provider:${role}`, "not registered in ~/.paseo/config.json");
+				// The remediation is family-specific: this loop covers pi-* too, and
+				// `claude-setup --apply` only ever writes the claude-* block. Sending
+				// a pi-only operator there is sending them to a command that cannot
+				// create the provider they are missing.
+				fail(
+					`role-provider:${role}`,
+					role.startsWith("claude-")
+						? "not registered in ~/.paseo/config.json -> run: node scripts/claude-setup.mjs --apply"
+						: "not registered in ~/.paseo/config.json -> copy it from config/paseo.providers.example.json (claude-setup --apply writes only the claude-* providers)",
+				);
 			else if (
 				String(entry.enabled).toLowerCase() !== "enabled" &&
 				entry.enabled !== true

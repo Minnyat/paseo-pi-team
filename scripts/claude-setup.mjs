@@ -41,6 +41,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isEntrypoint } from "./lib-common.mjs";
+// The SAME merge `pteam seats apply` uses. Reused rather than reimplemented: a
+// second merge would be a second ownership rule to keep in step with the first.
+import { applySeatsToPaseoConfig } from "./seat-profiles.mjs";
 
 /**
  * The MCP server name this installer used to write, kept only so an upgrade can
@@ -366,6 +369,290 @@ export async function buildProviderSnippet(env = process.env) {
 }
 
 // ---------------------------------------------------------------------------
+// Applying the provider block to ~/.paseo/config.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Paseo's config. Honors PASEO_CONFIG_JSON, the same override
+ * cli/lib/config-walker.mjs uses, so a test never touches the real daemon
+ * config.
+ */
+export function paseoConfigPath(env = process.env) {
+	return env.PASEO_CONFIG_JSON?.trim() || join(homedir(), ".paseo", "config.json");
+}
+
+/**
+ * Our OWN ledger, deliberately NOT the seat ledger.
+ *
+ * `pteam seats apply` deletes any provider its ledger claims that its own
+ * `generated` set no longer contains (seat-profiles.mjs). The seat document
+ * never describes claude-lead/peer/supervisor, so sharing one ledger would make
+ * the next unrelated `seats apply` delete all three role providers. Two files,
+ * two ownership tokens, and neither command can reach the other's providers.
+ */
+export function claudeProviderLedgerPath(env = process.env) {
+	const dir = env.PST_TEAM_CONFIG_DIR?.trim() || join(homedir(), ".paseo-pi-team");
+	return join(dir, "claude-provider-ledger.json");
+}
+
+/**
+ * What we wrote, per provider name:
+ *   { mode: "created",  wrote }             — the name did not exist
+ *   { mode: "replaced", wrote, previous }   — --force overwrote an operator's
+ *
+ * `wrote` is kept so uninstall can verify the live entry is still ours before
+ * removing it, WITHOUT importing the policy (uninstall is synchronous). That is
+ * the same exact-match discipline isOwnBrowserMcpServer already applies: we
+ * remove what we wrote, and anything the operator reshaped afterwards is theirs.
+ */
+export function readProviderLedger(path) {
+	const doc = readJsonOrNull(path);
+	if (!doc || typeof doc !== "object" || typeof doc.providers !== "object" || doc.providers === null) {
+		return {};
+	}
+	const out = {};
+	for (const [name, entry] of Object.entries(doc.providers)) {
+		if (entry && typeof entry === "object" && !Array.isArray(entry)) out[name] = entry;
+	}
+	return out;
+}
+
+/**
+ * Merge the claude-* provider block into ~/.paseo/config.json.
+ *
+ * The merge itself is delegated to applySeatsToPaseoConfig — the same function
+ * `pteam seats apply` uses, already covered by test/seat-profiles.test.mjs. A
+ * second merge implementation would be a second ownership rule to keep in step
+ * with the first. What lives here is only the POLICY of which names to write.
+ *
+ * CONCURRENCY (and its limit). ~/.paseo/config.json has a second writer: the
+ * daemon calls savePersistedConfig, and the app UI can mutate providers while it
+ * runs. atomicWriteJson renames a temp file over the destination, which makes
+ * the WRITE atomic — no reader ever sees a torn file — but it does NOTHING for
+ * the read-modify-write SEQUENCE. There is no lock, no O_EXCL, no compare-and-
+ * swap anywhere in this path, and adding a lockfile would buy a stale-lock
+ * failure mode on a daemon host.
+ *
+ * So this re-reads the file immediately before writing and REFUSES if the bytes
+ * changed since the read that produced `next`. That converts a silent lost
+ * update into a reported one. It narrows the window to the microseconds between
+ * the final read and the rename; it does not close it. A daemon write landing
+ * inside that window is still lost, and that is a known, accepted race — stated
+ * here rather than left for someone to discover.
+ */
+export async function applyProviders(env = process.env, { force = false } = {}) {
+	const configPath = paseoConfigPath(env);
+	const ledgerPath = claudeProviderLedgerPath(env);
+
+	// ONE read, reused for both the parse and the conflict check below. Reading
+	// twice would let `current` come from different bytes than the snapshot we
+	// later compare against.
+	const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
+	let current = null;
+	if (before !== null) {
+		try {
+			current = JSON.parse(before);
+		} catch {
+			current = undefined;
+		}
+	}
+	// `undefined` is unparseable, `null` is absent — the distinction is the whole
+	// point. cli/lib/config-walker.mjs's reader collapses both to null, which
+	// would make a corrupt config look like a fresh one and get overwritten.
+	if (current === undefined || (current !== null && (typeof current !== "object" || Array.isArray(current)))) {
+		return {
+			action: "apply",
+			configPath,
+			status: "failed",
+			error: `${configPath} is not a JSON object — left untouched`,
+			ok: false,
+		};
+	}
+
+	const generated = (await buildProviderSnippet(env)).agents.providers;
+	const ledger = readProviderLedger(ledgerPath);
+	const existingProviders = current?.agents?.providers ?? {};
+
+	// Policy: which of the generated names do we actually write?
+	const toWrite = {};
+	const deleted = [];
+	for (const [name, entry] of Object.entries(generated)) {
+		const live = existingProviders[name];
+		// In our ledger but gone from the config: the operator removed it on
+		// purpose after we created it. Re-adding it silently would undo a
+		// deliberate act, so it takes an explicit --force. The ledger entry is
+		// KEPT below, or the next run would read "unknown name" and create it.
+		if (live === undefined && ledger[name] !== undefined && !force) {
+			deleted.push(name);
+			continue;
+		}
+		toWrite[name] = entry;
+	}
+
+	// --force additionally adopts names the operator owns, so the merge replaces
+	// them instead of reporting them as skipped.
+	const ownedForMerge = force ? Object.keys(toWrite) : Object.keys(ledger);
+	const result = applySeatsToPaseoConfig(current, toWrite, ownedForMerge);
+
+	const nextLedger = {};
+	for (const name of Object.keys(toWrite)) {
+		if (result.skipped.includes(name)) continue;
+		const previous = existingProviders[name];
+		const wasOurs = ledger[name] !== undefined;
+		nextLedger[name] =
+			previous !== undefined && !wasOurs
+				? { mode: "replaced", wrote: toWrite[name], previous }
+				: { mode: ledger[name]?.mode === "replaced" ? "replaced" : "created", wrote: toWrite[name], ...(ledger[name]?.previous !== undefined ? { previous: ledger[name].previous } : {}) };
+	}
+	// A name the operator deleted stays claimed, so a later run still recognises
+	// it as ours-but-removed rather than creating it afresh.
+	for (const name of deleted) nextLedger[name] = ledger[name];
+
+	const unchanged =
+		result.created.length === 0 && result.updated.length === 0 && result.removed.length === 0;
+
+	if (!unchanged) {
+		// See CONCURRENCY above: detect a competing write, do not try to lock.
+		const now = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
+		if (now !== before) {
+			return {
+				action: "apply",
+				configPath,
+				status: "conflict",
+				error: `${configPath} changed while this command was running (the daemon or the app also writes it) — nothing was written, re-run to pick up both changes`,
+				ok: false,
+			};
+		}
+		writeJsonAtomic(configPath, result.config);
+	}
+	// Only when it actually differs: an unchanged apply that still rewrote the
+	// ledger would leave a fresh .bak behind on every run.
+	if (stableJson(readProviderLedger(ledgerPath)) !== stableJson(nextLedger)) {
+		writeJsonAtomic(ledgerPath, {
+			version: 1,
+			updatedAt: new Date().toISOString(),
+			providers: nextLedger,
+		});
+	}
+
+	return {
+		action: "apply",
+		configPath,
+		ledgerPath,
+		status: unchanged ? "unchanged" : current === null ? "created" : "updated",
+		created: result.created,
+		updated: result.updated,
+		// A provider the operator hand-wrote is never overwritten without --force.
+		skipped: result.skipped,
+		// In our ledger, deleted from the config by the operator, left deleted.
+		deletedByOperator: deleted,
+		providers: toWrite,
+		ok: true,
+	};
+}
+
+/**
+ * Back out exactly what applyProviders wrote, and nothing else.
+ *
+ * Synchronous, like the rest of uninstall: the ledger records the entry we
+ * wrote, so no policy import is needed to decide ownership.
+ *   created  + still ours -> delete it
+ *   replaced + still ours -> restore the operator's original
+ *   reshaped by the operator since -> leave it, report it
+ */
+export function removeProviders(env = process.env) {
+	const configPath = paseoConfigPath(env);
+	const ledgerPath = claudeProviderLedgerPath(env);
+	const ledger = readProviderLedger(ledgerPath);
+	if (Object.keys(ledger).length === 0) {
+		return { action: "remove-providers", configPath, status: "missing", ok: true };
+	}
+	const current = readJsonOrNull(configPath);
+	if (current === undefined) {
+		return {
+			action: "remove-providers",
+			configPath,
+			status: "failed",
+			error: `${configPath} is not valid JSON — left untouched`,
+			ok: false,
+		};
+	}
+
+	const removed = [];
+	const restored = [];
+	const kept = [];
+	const providers = { ...(current?.agents?.providers ?? {}) };
+	for (const [name, entry] of Object.entries(ledger)) {
+		const live = providers[name];
+		if (live === undefined) continue;
+		if (stableJson(live) !== stableJson(entry.wrote ?? null)) {
+			// Changed since we wrote it: it is the operator's now.
+			kept.push(name);
+			continue;
+		}
+		if (entry.mode === "replaced" && entry.previous !== undefined) {
+			providers[name] = entry.previous;
+			restored.push(name);
+		} else {
+			delete providers[name];
+			removed.push(name);
+		}
+	}
+
+	if (removed.length > 0 || restored.length > 0) {
+		const next = { ...(current ?? {}) };
+		next.agents = { ...(next.agents ?? {}), providers };
+		writeJsonAtomic(configPath, next);
+	}
+	rmSync(ledgerPath, { force: true });
+	return {
+		action: "remove-providers",
+		configPath,
+		removed,
+		restored,
+		kept,
+		status: removed.length + restored.length > 0 ? "updated" : "unchanged",
+		ok: true,
+	};
+}
+
+/**
+ * The text an operator reads after --apply.
+ *
+ * Printing a command is not the same as saying "this is not live yet". The bug
+ * this whole change fixes was a correct setting sitting in a file doing nothing,
+ * and apply ships exactly that state by design — so the inertness has to be
+ * stated in words, for someone who does not know how Paseo loads providers.
+ */
+export function applyNextSteps(result) {
+	if (result.status === "unchanged") {
+		return ["  already applied — nothing to write, and nothing to reload."];
+	}
+	return [
+		"",
+		"  THIS HAS NOT TAKEN EFFECT YET.",
+		"  Writing the file changed nothing by itself. Two separate things must happen:",
+		"",
+		"    1. The Paseo daemon has to re-read the file:",
+		"",
+		"         paseo daemon reload",
+		"",
+		"       A reload is enough — agents.providers is reloadable, and the",
+		"       provider registry is rebuilt live. A full restart is NOT needed",
+		"       and would kill every agent running on this host.",
+		"",
+		"    2. The agents have to be created AFTER that reload. An agent reads",
+		"       its provider once, at the moment it is spawned, and keeps those",
+		"       settings for the rest of its life. Agents that are already",
+		"       running will NOT pick this up — there is no way to hand them the",
+		"       change short of replacing them.",
+		"",
+		"  In short: reload, then start a NEW agent. An agent started before now",
+		"  keeps the old settings no matter how many times you reload.",
+	];
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -411,11 +698,18 @@ export function uninstall(env = process.env) {
 			(current) => removeBrowserMcpServer(removeMcpServer(current)),
 			{ label: "~/.claude.json", createIfMissing: false },
 		),
+		// Symmetry with --apply: back out the providers we wrote to
+		// ~/.paseo/config.json. No ledger means we never applied, and this is a
+		// no-op — it never touches a config this pack did not write to.
+		providers: removeProviders(env),
 	};
 	return {
 		action: "uninstall",
 		...results,
-		ok: results.hooks.status !== "failed" && results.mcp.status !== "failed",
+		ok:
+			results.hooks.status !== "failed" &&
+			results.mcp.status !== "failed" &&
+			results.providers.status !== "failed",
 	};
 }
 
@@ -486,20 +780,26 @@ export function verify(env = process.env) {
 
 function usage() {
 	return [
-		"usage: node scripts/claude-setup.mjs <--install|--verify|--uninstall|--print-providers> [--json]",
+		"usage: node scripts/claude-setup.mjs <--install|--apply|--verify|--uninstall|--print-providers> [--json] [--force]",
 		"",
 		"  --install          merge hooks into ~/.claude/settings.json and the",
 		"                     paseo-team MCP server into ~/.claude.json",
 		"                     on that CDP port instead of launch mode",
+		"  --apply            merge the claude-* provider block into",
+		"                     ~/.paseo/config.json (does NOT reload the daemon)",
 		"  --verify           report what is installed (exit 1 when incomplete)",
 		"  --uninstall        remove only this pack's tagged entries",
 		"  --print-providers  print the claude-* provider block for ~/.paseo/config.json",
+		"",
+		"  --force            with --apply: overwrite a provider the operator owns,",
+		"                     and re-create one they deleted. Off by default.",
 	].join("\n");
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
 	const json = argv.includes("--json");
-	const mode = ["--install", "--verify", "--uninstall", "--print-providers"].find(
+	const force = argv.includes("--force");
+	const mode = ["--install", "--apply", "--verify", "--uninstall", "--print-providers"].find(
 		(flag) => argv.includes(flag),
 	);
 	if (!mode) {
@@ -507,8 +807,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		process.exitCode = 2;
 		return;
 	}
+	// --force only means anything to --apply. Accepting it silently elsewhere
+	// would read as "the force took effect" for an operation that never had one.
+	if (force && mode !== "--apply") {
+		process.stderr.write(`--force is only valid with --apply\n${usage()}\n`);
+		process.exitCode = 2;
+		return;
+	}
 	let result;
 	if (mode === "--install") result = await install(env);
+	else if (mode === "--apply") result = await applyProviders(env, { force });
 	else if (mode === "--verify") result = verify(env);
 	else if (mode === "--uninstall") result = uninstall(env);
 	else result = { action: "print-providers", ...(await buildProviderSnippet(env)), ok: true };
@@ -532,6 +840,18 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 					(script) => `  script -> ${result.missing.includes(`script:${script}`) ? "✗ MISSING" : "✓"} ${script}`,
 				),
 			);
+		} else if (result.action === "apply") {
+			lines.push(`  config -> ${result.configPath} (${result.status})`);
+			if (result.error) lines.push(`  ${result.error}`);
+			for (const [label, names] of [
+				["created", result.created],
+				["updated", result.updated],
+				["skipped (yours — use --force to overwrite)", result.skipped],
+				["left deleted (you removed it — use --force to re-create)", result.deletedByOperator],
+			]) {
+				if (names?.length) lines.push(`    ${label}: ${names.join(", ")}`);
+			}
+			if (result.ok) lines.push(...applyNextSteps(result));
 		} else {
 			if (result.hooks) lines.push(`  hooks -> ${result.hooks.path} (${result.hooks.status})`);
 			if (result.mcp) lines.push(`  mcp   -> ${result.mcp.path} (${result.mcp.status})`);
@@ -539,9 +859,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 		if (result.missing?.length) lines.push(`  missing: ${result.missing.join(", ")}`);
 		if (result.action === "install") {
 			lines.push(
-				"  next: merge the printed provider block into ~/.paseo/config.json,",
-				"        then restart the Paseo daemon:",
-				"          node scripts/claude-setup.mjs --print-providers",
+				"  next: write the claude-* providers into ~/.paseo/config.json:",
+				"          node scripts/claude-setup.mjs --apply",
+				"        (--print-providers still prints the block for a manual merge)",
 			);
 		}
 		process.stdout.write(`${lines.join("\n")}\n`);

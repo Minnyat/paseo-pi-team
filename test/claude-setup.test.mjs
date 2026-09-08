@@ -11,9 +11,13 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	applyNextSteps,
+	applyProviders,
 	buildProviderSnippet,
+	claudeProviderLedgerPath,
 	claudeSettingsPath,
 	claudeUserConfigPath,
+	removeProviders,
 	hookEntry,
 	hookScriptPath,
 	install,
@@ -41,6 +45,8 @@ const env = {
 	...process.env,
 	CLAUDE_CONFIG_DIR: claudeDir,
 	PASEO_TEAM_CLAUDE_USER_CONFIG: userConfigPath,
+	PASEO_CONFIG_JSON: join(home, "paseo-config.json"),
+	PST_TEAM_CONFIG_DIR: home,
 };
 
 assert.equal(claudeSettingsPath(env), join(claudeDir, "settings.json"));
@@ -173,6 +179,8 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		...process.env,
 		CLAUDE_CONFIG_DIR: corruptDir,
 		PASEO_TEAM_CLAUDE_USER_CONFIG: join(corruptDir, ".claude.json"),
+		PASEO_CONFIG_JSON: join(corruptDir, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: corruptDir,
 	};
 	const result = await install(corruptEnv);
 	assert.equal(result.ok, false);
@@ -190,6 +198,8 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		...process.env,
 		CLAUDE_CONFIG_DIR: freshDir,
 		PASEO_TEAM_CLAUDE_USER_CONFIG: join(freshDir, ".claude.json"),
+		PASEO_CONFIG_JSON: join(freshDir, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: freshDir,
 	};
 	const result = await install(freshEnv);
 	assert.equal(result.hooks.status, "created");
@@ -207,6 +217,8 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		...process.env,
 		CLAUDE_CONFIG_DIR: staleDir,
 		PASEO_TEAM_CLAUDE_USER_CONFIG: join(staleDir, ".claude.json"),
+		PASEO_CONFIG_JSON: join(staleDir, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: staleDir,
 	};
 	await install(staleEnv);
 	const settingsFile = join(staleDir, "settings.json");
@@ -299,6 +311,8 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		...process.env,
 		CLAUDE_CONFIG_DIR: legacyDir,
 		PASEO_TEAM_CLAUDE_USER_CONFIG: legacyConfig,
+		PASEO_CONFIG_JSON: join(legacyDir, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: legacyDir,
 	};
 	// A host set up by the previous version: our launch-mode entry, plus one
 	// unrelated server that must survive untouched.
@@ -392,6 +406,186 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 		"the entry we wrote is removed",
 	);
 	assert.deepEqual(removeBrowserMcpServer({}), {});
+}
+
+// --- --apply: merging the provider block into ~/.paseo/config.json -----------
+//
+// ~/.paseo/config.json belongs to the operator and the daemon writes it too, so
+// apply follows the same discipline as the two files above: back up, merge,
+// never overwrite something we did not write, and never rewrite a file we could
+// not parse.
+
+const ROLE_PROVIDERS = ["claude-lead", "claude-peer", "claude-supervisor"];
+
+function applySandbox(tag) {
+	const dir = mkdtempSync(join(tmpdir(), `paseo-claude-${tag}-`));
+	const configPath = join(dir, "paseo-config.json");
+	return {
+		dir,
+		configPath,
+		read: () => JSON.parse(readFileSync(configPath, "utf8")),
+		env: {
+			...process.env,
+			CLAUDE_CONFIG_DIR: join(dir, ".claude"),
+			PASEO_TEAM_CLAUDE_USER_CONFIG: join(dir, ".claude.json"),
+			PASEO_CONFIG_JSON: configPath,
+			PST_TEAM_CONFIG_DIR: dir,
+		},
+	};
+}
+
+// A fresh host: no config file at all, then idempotent on the second run.
+{
+	const s = applySandbox("apply-fresh");
+	const fresh = await applyProviders(s.env);
+	assert.equal(fresh.ok, true);
+	assert.equal(fresh.status, "created");
+	assert.deepEqual([...fresh.created].sort(), ROLE_PROVIDERS);
+
+	const written = s.read();
+	assert.equal(written.agents.providers["claude-peer"].env.CLAUDE_CODE_ENABLE_CFC, "1");
+	assert.equal(written.agents.providers["claude-lead"].env.CLAUDE_CODE_ENABLE_CFC, "1");
+	assert.equal(
+		written.agents.providers["claude-supervisor"].env.CLAUDE_CODE_ENABLE_CFC,
+		undefined,
+		"the Supervisor is not given a browser it is denied",
+	);
+
+	// The ledger is a file of OUR own, not the seat ledger — sharing one would
+	// make the next `seats apply` delete all three role providers.
+	const ledgerPath = claudeProviderLedgerPath(s.env);
+	assert.ok(existsSync(ledgerPath));
+	assert.ok(ledgerPath.endsWith("claude-provider-ledger.json"));
+	assert.ok(!ledgerPath.includes("seat"));
+
+	const again = await applyProviders(s.env);
+	assert.equal(again.status, "unchanged", "a second apply writes nothing");
+	assert.deepEqual([again.created, again.updated], [[], []]);
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// An unrelated config keeps everything it had; only agents.providers grows.
+{
+	const s = applySandbox("apply-merge");
+	writeFileSync(
+		s.configPath,
+		JSON.stringify({ version: 1, daemon: { mcp: { enabled: true } }, agents: { providers: { "pi-lead": { extends: "pi" } } } }, null, 2),
+		"utf8",
+	);
+	const result = await applyProviders(s.env);
+	assert.equal(result.status, "updated");
+	const after = s.read();
+	assert.equal(after.version, 1, "unrelated top-level keys survive");
+	assert.equal(after.daemon.mcp.enabled, true);
+	assert.deepEqual(after.agents.providers["pi-lead"], { extends: "pi" }, "another provider is untouched");
+	assert.ok(readdirSync(s.dir).some((n) => n.includes("paseo-config.json.bak-")), "backed up first");
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// A provider the operator hand-tuned is REPORTED, never clobbered — and --force
+// records their original so uninstall can put it back exactly.
+{
+	const s = applySandbox("apply-tuned");
+	const mine = { extends: "claude", label: "hand tuned by the operator", model: "sonnet" };
+	writeFileSync(s.configPath, JSON.stringify({ agents: { providers: { "claude-peer": mine } } }, null, 2), "utf8");
+
+	const refused = await applyProviders(s.env);
+	assert.deepEqual(refused.skipped, ["claude-peer"]);
+	assert.deepEqual(s.read().agents.providers["claude-peer"], mine, "not clobbered");
+	assert.ok(refused.created.includes("claude-lead"), "the others still apply");
+
+	const forced = await applyProviders(s.env, { force: true });
+	assert.ok(forced.updated.includes("claude-peer"), "--force adopts it");
+	assert.equal(s.read().agents.providers["claude-peer"].env.CLAUDE_CODE_ENABLE_CFC, "1");
+
+	// Uninstall symmetry: what we created is deleted, what we replaced is restored.
+	const backedOut = removeProviders(s.env);
+	assert.deepEqual(backedOut.restored, ["claude-peer"]);
+	assert.deepEqual([...backedOut.removed].sort(), ["claude-lead", "claude-supervisor"]);
+	assert.deepEqual(s.read().agents.providers["claude-peer"], mine, "their original, byte for byte");
+	assert.equal(existsSync(claudeProviderLedgerPath(s.env)), false, "the ledger goes with it");
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// A provider the operator DELETED on purpose is not resurrected without --force.
+{
+	const s = applySandbox("apply-deleted");
+	await applyProviders(s.env);
+	const config = s.read();
+	delete config.agents.providers["claude-lead"];
+	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
+
+	const rerun = await applyProviders(s.env);
+	assert.deepEqual(rerun.deletedByOperator, ["claude-lead"]);
+	assert.equal(s.read().agents.providers["claude-lead"], undefined, "a deliberate deletion stands");
+	// Still remembered as ours: forgetting it would make the NEXT run treat the
+	// name as unknown and create it, resurrecting it one run late.
+	const stillRerun = await applyProviders(s.env);
+	assert.deepEqual(stillRerun.deletedByOperator, ["claude-lead"]);
+
+	const forced = await applyProviders(s.env, { force: true });
+	assert.ok(forced.created.includes("claude-lead"), "--force re-creates it");
+	assert.ok("claude-lead" in s.read().agents.providers);
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// A provider we created but the operator has since edited is THEIRS: uninstall
+// leaves it alone, the same exact-match rule isOwnBrowserMcpServer follows.
+{
+	const s = applySandbox("apply-adopted");
+	await applyProviders(s.env);
+	const config = s.read();
+	config.agents.providers["claude-lead"].label = "renamed by the operator";
+	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
+
+	const backedOut = removeProviders(s.env);
+	assert.deepEqual(backedOut.kept, ["claude-lead"]);
+	assert.equal(
+		s.read().agents.providers["claude-lead"].label,
+		"renamed by the operator",
+		"an entry reshaped after we wrote it survives uninstall",
+	);
+	assert.deepEqual([...backedOut.removed].sort(), ["claude-peer", "claude-supervisor"]);
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// A present-but-unparseable config is reported and left byte-for-byte alone.
+{
+	const s = applySandbox("apply-corrupt");
+	writeFileSync(s.configPath, "{ not json", "utf8");
+	const result = await applyProviders(s.env);
+	assert.equal(result.ok, false);
+	assert.equal(result.status, "failed");
+	assert.match(result.error, /not a JSON object/);
+	assert.equal(readFileSync(s.configPath, "utf8"), "{ not json", "bytes untouched");
+	assert.equal(existsSync(claudeProviderLedgerPath(s.env)), false, "and nothing was claimed");
+
+	// Uninstall is held to the same rule.
+	writeFileSync(claudeProviderLedgerPath(s.env), JSON.stringify({ version: 1, providers: { "claude-lead": { mode: "created", wrote: {} } } }), "utf8");
+	const backedOut = removeProviders(s.env);
+	assert.equal(backedOut.ok, false);
+	assert.equal(readFileSync(s.configPath, "utf8"), "{ not json", "bytes untouched");
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// Never applied means never touched: uninstall does not create or edit a config.
+{
+	const s = applySandbox("apply-noledger");
+	const result = removeProviders(s.env);
+	assert.equal(result.ok, true);
+	assert.equal(result.status, "missing");
+	assert.equal(existsSync(s.configPath), false, "uninstall does not create the file it cleans");
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// The operator has to be TOLD the change is inert, not just handed a command.
+{
+	const text = applyNextSteps({ status: "updated" }).join("\n");
+	assert.match(text, /HAS NOT TAKEN EFFECT YET/);
+	assert.match(text, /already\s+running will NOT pick this up/);
+	assert.match(text, /reload/);
+	assert.ok(!/restart\b(?!.*would kill)/i.test(text) || /would kill every agent/.test(text));
+	assert.match(applyNextSteps({ status: "unchanged" }).join("\n"), /already applied/);
 }
 
 rmSync(home, { recursive: true, force: true });

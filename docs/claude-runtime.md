@@ -189,13 +189,30 @@ present. Manually:
 
 ```bash
 node scripts/claude-setup.mjs --install          # hooks + the paseo-team MCP server
-node scripts/claude-setup.mjs --print-providers  # the claude-* provider block
+node scripts/claude-setup.mjs --apply            # the claude-* providers -> ~/.paseo/config.json
 node scripts/claude-setup.mjs --verify           # exit 1 when incomplete
+node scripts/claude-setup.mjs --print-providers  # print the block instead, for a manual merge
 pteam claude-setup --verify --json               # same thing through the CLI
 ```
 
-Then merge the printed provider block into `~/.paseo/config.json` and reload the
-daemon:
+`--apply` merges the three `claude-*` providers into `~/.paseo/config.json`. It
+follows the same ownership rule as the two files above:
+
+- it backs the file up before writing, and writes atomically;
+- a config it cannot parse is reported and left byte-for-byte alone — it is
+  never treated as a fresh file and overwritten;
+- a provider **you** wrote is reported as skipped, never overwritten;
+- a provider we created and you then **deleted** stays deleted;
+- `--force` opts into both of those, and records what it replaced so
+  `--uninstall` can put your original back exactly.
+
+What it owns is tracked in `~/.paseo-pi-team/claude-provider-ledger.json` —
+deliberately a different file from the seat ledger, so that `pteam seats apply`
+and this command can never delete each other's providers.
+
+`--apply` does NOT reload the daemon, on purpose: there is no flag that makes it,
+because an installer that can reload is one an unattended script will eventually
+run against a host full of live agents. Reload yourself when you are ready:
 
 ```bash
 paseo daemon reload
@@ -210,6 +227,18 @@ Reloading does not re-configure the agents already running. Providers are read
 at SPAWN: a seat keeps whatever its provider said at the moment it was created,
 so existing seats keep the old settings and only newly created seats pick up the
 change. Nothing you do to this file reaches an agent that is already up.
+
+One known race, stated rather than hidden: `~/.paseo/config.json` has a second
+writer. The daemon persists config itself, and the app can edit providers while
+it runs. `--apply` writes atomically — a rename over the destination, so no
+reader ever sees a half-written file — but atomicity of the *write* is not
+atomicity of the read-modify-write *sequence*. There is no lock and no
+compare-and-swap in this path. `--apply` re-reads the file immediately before
+writing and refuses if it changed underneath, which turns a silently lost daemon
+write into a reported conflict you can re-run; it narrows the window to the
+moment between that final read and the rename, and does not close it. A lockfile
+would close it and buy a stale-lock failure mode on a daemon host, which is the
+worse trade.
 
 Both target files belong to the user and already carry other tools' entries
 (Paseo installs its own hooks in the same settings file), so every write

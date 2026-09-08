@@ -722,17 +722,24 @@ policy already allows `mcp` for Lead/Supervisor and blocks it for Peers.
 
 ### Paseo configuration
 
-The installers **do not merge** `~/.paseo/config.json` — do it by hand, so the
-change stays under your control:
+The installers **do not merge** `~/.paseo/config.json` on their own — applying it
+stays a separate, explicit step so the change is under your control:
 
 1. Merge `config/paseo.providers.example.json` into `~/.paseo/config.json`
    (`agents.providers.pi-*` and `claude-*` + `daemon.mcp.injectIntoAgents: true`
-   — required for agents to receive Paseo orchestration tools). Regenerate the
-   `claude-*` block from the code with
-   `pteam claude-setup --print-providers`, so the static tool policy in the
-   config can never drift from the policy the hook enforces.
-2. Restart the Paseo daemon (this kills every running agent — do it when
-   ready). Derived providers do NOT appear in `paseo provider ls` until then.
+   — required for agents to receive Paseo orchestration tools).
+   For the `claude-*` half, `pteam claude-setup --apply` does that merge for you,
+   generating the block from the code so the static tool policy in the config can
+   never drift from the policy the hook enforces. It backs the file up, refuses
+   to overwrite a provider you wrote, leaves an unparseable file alone, and does
+   not reload anything. `--print-providers` still prints the block if you would
+   rather merge it yourself. The `pi-*` providers are not generated — copy those
+   from the example file.
+2. Reload the Paseo daemon. A reload is enough: `agents.providers` is reloadable
+   and the registry is rebuilt live, so a full restart — which kills every
+   running agent — is not needed. Providers do NOT appear in
+   `paseo provider ls` until then, and because a seat reads its provider at
+   spawn, only agents created *after* the reload pick the change up.
 3. Run `/reload` in pi to load the new extension.
 
 With no `PASEO_PI_ROLE`, both adapters are passive: they inject nothing and

@@ -199,6 +199,61 @@ for (const id of ["9lives", "-lead", "a", "UPPER", "with.dot", "with/slash"]) {
 	assert.deepEqual(Object.keys(fresh.config.agents.providers).sort(), ["claude-peer-researcher", "pi-lead-audit"]);
 }
 
+// --- the claude-* role providers are NOT owned by the SEAT ledger -------------
+//
+// Regression, and the reason `claude-setup --apply` keeps a ledger file of its
+// own. This function deletes any name the ledger claims that `generated` no
+// longer contains (see the loop below the merge). The seats document never
+// describes claude-lead / claude-peer / claude-supervisor, so if apply recorded
+// them in the SEAT ledger, the next unrelated `pteam seats apply` would compute
+// a `generated` without them, find them in the ledger, and delete all three —
+// silently taking every Claude role provider off the host.
+//
+// Two ledgers, two ownership tokens: neither command can reach the other's
+// providers. This test is what stops a future refactor merging them back.
+{
+	const roleProviders = {
+		"claude-supervisor": { extends: "claude", label: "Claude Governance Supervisor" },
+		"claude-lead": { extends: "claude", label: "Claude Project Lead" },
+		"claude-peer": { extends: "claude", label: "Claude Peer" },
+	};
+	const config = {
+		agents: {
+			providers: {
+				...roleProviders,
+				"pi-lead-audit": { extends: "pi", label: "a real seat" },
+			},
+		},
+	};
+
+	// A seats apply that no longer defines any seat. Its ledger owns ONLY its own
+	// generated provider — the role providers are not in it.
+	const result = applySeatsToPaseoConfig(config, {}, ["pi-lead-audit"]);
+
+	assert.deepEqual(result.removed, ["pi-lead-audit"], "the seat it owns is removed");
+	for (const [name, entry] of Object.entries(roleProviders)) {
+		assert.deepEqual(
+			result.config.agents.providers[name],
+			entry,
+			`${name} survives a seats apply that never generated it`,
+		);
+	}
+
+	// The hazard itself, pinned so it cannot be re-introduced quietly: had apply
+	// recorded the role providers in the SEAT ledger, this very same call would
+	// have deleted all three. This assertion is what a future "let's just use one
+	// ledger" refactor has to walk past.
+	const shared = applySeatsToPaseoConfig(config, {}, [
+		"pi-lead-audit",
+		...Object.keys(roleProviders),
+	]);
+	assert.deepEqual(
+		[...shared.removed].sort(),
+		["claude-lead", "claude-peer", "claude-supervisor", "pi-lead-audit"],
+		"one shared ledger would take every role provider with it",
+	);
+}
+
 // --- the reason the parser had to be relaxed --------------------------------
 // A seat on the supervisor base carries full Supervisor authority. The gate
 // that governs a Lead seating one asks parseRoleProvider what role a provider
