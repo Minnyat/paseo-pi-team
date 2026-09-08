@@ -249,6 +249,30 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 	assert.ok(providers["claude-supervisor"].disallowedTools.includes("Bash"));
 	assert.ok(!providers["claude-peer"].disallowedTools.includes("Write"));
 
+	// Claude in Chrome. A Paseo seat is non-interactive, and Claude Code's
+	// enablement order disables the integration on a non-interactive session
+	// BEFORE it reads claudeInChromeDefaultEnabled from ~/.claude.json — so the
+	// host config can never switch it on for a seat. CLAUDE_CODE_ENABLE_CFC is
+	// evaluated above that gate and is the only lever a seat can pull.
+	//
+	// The literal string is deliberate: this name is a contract with Claude Code,
+	// not an internal symbol. Importing the constant would keep passing if it were
+	// renamed to something Claude Code does not read.
+	for (const role of ["lead", "peer"]) {
+		assert.equal(
+			providers[`claude-${role}`].env.CLAUDE_CODE_ENABLE_CFC,
+			"1",
+			`claude-${role} carries the Claude-in-Chrome lever`,
+		);
+	}
+	// The Supervisor is denied every browser surface by its own disallowedTools;
+	// the key must be ABSENT, not "0" — a seat advertising tools its policy
+	// rejects on every call is a contradiction, not a safe default.
+	assert.ok(
+		!("CLAUDE_CODE_ENABLE_CFC" in providers["claude-supervisor"].env),
+		"claude-supervisor has no Claude-in-Chrome key at all",
+	);
+
 	// The checked-in example config must match what the code generates, or an
 	// operator who copies it gets a policy the code does not enforce.
 	const example = JSON.parse(

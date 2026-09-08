@@ -194,9 +194,22 @@ node scripts/claude-setup.mjs --verify           # exit 1 when incomplete
 pteam claude-setup --verify --json               # same thing through the CLI
 ```
 
-Then merge the printed provider block into `~/.paseo/config.json` and restart
-the daemon (`paseo daemon restart` — this kills running agents, so pick the
-moment). Providers only appear in `paseo provider ls` after that restart.
+Then merge the printed provider block into `~/.paseo/config.json` and reload the
+daemon:
+
+```bash
+paseo daemon reload
+```
+
+A reload is enough — a restart is not required, and restarting kills every
+running agent on the host. `agents.providers` is one of the server's
+`RELOADABLE_PATHS`, so the provider registry is rebuilt live and the providers
+then appear in `paseo provider ls`.
+
+Reloading does not re-configure the agents already running. Providers are read
+at SPAWN: a seat keeps whatever its provider said at the moment it was created,
+so existing seats keep the old settings and only newly created seats pick up the
+change. Nothing you do to this file reaches an agent that is already up.
 
 Both target files belong to the user and already carry other tools' entries
 (Paseo installs its own hooks in the same settings file), so every write
@@ -215,6 +228,41 @@ is nothing left for this installer to register. What it does instead is
 REMOVE an `agent-browser` entry a previous version of itself wrote, and leave
 alone one the user configured, which is the same ownership rule the merge
 always followed — dropping our integration is not a licence to delete theirs.
+
+### Why Claude in Chrome needs an env var on a seat
+
+`mcp__claude-in-chrome__*` is off in a Paseo seat unless the provider sets
+`CLAUDE_CODE_ENABLE_CFC=1`, which is why the `claude-lead` and `claude-peer`
+blocks carry it.
+
+Claude Code decides the integration by walking a fixed list of tests and taking
+the first that matches. Two of them are levers you can pull — `--chrome` and
+`CLAUDE_CODE_ENABLE_CFC` — and both sit ABOVE this one:
+
+> the session is NOT interactive → **off**
+
+Below that sits the test that reads `claudeInChromeDefaultEnabled` from
+`~/.claude.json`. That ordering is the whole problem. A human's terminal is
+interactive, falls through the gate, reaches the config, and gets the browser.
+**A Paseo seat is non-interactive by construction**: it dies at the gate and
+never consults the config at all. Setting `claudeInChromeDefaultEnabled` on the
+host is therefore not a fix — no seat ever reads it.
+
+`CLAUDE_CODE_ENABLE_CFC` is evaluated above the gate, so it is the one lever a
+non-interactive seat can actually pull. The other one, `--chrome`, would mean
+overriding the provider's `command` array, which discards the absolute binary
+path Paseo already resolved and re-exposes the spawn to a `PATH` lookup — so the
+environment variable is the supported route.
+
+The Supervisor deliberately does NOT get it: its tool policy denies every
+browser surface (see the table above), and a seat that advertises tools its own
+`disallowedTools` rejects on every call is a contradiction.
+
+The enablement order and the fact that the string `"1"` coerces to true were
+read from and measured against **Claude Code 2.1.263**. That is a fact about a
+version, not a promised contract: if a later version reorders the tests or stops
+coercing the string, seats lose Chrome silently, and this paragraph is the place
+to start looking.
 
 ## Mixed-fleet routing
 

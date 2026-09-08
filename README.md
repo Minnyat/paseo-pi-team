@@ -646,8 +646,22 @@ profile.
 
 | Browser | Tool names | Available on |
 |---|---|---|
-| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes |
-| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected |
+| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes — no extension, no flag |
+| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected **and** the provider sets `CLAUDE_CODE_ENABLE_CFC=1` |
+
+Browser Control is the one that needs nothing: the daemon injects it, so it is
+there on every seat of either runtime without an extension to install or a flag
+to set.
+
+Claude in Chrome needs the environment variable, and the `claude-lead` and
+`claude-peer` provider blocks this pack generates set it. Without it a Paseo seat
+gets **no** `mcp__claude-in-chrome__*` tools at all, no matter what
+`~/.claude.json` says: a seat is non-interactive, and Claude Code's enablement
+order turns the integration off for a non-interactive session *before* it ever
+reads that config file. `CLAUDE_CODE_ENABLE_CFC` is checked above that gate,
+which is what makes it work. The Supervisor is excluded on purpose — its policy
+denies it the browser. See
+[Why Claude in Chrome needs an env var on a seat](docs/claude-runtime.md#why-claude-in-chrome-needs-an-env-var-on-a-seat).
 
 Paseo registers Browser Control on its own `/mcp/agents` server — the same one
 that carries `create_agent` — gated on `daemon.browserTools.enabled` plus a

@@ -317,6 +317,32 @@ export async function loadClaudePolicy(env = process.env) {
 	);
 }
 
+/**
+ * Claude in Chrome is off in a Paseo seat unless this variable turns it on.
+ *
+ * Claude Code decides the integration in a fixed order, and the seventh test is
+ * `session is NOT interactive -> OFF`. A human's terminal falls through it and
+ * reaches the eighth, which reads `claudeInChromeDefaultEnabled` from
+ * ~/.claude.json. A Paseo seat is non-interactive by construction, so it dies at
+ * the seventh and NEVER consults that config — setting the config on the host
+ * does nothing for any seat.
+ *
+ * CLAUDE_CODE_ENABLE_CFC is evaluated FIFTH, above the non-interactive gate, so
+ * it is the only documented lever a non-interactive seat can pull. The
+ * alternative lever (`--chrome`, evaluated third) would mean overriding the
+ * provider's `command` array, which discards the absolute binary path Paseo
+ * already resolved and re-exposes the spawn to a PATH lookup.
+ */
+export const CLAUDE_IN_CHROME_ENV = "CLAUDE_CODE_ENABLE_CFC";
+
+/**
+ * Roles that get the browser. The Supervisor is excluded on purpose: the tool
+ * policy denies it every browser surface (see the table in
+ * docs/claude-runtime.md), so handing it the variable would contradict its own
+ * disallowedTools — a seat advertising tools its policy rejects on every call.
+ */
+export const CLAUDE_IN_CHROME_ROLES = new Set(["lead", "peer"]);
+
 export async function buildProviderSnippet(env = process.env) {
 	const claudePolicy = await loadClaudePolicy(env);
 	const labels = {
@@ -329,7 +355,10 @@ export async function buildProviderSnippet(env = process.env) {
 		providers[`claude-${role}`] = {
 			extends: "claude",
 			label: labels[role],
-			env: { PASEO_PI_ROLE: role },
+			env: {
+				PASEO_PI_ROLE: role,
+				...(CLAUDE_IN_CHROME_ROLES.has(role) ? { [CLAUDE_IN_CHROME_ENV]: "1" } : {}),
+			},
 			disallowedTools: claudePolicy.claudeDisallowedTools(role),
 		};
 	}
