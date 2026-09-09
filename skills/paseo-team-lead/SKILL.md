@@ -99,7 +99,7 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    you forget to release blocks other Leads until it expires.
 
    Read-only dispositions (repository-scout, documentation-researcher,
-   solution-architect, independent-reviewer) take no lease: they share the tree
+   solution-architect, acceptance-verifier, independent-reviewer) take no lease: they share the tree
    by design, and gating them would turn the lease into a bottleneck rather
    than a safety rule.
 
@@ -154,10 +154,27 @@ This is the exact failure mode the cluster config exists to prevent.
 3. Call `list_models` for that role provider.
 4. Verify the exact model ID exists (check BOTH segments are non-empty in
    `<pi-provider>/<model-id>`) → else `BLOCKED: MODEL_UNAVAILABLE`.
-5. Verify the configured thinking level is in the model's thinking options →
-   else `BLOCKED: THINKING_OPTION_UNAVAILABLE`. If the model exposes NO
-   option list, thinking is UNVERIFIABLE — refuse the route
-   (strict policy: unverifiable is not a pass).
+5. Verify the configured thinking level, and read the model's answer as THREE
+   states, not two — "we do not know" and "we know it has none" are different
+   facts and only the first one is unverifiable:
+   - the model publishes options and yours is among them → pass;
+   - the model publishes options and yours is NOT among them →
+     `BLOCKED: THINKING_OPTION_UNAVAILABLE`;
+   - the model says it has no extended thinking — `thinkingSupported: false`,
+     or (the same statement written as data) an option list that is present
+     and EMPTY, which is exactly how `claude-peer/claude-haiku-4-5` reports
+     itself → route it at `thinking: off` and nothing else. That is a verified
+     pass, not a tolerated one. Any other level is
+     `BLOCKED: THINKING_OPTION_UNAVAILABLE`.
+   - the model says NOTHING about thinking → genuinely UNVERIFIABLE. Refuse
+     the route (strict policy: unverifiable is not a pass) — UNLESS you asked
+     for `thinking: off`, which an empty inventory satisfies in every case an
+     inventory could have.
+   Reading the third case as the fourth is what took the cheapest seat on the
+   host out of service for work that never needed thinking. `resolveRoute` in
+   `scripts/model-routing.mjs` implements exactly this and reports which case
+   it hit in `thinkingValidated` (`exact` | `off` | `unsupported` |
+   `unverifiable`).
 6. Verify against `~/.pi/agent/models.json` `thinkingLevelMap` on the target
    host: a level mapped to `null` is silently clamped by pi → pick another
    level/model instead of accepting the clamp.
@@ -238,8 +255,10 @@ local one. In the commands below, `<id>` is the HOST_ID from
    ⚠️ `list_models` via MCP would return the LOCAL inventory — only the
    wrapper's answer counts for a remote host.
 5. Verify the exact model ID + thinking level against the REMOTE list (same
-   `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules;
-   unverifiable is not a pass).
+   `BLOCKED: MODEL_UNAVAILABLE` / `THINKING_OPTION_UNAVAILABLE` rules, and the
+   same three-state reading of thinking as local step 5: unverifiable is not a
+   pass, but a model that reports no extended thinking is routable at
+   `thinking: off`).
 6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
    ID has no meaning on the Mac. Note the asymmetry with the local cycle: remote
    `run` REQUIRES `--workspace` for every disposition, because a remote agent
@@ -365,7 +384,7 @@ Model classes (decided by task risk + disposition, not by role name):
 | MODEL_CLASS | Use for |
 |---|---|
 | MONITOR_ECONOMY | supervisor heartbeat, structured observation |
-| FAST_READ | scout, researcher, inventory, factual summary |
+| FAST_READ | scout, researcher, inventory, factual summary, acceptance-verifier, the mechanical pass of a review |
 | CODING_MEDIUM | bounded implementation, clear-ownership bugfix, tests |
 | REASONING_HIGH | architect, lifecycle/ownership/concurrency, migration, security design |
 | REVIEW_HIGH | independent reviewer, proof auditor, exact-SHA acceptance |
@@ -397,6 +416,28 @@ ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime ide
 Use `team_watchdog` for a bounded observation pass over running agents. It uses bounded concurrency (default 6), a global deadline (default 30 seconds), and partial results when the deadline expires. It retries only transient Paseo transport errors. Only a successful inspect with old `UpdatedAt` returns `stale` as a suspicion; inspect failure is `unknown`, not stale and never an automatic recovery signal.
 
 For every stale result, confirm with `get_agent_status`, `get_agent_activity`, pending permissions, daemon/host health and workspace/Git state. A long-running build/test/cmd is valid when the Peer or brief marked it expected; do not cancel or replace it based on timestamp alone.
+
+⚠️ `get_agent_activity`'s `limit` bounds how many entries come back and says
+NOTHING about how big one is. One entry can be a Peer's whole
+`PEER_MESSAGE_V1` report, so `limit: 3` routinely returns hundreds of
+kilobytes — usually the same text that is already sitting in a file the report
+names. Two habits keep this affordable:
+
+- read activity through `node <PASEO_TEAM_SCRIPTS_DIR>/../cli/paseo-team.mjs activity <ref> --tail <n> --max-chars <n>`
+  (`pteam activity` once installed) when you need more than a glance. It caps
+  each entry INDEPENDENTLY, reports the original size and what it withheld, and
+  never truncates a short entry to protect you from a long one;
+- require Peers to point at artifacts rather than resend them (see "Peer output
+  contract"). A report that inlines a document already on disk stores it twice
+  and charges you twice to read it.
+
+Cost for the whole cluster in one call:
+`node <PASEO_TEAM_SCRIPTS_DIR>/../cli/paseo-team.mjs cost --cluster <your cluster>`
+(`pteam cost`). `list_agents` carries no cost column and `get_agent_status`
+carries one per agent, so without it a fifteen-Peer project means fifteen
+sequential calls and manual arithmetic. It reports per agent, sorted most
+expensive first, plus the total — and names any seat Paseo reports no usage
+for, instead of counting it as zero.
 
 Do not repeatedly interrupt a healthy worker.
 
@@ -618,11 +659,57 @@ After implementation:
    Any direct OCR diagnostic must use the exact same repo/base/authority-candidate
    values. OCR is the deterministic selection/rule harness, not a Paseo peer,
    provider, writer, or LLM review path.
+
+   **Do the mechanical half mechanically.** An independent review contains two
+   kinds of work, and only one of them needs a REVIEW_HIGH model. Resolving
+   cross-references, counting markdown table columns, checking that a figure
+   repeated across files is the same figure, confirming a required header
+   exists — that is matching, and a regex, a script, or a `FAST_READ` Peer
+   does it exactly as well for a fraction of the price and without spending
+   the reviewer's context on text it will not reason about. Reserve the
+   expensive seat for what is actually judgement: contradictions nobody
+   flagged, an argument that does not hold, a risk the diff creates.
+
+   So structure the review in two passes:
+   - **Pass A (mechanical, cheap).** A script, or a `FAST_READ` Peer whose
+     brief is a checklist, produces a RAW FINDINGS LIST: file, line, what was
+     compared, matched/mismatched. It states facts and takes no view.
+   - **Pass B (judgement, `REVIEW_HIGH`).** The independent reviewer reads
+     Pass A's list plus the cited excerpts — NOT every source file again — and
+     decides what each finding means. Its verdict must say which findings came
+     from Pass A and which it found itself.
+
+   Pass A never carries the verdict: it has no acceptance authority and cannot
+   tell a benign mismatch from a real one. Splitting the work does not split
+   the independence — Pass B still runs in the fresh exact-SHA worktree and
+   still reaches its own conclusion. What it stops doing is re-reading two
+   thousand cross-references by hand on the most expensive model in the
+   cluster.
 5. Require every OCR `reviewable_files` item to end as `reviewed` or
    `skipped:<concrete reason>`, with total/reviewed/skipped/coverage evidence.
    Require structured findings and a recommendation of only `PASS`,
    `CHANGES_REQUIRED`, or `BLOCKED`; the Reviewer has no acceptance authority.
-6. Lead decides candidate acceptance. If changes are required, return findings
+6. Lead decides candidate acceptance — and DECIDING is not the same as
+   CHECKING. Acceptance has a mechanical half too: does the document carry the
+   headers the brief asked for, does its content follow the instructions, do
+   the numbers agree with the sources it cites, does it contradict a sibling
+   deliverable. That is comparison, not new reasoning, and doing it by reading
+   the artifact directly puts the whole artifact into the most expensive
+   context in the cluster, once per acceptance. Over fifteen deliverables the
+   Lead's context fills up with text it only ever needed to match.
+
+   Standard acceptance shape, and the default unless the deliverable is small
+   enough that reading it IS the check:
+   - (a) a cheap Peer (`DISPOSITION: acceptance-verifier`, `MODE: read-only`,
+     `MODEL_CLASS: FAST_READ`) reads the artifact against an explicit
+     checklist and returns `PASS` / `FAIL` per item with a SHORT quoted
+     excerpt as evidence — never the document back;
+   - (b) you read only that verdict and decide accept / correct / merge.
+
+   A `FAIL` you doubt is a reason to look at that one item yourself, which is
+   cheap. `acceptance-verifier` has no acceptance authority: it reports
+   whether the artifact matches the brief, and you decide what that means.
+   If changes are required, return findings
    to the original Engineer (as a full V3 brief so write authority is re-granted).
    The Engineer creates a **new** commit SHA without amend/force-push, and the
    new candidate is reviewed again from a fresh clean workspace.
@@ -789,7 +876,11 @@ a cross-host reviewer until an integration owner has created a commit.
 Cross-host review requires granting both `COMMIT` and `PUSH_TASK_BRANCH`.
 
 Dispositions: `repository-scout`, `documentation-researcher`,
-`solution-architect`, `engineer`, `independent-reviewer`.
+`solution-architect`, `engineer`, `acceptance-verifier`, `independent-reviewer`.
+
+`acceptance-verifier` is the cheap read-only seat that does the mechanical half
+of accepting a deliverable, so your own context is not spent on comparison —
+see step 6 of Review, and `templates/TASK_BRIEF_V3.md` for the standard body.
 
 A brief must not smuggle in a verdict. Give the Peer the objective,
 constraints and evidence — not the answer. Peer has the right to
@@ -831,3 +922,11 @@ the brief — the peer must never change its model itself),
 `AUTHORITY_MISMATCH`, `SCOPE_CONFLICT`.
 
 Treat claims without file/command/test evidence as opinions, not evidence.
+
+Require the report to POINT AT its artifacts, not to contain them. A Peer whose
+deliverable is a file reports the path plus the lines that carry the finding;
+it does not paste the document back. The message is stored verbatim in the
+Peer's activity log, so an inlined document exists twice and costs you twice —
+once when you read the report, again whenever you read the activity log. This
+is the single biggest driver of a Lead's context filling up over a long
+project. Keep a report to roughly a screen and let the file be the file.

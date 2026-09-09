@@ -874,16 +874,32 @@ node scripts/preflight.mjs --json     # machine-readable, exit 1 when any check 
 node scripts/preflight.mjs --strict --host-id <host-id>
                                       # cross-host gate: missing cluster config,
                                       # missing required remote endpoint env, or
-                                      # unverifiable thinking → FAIL (never warn-as-pass)
+                                      # unverifiable thinking → FAIL (never warn-as-pass).
+                                      # "Unverifiable" means the daemon said
+                                      # NOTHING about thinking. A model that
+                                      # reports it has none (thinkingSupported:
+                                      # false, or an empty option list — how
+                                      # claude-haiku-4-5 reports itself) is a
+                                      # verified fact, and routes fine at
+                                      # thinking: off. See docs/model-routing.md.
 ```
 
 Checks: node/git/paseo + version pins, the daemon, the adapter (pin), the
 extension, the shared policy modules, role prompts, the role providers of every
-runtime in scope, routing config (single-host + cluster contract), each route
-against the real inventory, provider status, empty model segments, pi's
-per-model `thinkingLevelMap` (a `null` level means the level gets clamped),
-endpoint env vars, and repository state (a writer host must be clean in strict
-mode). No secret is ever printed.
+runtime in scope, **each healthy provider's model inventory**, routing config
+(single-host + cluster contract), each route against the real inventory,
+provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
+`null` level means the level gets clamped), endpoint env vars, and repository
+state (a writer host must be clean in strict mode). No secret is ever printed.
+
+**A provider reporting `available` is not a promise that anything is routable
+through it.** `available` describes the provider; the model inventory is a
+separate question, and `list_models` can come back EMPTY on a provider that
+passes every health check — observed on `pi-peer`. That is the same shape of
+trap as a permission that looks granted while the daemon never registered the
+tool. Preflight now calls `list_models` for every healthy role provider and
+warns (fails under `--strict`) when the answer is empty, so always check the
+inventory before routing to a provider — never the status alone.
 
 `--runtime pi|claude|both` selects which families the host is expected to
 serve; with no flag it detects them from the installed CLIs, so a Claude-only
@@ -934,6 +950,9 @@ README.
 node cli/paseo-team.mjs --help          # or `npm link` once, then `pteam`
 pteam status                            # paths + presence, machine readable
 pteam graph                             # agents, spawn tree, pending permits
+pteam cost --cluster <id>               # per-agent + summed cost for one cluster
+pteam activity <ref> --tail 5 --max-chars 2000
+                                        # one agent's activity, capped PER ENTRY
 pteam permits list
 pteam seats list                        # custom seats + the providers they generate
 pteam seats apply                       # write those providers into ~/.paseo/config.json
@@ -960,6 +979,28 @@ Two different things are called "permission", and the UI keeps them apart:
   and a seat grants only capabilities from a catalog that lives in code. There
   is still no way to type a tool name into the browser and have it granted, and
   no "grant everything" button.
+
+Two of those commands exist because Paseo's own monitoring surface answers the
+wrong shape of question for a fifteen-Peer project:
+
+- **`pteam cost`** — `list_agents` has no cost field and `get_agent_status`
+  has one per agent, so the only way to total a project's spend was to call
+  inspect once per seat and add the numbers by hand. `pteam cost --cluster <id>`
+  does it in one command, sorted most expensive first. The cluster is the unit
+  because it is already the pack's authority boundary. A seat Paseo reports no
+  usage for is named in `unavailable`, never counted as zero — a total that
+  silently omits a seat is worse than one that admits the gap. The numbers come
+  from `paseo inspect → LastUsage` and are reported under that name rather than
+  relabelled, because the daemon's own framing is the only thing the pack can
+  vouch for.
+- **`pteam activity`** — `get_agent_activity`'s `limit` bounds how many entries
+  come back and says nothing about how big one is. One entry can be a Peer's
+  whole `PEER_MESSAGE_V1` report, so `limit: 3` routinely returns hundreds of
+  kilobytes of text that is usually already in a file on disk. `--max-chars`
+  caps each entry INDEPENDENTLY, reports the original size and what it withheld,
+  and leaves short entries whole. The other half of that fix is a convention,
+  not a flag: a Peer's report points at its artifact instead of resending it
+  (`prompts/peer.md`, and the Peer output contract in the Lead skill).
 
 Cost note, because it shapes the whole design: every `paseo` invocation costs
 ~3s of process startup on Windows regardless of the query. `paseo-team graph`
