@@ -399,6 +399,7 @@ const DOC_ENV = [
 	{ key: "PASEO_TEAM_TOPOLOGY", scope: "per-agent", where: "paseo run --env / provider env", purpose: "single (default) | multi — 'multi' turns on the several-Supervisor governance rules: DOMAIN on supervisor blocks, recovery_for inside the supervisor's own domain, and the send_agent_prompt ownership wall. Any unrecognized value resolves to 'multi' (the side that only denies)" },
 	{ key: "PASEO_TEAM_DOMAIN", scope: "per-agent", where: "paseo run --env / provider env", purpose: "jurisdiction of this seat; also set it as the team.domain label so `ls --label` can find it. Required on every Lead and Supervisor under PASEO_TEAM_TOPOLOGY=multi" },
 	{ key: "PASEO_HOME", scope: "host", where: "machine env", purpose: "Paseo's own home; the CLI reads agent state from $PASEO_HOME/agents (defaults to ~/.paseo)" },
+	{ key: "PASEO_TEAM_NODE_EXEC", scope: "install-time", where: "env of the `pteam install` / `claude-setup --install` run", purpose: "absolute node to write into the Claude hook + MCP registrations. Default: the most durable version-alias of the running interpreter that still satisfies engines (>=22.18), else the running one. Set this when you know your layout better than that heuristic — e.g. a version manager whose aliases move. `claude-setup --verify` re-checks whichever path was written" },
 ];
 
 function cmdEnvList() {

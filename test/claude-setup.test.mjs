@@ -22,6 +22,9 @@ import {
 	hookScriptPath,
 	install,
 	installedHookScripts,
+	installedHookCommands,
+	durableNodeCandidates,
+	nodeExecPath,
 	mergeHooks,
 	mergeMcpServer,
 	normalizePath,
@@ -241,7 +244,84 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 	assert.equal(stale.ok, false, "a hook pointing at a missing script is not ok");
 	assert.ok(stale.missing.some((item) => item.includes("/nowhere/claude-hook.mjs")));
 	assert.ok(stale.hookScripts.includes("/nowhere/claude-hook.mjs"));
+
+	// The INTERPRETER is checked too, and this is the case that used to be both
+	// the worst and the quietest. The registered command names an absolute node
+	// path; a version manager retiring that path leaves three hooks that cannot
+	// start, and a hook that cannot start DENIES — every tool call, on every
+	// Claude seat, with nothing naming the cause. verify used to report ok.
+	const fresh = JSON.parse(readFileSync(settingsFile, "utf8"));
+	for (const event of Object.keys(HOOK_EVENTS)) {
+		for (const entry of fresh.hooks[event] ?? []) {
+			if (!entry[PASEO_TEAM_HOOK_TAG]) continue;
+			entry.hooks[0].command = entry.hooks[0].command.replace(
+				/^"[^"]+"/,
+				'"/gone/node/22.23.2/bin/node"',
+			);
+		}
+	}
+	writeFileSync(settingsFile, JSON.stringify(fresh, null, 2), "utf8");
+	const deadNode = await verify(staleEnv);
+	assert.equal(deadNode.ok, false, "a hook whose interpreter is gone is not ok");
+	assert.ok(
+		deadNode.missing.includes("interpreter:/gone/node/22.23.2/bin/node"),
+		"the missing entry names the interpreter, not just 'something is wrong'",
+	);
+	assert.ok(deadNode.missingInterpreters.includes("/gone/node/22.23.2/bin/node"));
+	// Both halves of the command are recovered from the settings file.
+	const commands = installedHookCommands(fresh);
+	assert.deepEqual(commands.interpreters, ["/gone/node/22.23.2/bin/node"]);
+	// Both the healthy script and the one the previous block re-pointed: all
+	// three events are read, so a partially broken install cannot hide behind
+	// the two that are still fine.
+	assert.deepEqual(commands.scripts.sort(), [
+		"/nowhere/claude-hook.mjs",
+		hookScriptPath(staleEnv),
+	].sort());
+	assert.deepEqual(installedHookCommands({}), { interpreters: [], scripts: [] });
+
 	rmSync(staleDir, { recursive: true, force: true });
+}
+
+// --- the interpreter written into a hook must outlive a node upgrade ----------
+// `process.execPath` under a version manager is an exact patch directory
+// (installing from a mise shell wrote `.../installs/node/22.23.2/bin/node`),
+// and the next `mise upgrade node` deletes it. Prefer the alias that survives.
+{
+	// Only the version SEGMENT is rewritten, and only to a prefix of itself, so
+	// the major version — and with it the `engines` floor — is never traded away.
+	assert.deepEqual(
+		durableNodeCandidates("/home/u/.local/share/mise/installs/node/22.23.2/bin/node"),
+		[
+			"/home/u/.local/share/mise/installs/node/22/bin/node",
+			"/home/u/.local/share/mise/installs/node/22.23/bin/node",
+		],
+		"most durable first",
+	);
+	// The `v` prefix nvm/fnm use is preserved, or the candidate would not exist.
+	assert.deepEqual(
+		durableNodeCandidates("/home/u/.nvm/versions/node/v22.23.2/bin/node"),
+		[
+			"/home/u/.nvm/versions/node/v22/bin/node",
+			"/home/u/.nvm/versions/node/v22.23/bin/node",
+		],
+	);
+	// Nothing version-shaped (a distro or Windows install) → nothing to prefer.
+	assert.deepEqual(durableNodeCandidates("/usr/bin/node"), []);
+	assert.deepEqual(durableNodeCandidates("C:/Program Files/nodejs/node.exe"), []);
+	// A bare major is already as durable as it gets: rewriting it to nothing
+	// would produce a path with an empty segment.
+	assert.deepEqual(durableNodeCandidates("/opt/node/22/bin/node"), []);
+
+	// An operator who knows their layout beats the heuristic outright.
+	assert.equal(
+		nodeExecPath({ PASEO_TEAM_NODE_EXEC: "/opt/pinned/node" }),
+		"/opt/pinned/node",
+	);
+	// With no candidate on disk, the running interpreter stands — the old
+	// behaviour, which was never wrong so much as unnecessarily fragile.
+	assert.equal(nodeExecPath({}), normalizePath(nodeExecPath({})));
+	assert.ok(existsSync(nodeExecPath({})), "whatever is chosen must actually exist");
 }
 
 // --- provider snippet ---------------------------------------------------------

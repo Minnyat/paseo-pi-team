@@ -892,6 +892,24 @@ provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
 `null` level means the level gets clamped), endpoint env vars, and repository
 state (a writer host must be clean in strict mode). No secret is ever printed.
 
+The Claude half registers an ABSOLUTE node path in `~/.claude/settings.json`
+(hooks) and `~/.claude.json` (MCP), because a hook may run without the user's
+`PATH`. That path is chosen at install time and is the one thing the installer
+references rather than writes, so it is also the one thing that can rot: under
+a version manager, `process.execPath` is an exact patch directory
+(`.../installs/node/22.23.2/bin/node`) and the next `mise upgrade node` deletes
+it. The pack is fail-closed — a hook that cannot start DENIES — so a retired
+node version would take every Claude seat on the host offline with no message
+naming the cause.
+
+Two things keep that from being silent. `--install` prefers the most durable
+version-alias of the running interpreter that still satisfies `engines`
+(`.../installs/node/22/bin/node`), never trading the major version away, and
+`PASEO_TEAM_NODE_EXEC` overrides the choice outright. And `--verify` checks the
+registered interpreter, not just the script — so `pteam preflight` reports
+`missing interpreter:<path>` with the fix, instead of the host quietly denying
+everything.
+
 **A provider reporting `available` is not a promise that anything is routable
 through it.** `available` describes the provider; the model inventory is a
 separate question, and `list_models` can come back EMPTY on a provider that
