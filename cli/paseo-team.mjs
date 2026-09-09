@@ -10,7 +10,7 @@
  *
  *   paseo-team status                  -> machine-readable snapshot of paths + presence
  *   paseo-team preflight    [--strict|--json|--skip-models|--runtime pi|claude|both|--host-id <id>|--cluster <p>|--routes <p>]
- *   paseo-team claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
+ *   paseo-team claude-setup [--install|--apply|--verify|--uninstall|--print-providers] [--json] [--force]
  *   paseo-team config read  <section>  -> full JSON of that section (stdout)
  *   paseo-team config write <section>  -> full JSON of that section from stdin, atomic+backup
  *   paseo-team prompts read <role>     -> markdown body (JSON-wrapped)
@@ -428,8 +428,8 @@ function cmdInstall(argv) {
 // ---------------------------------------------------------------------------
 
 function cmdClaudeSetup(argv) {
-	const known = ["--install", "--verify", "--uninstall", "--print-providers"];
-	const passthrough = ["--json"];
+	const known = ["--install", "--apply", "--verify", "--uninstall", "--print-providers"];
+	const passthrough = ["--json", "--force"];
 	// No valued flags any more: --attach-cdp-port went with the agent-browser
 	// integration. Kept as an empty list because the loop below distinguishes
 	// flag-with-value from bare flag, and collapsing that is how the next valued
@@ -459,6 +459,11 @@ function cmdClaudeSetup(argv) {
 	const modes = bareFlags.filter((arg) => known.includes(arg));
 	if (modes.length > 1) fail(`claude-setup: pick one of ${known.join(", ")}`);
 	const mode = modes[0] ?? "--verify";
+	// --force overwrites a provider the operator owns, so it must never be a
+	// no-op flag someone leaves on a command that cannot use it.
+	if (bareFlags.includes("--force") && mode !== "--apply") {
+		fail("claude-setup: --force is only valid with --apply");
+	}
 	if (valuedArgs.length > 0 && mode !== "--install") {
 		fail(`claude-setup: ${valuedArgs[0]} is only valid with --install`);
 	}
@@ -875,7 +880,8 @@ function helpText() {
 usage:
   pteam status
   pteam preflight [--strict] [--json] [--skip-models] [--runtime pi|claude|both] [--host-id <id>] [--cluster <path>] [--routes <path>]
-  pteam claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
+  pteam claude-setup [--install|--apply|--verify|--uninstall|--print-providers] [--json] [--force]
+                                           (--apply writes the claude-* providers; it does NOT reload)
   pteam config read  <section> [--no-discovery]
   pteam config write <section>             (JSON body on stdin)
   pteam prompts read <role>                (supervisor|lead|peer)

@@ -189,14 +189,95 @@ present. Manually:
 
 ```bash
 node scripts/claude-setup.mjs --install          # hooks + the paseo-team MCP server
-node scripts/claude-setup.mjs --print-providers  # the claude-* provider block
+node scripts/claude-setup.mjs --apply            # the claude-* providers -> ~/.paseo/config.json
 node scripts/claude-setup.mjs --verify           # exit 1 when incomplete
+node scripts/claude-setup.mjs --print-providers  # print the block instead, for a manual merge
 pteam claude-setup --verify --json               # same thing through the CLI
 ```
 
-Then merge the printed provider block into `~/.paseo/config.json` and restart
-the daemon (`paseo daemon restart` — this kills running agents, so pick the
-moment). Providers only appear in `paseo provider ls` after that restart.
+`--apply` merges the three `claude-*` providers into `~/.paseo/config.json`. It
+follows the same ownership rule as the two files above:
+
+- it backs the file up before writing, and writes atomically;
+- a config it cannot parse is reported and left byte-for-byte alone — it is
+  never treated as a fresh file and overwritten;
+- a provider **you** wrote is reported as skipped, never overwritten;
+- a provider we created and you then **deleted** stays deleted;
+- `--force` opts into both of those, and additionally retires a provider this
+  pack no longer generates even if you have edited it since — plain `--apply`
+  leaves that one alone;
+- `--force` records what it replaced, so `--uninstall` can put your original
+  back exactly **while the entry is still the one we wrote**. Edit it afterwards
+  and it becomes yours: `--uninstall` then leaves your version in place rather
+  than reverting it. The record of your original survives every later `--apply`,
+  including runs that skip the name because you now own it — but `--uninstall`
+  deletes the ledger along with our claim, so the recorded original goes with it
+  in the same call that decides to leave your version alone. Uninstall is
+  terminal: after it, your entry is simply yours and there is nothing of ours
+  left to revert to.
+
+What it owns is tracked in `~/.paseo-pi-team/claude-provider-ledger.json` —
+deliberately a different file from the seat ledger, so that `pteam seats apply`
+and this command can never delete each other's providers.
+
+`--apply` does NOT reload the daemon, on purpose: there is no flag that makes it,
+because an installer that can reload is one an unattended script will eventually
+run against a host full of live agents. Reload yourself when you are ready:
+
+```bash
+paseo daemon reload
+```
+
+A reload is enough — a restart is not required, and restarting kills every
+running agent on the host. `agents.providers` is one of the server's
+`RELOADABLE_PATHS`, so the provider registry is rebuilt live and the providers
+then appear in `paseo provider ls`.
+
+Reloading does not re-configure the agents already running. Providers are read
+at SPAWN: a seat keeps whatever its provider said at the moment it was created,
+so existing seats keep the old settings and only newly created seats pick up the
+change. Nothing you do to this file reaches an agent that is already up.
+
+**A written-but-unloaded config is not dormant.** It is tempting to read the
+step above as "it takes effect when you decide to reload", and that is not what
+the file means. It takes effect at the next reload **or restart**, whoever or
+whatever causes one — an unattended restart, a second operator, a crash
+recovery. This is not hypothetical: a daemon on the development host restarted
+with nobody instructing it and took 9 of 16 live seats with it. So `--apply` is
+not a staging step you can leave half-finished; treat the config as live from
+the moment you write it, and if you are not ready for the change to take
+effect, do not apply it yet.
+
+One known race, stated rather than hidden: `~/.paseo/config.json` has a second
+writer. The daemon persists config itself, and the app can edit providers while
+it runs. `--apply` writes atomically — a rename over the destination, so no
+reader ever sees a half-written file — but atomicity of the *write* is not
+atomicity of the read-modify-write *sequence*. There is no lock and no
+compare-and-swap in this path. `--apply` re-reads the file immediately before
+writing and refuses if it changed underneath, which turns a silently lost daemon
+write into a reported conflict you can re-run; it narrows the window to the
+moment between that final read and the rename, and does not close it. A lockfile
+would close it and buy a stale-lock failure mode on a daemon host, which is the
+worse trade.
+
+This is observed, not hypothesised. On 2026-09-09 at 08:48:56 the file changed
+on the development host mid-task, flipping `daemon.relay.enabled` from `false`
+to `true` — a live-reloadable network-posture setting, and the first entry in
+the server's `RELOADABLE_PATHS`. The writer was the **Paseo app's own UI**,
+acting on the operator's deliberate toggle.
+
+That makes the case for the check stronger, not weaker. A daemon rewriting this
+file spontaneously would be exotic and rare, and easy to dismiss as a corner
+case. An operator running `--apply` in a terminal while their Paseo app sits
+open in another window is an ordinary Tuesday — so the second writer is the
+**common** case, not the unlucky one.
+
+It is also the real argument against a lockfile. A lock held during `--apply`
+would contend with the operator's own app, which is to say with the person
+running the install: a worse failure than the silent lost update it was meant to
+prevent, and worse again on a host running many seats where a stale lock strands
+everything. If an apply ever reports `conflict`, re-running it is the correct
+response.
 
 Both target files belong to the user and already carry other tools' entries
 (Paseo installs its own hooks in the same settings file), so every write
@@ -215,6 +296,41 @@ is nothing left for this installer to register. What it does instead is
 REMOVE an `agent-browser` entry a previous version of itself wrote, and leave
 alone one the user configured, which is the same ownership rule the merge
 always followed — dropping our integration is not a licence to delete theirs.
+
+### Why Claude in Chrome needs an env var on a seat
+
+`mcp__claude-in-chrome__*` is off in a Paseo seat unless the provider sets
+`CLAUDE_CODE_ENABLE_CFC=1`, which is why the `claude-lead` and `claude-peer`
+blocks carry it.
+
+Claude Code decides the integration by walking a fixed list of tests and taking
+the first that matches. Two of them are levers you can pull — `--chrome` and
+`CLAUDE_CODE_ENABLE_CFC` — and both sit ABOVE this one:
+
+> the session is NOT interactive → **off**
+
+Below that sits the test that reads `claudeInChromeDefaultEnabled` from
+`~/.claude.json`. That ordering is the whole problem. A human's terminal is
+interactive, falls through the gate, reaches the config, and gets the browser.
+**A Paseo seat is non-interactive by construction**: it dies at the gate and
+never consults the config at all. Setting `claudeInChromeDefaultEnabled` on the
+host is therefore not a fix — no seat ever reads it.
+
+`CLAUDE_CODE_ENABLE_CFC` is evaluated above the gate, so it is the one lever a
+non-interactive seat can actually pull. The other one, `--chrome`, would mean
+overriding the provider's `command` array, which discards the absolute binary
+path Paseo already resolved and re-exposes the spawn to a `PATH` lookup — so the
+environment variable is the supported route.
+
+The Supervisor deliberately does NOT get it: its tool policy denies every
+browser surface (see the table above), and a seat that advertises tools its own
+`disallowedTools` rejects on every call is a contradiction.
+
+The enablement order and the fact that the string `"1"` coerces to true were
+read from and measured against **Claude Code 2.1.263**. That is a fact about a
+version, not a promised contract: if a later version reorders the tests or stops
+coercing the string, seats lose Chrome silently, and this paragraph is the place
+to start looking.
 
 ## Mixed-fleet routing
 

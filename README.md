@@ -646,8 +646,22 @@ profile.
 
 | Browser | Tool names | Available on |
 |---|---|---|
-| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes |
-| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected |
+| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes — no extension, no flag |
+| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected **and** the provider sets `CLAUDE_CODE_ENABLE_CFC=1` |
+
+Browser Control is the one that needs nothing: the daemon injects it, so it is
+there on every seat of either runtime without an extension to install or a flag
+to set.
+
+Claude in Chrome needs the environment variable, and the `claude-lead` and
+`claude-peer` provider blocks this pack generates set it. Without it a Paseo seat
+gets **no** `mcp__claude-in-chrome__*` tools at all, no matter what
+`~/.claude.json` says: a seat is non-interactive, and Claude Code's enablement
+order turns the integration off for a non-interactive session *before* it ever
+reads that config file. `CLAUDE_CODE_ENABLE_CFC` is checked above that gate,
+which is what makes it work. The Supervisor is excluded on purpose — its policy
+denies it the browser. See
+[Why Claude in Chrome needs an env var on a seat](docs/claude-runtime.md#why-claude-in-chrome-needs-an-env-var-on-a-seat).
 
 Paseo registers Browser Control on its own `/mcp/agents` server — the same one
 that carries `create_agent` — gated on `daemon.browserTools.enabled` plus a
@@ -708,17 +722,38 @@ policy already allows `mcp` for Lead/Supervisor and blocks it for Peers.
 
 ### Paseo configuration
 
-The installers **do not merge** `~/.paseo/config.json` — do it by hand, so the
-change stays under your control:
+The installers **do not merge** `~/.paseo/config.json` on their own — applying it
+is a separate, explicit step, so that writing the file is always a decision you
+made rather than a side effect of installing. Note that this controls *whether*
+the change is written, not *when* it takes effect; see step 2:
 
 1. Merge `config/paseo.providers.example.json` into `~/.paseo/config.json`
    (`agents.providers.pi-*` and `claude-*` + `daemon.mcp.injectIntoAgents: true`
-   — required for agents to receive Paseo orchestration tools). Regenerate the
-   `claude-*` block from the code with
-   `pteam claude-setup --print-providers`, so the static tool policy in the
-   config can never drift from the policy the hook enforces.
-2. Restart the Paseo daemon (this kills every running agent — do it when
-   ready). Derived providers do NOT appear in `paseo provider ls` until then.
+   — required for agents to receive Paseo orchestration tools).
+   For the `claude-*` half, `pteam claude-setup --apply` does that merge for you,
+   generating the block from the code so the static tool policy in the config can
+   never drift from the policy the hook enforces. It backs the file up, refuses
+   to overwrite a provider you wrote, leaves an unparseable file alone, and does
+   not reload anything. `--force` opts into overwriting, and records what it
+   replaced so `--uninstall` can put your original back exactly **while the entry
+   is still the one it wrote** — edit it afterwards and it is yours, so uninstall
+   leaves your version in place instead of reverting it. The recorded original
+   survives every later `--apply`, including ones that skip the name; uninstall
+   then deletes the ledger along with the claim, so after it your entry is simply
+   yours. `--print-providers` still prints the block if
+   you would rather merge it yourself. The `pi-*` providers are not generated —
+   copy those from the example file.
+2. Reload the Paseo daemon. A reload is enough: `agents.providers` is reloadable
+   and the registry is rebuilt live, so a full restart — which kills every
+   running agent — is not needed. Providers do NOT appear in
+   `paseo provider ls` until then, and because a seat reads its provider at
+   spawn, only agents created *after* the reload pick the change up.
+
+   Writing the file is the step you control; **when it takes effect is not.** A
+   written-but-unloaded config is not dormant — it activates at the next reload
+   *or restart*, whoever causes one, including an unattended restart or a crash
+   recovery. Treat it as live from the moment you write it. See
+   [the Install section](docs/claude-runtime.md#install) for the long form.
 3. Run `/reload` in pi to load the new extension.
 
 With no `PASEO_PI_ROLE`, both adapters are passive: they inject nothing and
