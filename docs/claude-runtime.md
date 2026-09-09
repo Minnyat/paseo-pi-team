@@ -260,6 +260,16 @@ moment between that final read and the rename, and does not close it. A lockfile
 would close it and buy a stale-lock failure mode on a daemon host, which is the
 worse trade.
 
+This is observed, not hypothesised. On 2026-09-09 at 08:48:56 the file changed
+on an otherwise idle development host, flipping `daemon.relay.enabled` from
+`false` to `true` — a live-reloadable network-posture setting, and the first
+entry in the server's `RELOADABLE_PATHS`; the initiator was **not established**.
+A second writer making a semantic change to that file is therefore a thing that
+happens without anyone driving it, and it is also why the lockfile is the wrong
+trade: a lock held during `--apply` would contend with *that* writer rather than
+with another operator. If an apply ever reports `conflict`, re-running it is the
+correct response.
+
 Both target files belong to the user and already carry other tools' entries
 (Paseo installs its own hooks in the same settings file), so every write
 merges: our entries are tagged `paseo-team-role-policy`, and only tagged

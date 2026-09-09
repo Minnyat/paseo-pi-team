@@ -495,6 +495,13 @@ export function providerIsOurs(live, ledgerEntry) {
  * inside that window is still lost, and that is a known, accepted race — stated
  * here rather than left for someone to discover.
  *
+ * Observed rather than hypothesised: on 2026-09-09 at 08:48:56 this file changed
+ * under an idle host DURING the task that added this code, flipping
+ * `daemon.relay.enabled` false -> true — a live-reloadable network-posture
+ * setting, and the first entry in the server's RELOADABLE_PATHS (initiator NOT
+ * ESTABLISHED). That is also the case against a lockfile: one held here would
+ * contend with THAT writer, not with a second operator.
+ *
  * Two further known gaps, same discipline:
  *
  * - The config write and the ledger write are not atomic WITH RESPECT TO EACH
