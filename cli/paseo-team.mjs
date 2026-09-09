@@ -949,6 +949,21 @@ function cmdUninstall(argv) {
 
 // --- update ----------------------------------------------------------------
 
+/**
+ * Upgrading the BINARY is only half of an upgrade.
+ *
+ * The policy core, the role prompts and the Lead skill are COPIED into
+ * ~/.pi/agent/ at install time — that copy is what a running agent actually
+ * loads, and `npm i -g` does not touch it. So a user who runs `pteam update`
+ * and stops there gets a new CLI enforcing the previous release's rules, with
+ * both halves reporting the new version number and nothing disagreeing out
+ * loud. Say it here, where the person who just upgraded is looking.
+ */
+const UPDATE_NEXT_STEPS = Object.freeze([
+	"re-run `pteam install` — the policy core, role prompts and Lead skill are copies under ~/.pi/agent and are NOT refreshed by the package upgrade",
+	"then `pteam preflight` to confirm the installed copies match this version",
+]);
+
 async function cmdUpdate(argv) {
 	rejectUnknownFlags(argv, ["--check"]);
 	const info = await su.checkForUpdate();
@@ -972,6 +987,7 @@ async function cmdUpdate(argv) {
 			action: "manual",
 			mode,
 			message: "running from a git checkout — pull the latest yourself (`git pull`), then restart the CLI",
+			nextSteps: UPDATE_NEXT_STEPS,
 		});
 		return;
 	}
@@ -980,7 +996,16 @@ async function cmdUpdate(argv) {
 	if (res.error || res.status !== 0) {
 		fail(`npm update failed (exit ${res.status ?? "?"}${res.error ? `: ${res.error.message}` : ""})`);
 	}
-	json({ ...info, action: "updated", mode, message: `updated ${info.current} -> ${info.latest}` });
+	json({
+		...info,
+		action: "updated",
+		mode,
+		message: `updated ${info.current} -> ${info.latest}`,
+		nextSteps: UPDATE_NEXT_STEPS,
+	});
+	// stderr, not the JSON body: a human running `pteam update` by hand is the
+	// one who has to act on it, and the WebUI reads stdout.
+	process.stderr.write(`[paseo-team] ${UPDATE_NEXT_STEPS[0]}\n`);
 }
 
 // --- web -------------------------------------------------------------------

@@ -343,6 +343,15 @@ try {
 		const manual = run(["update"], gitEnv("sha\trefs/tags/v99.0.0\n"));
 		assert.equal(manual.status, 0);
 		assert.equal(manual.json.action, "manual");
+
+		// Upgrading the BINARY is only half an upgrade: the policy core, role
+		// prompts and Lead skill are copies under ~/.pi/agent that `npm i -g`
+		// never touches, so a user who stops at `update` runs a new CLI over the
+		// previous release's rules with both halves reporting the new version.
+		assert.ok(
+			manual.json.nextSteps?.some((step) => step.includes("pteam install")),
+			"an update must say the installed copies still need refreshing",
+		);
 		assert.equal(manual.json.mode, "checkout");
 
 		const noop = run(["update"], gitEnv("sha\trefs/tags/v0.0.1\n"));

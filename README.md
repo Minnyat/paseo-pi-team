@@ -892,6 +892,21 @@ provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
 `null` level means the level gets clamped), endpoint env vars, and repository
 state (a writer host must be clean in strict mode). No secret is ever printed.
 
+**Upgrading the package is only half an upgrade.** The policy core, the role
+prompts and the Lead skill are COPIED into `~/.pi/agent/` at install time, and
+that copy is what a running agent loads. `pteam update` (or `npm i -g`)
+replaces the binary and leaves those copies alone — so an upgrade that stops
+there runs a new CLI over the previous release's rules, with both halves
+reporting the new version number and nothing disagreeing out loud. Always
+follow an update with:
+
+```bash
+pteam install     # refresh the copies under ~/.pi/agent
+pteam preflight   # confirm they match this version
+```
+
+`pteam update` says this in its `nextSteps`, and on stderr when it upgrades.
+
 The Claude half registers an ABSOLUTE node path in `~/.claude/settings.json`
 (hooks) and `~/.claude.json` (MCP), because a hook may run without the user's
 `PATH`. That path is chosen at install time and is the one thing the installer
