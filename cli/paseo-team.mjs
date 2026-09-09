@@ -18,6 +18,8 @@
  *   paseo-team skills list             -> [{ name, path, pack }]
  *   paseo-team skills read <name>      -> SKILL.md body (JSON-wrapped)
  *   paseo-team skills write <name>     -> SKILL.md body from stdin
+ *   paseo-team cost [--all|--cluster <id>]        -> per-agent + summed cost for one cluster
+ *   paseo-team activity <ref> [--tail|--max-chars] -> one agent's activity, capped PER ENTRY
  *   paseo-team env list                -> documented env knobs + process values + target file
  *   paseo-team install                            -> delegate to the bundled installer
  *
@@ -43,7 +45,7 @@ import {
 	baseRole,
 	SEAT_CAPABILITIES,
 } from "../scripts/seat-profiles.mjs";
-import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
+import { runPaseoJson, runPaseoText, mapWithConcurrency, PaseoError } from "./lib/paseo-bridge.mjs";
 import {
 	ROLE_PROVIDERS,
 	RUNTIME_FAMILIES,
@@ -55,6 +57,7 @@ import {
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, inferSeat, normalizePermits } from "./lib/graph.mjs";
 import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
+import { agentCluster, normalizeCluster } from "../extensions/paseo-team-core/policy-core.js";
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 
@@ -630,6 +633,279 @@ async function cmdPermitDecision(action, argv) {
 	json({ ok: true, action, agentId: agent, requestId, decidedAt, response: result });
 }
 
+// --- cost ------------------------------------------------------------------
+
+/**
+ * The usage numbers Paseo records for one agent, under whatever casing the
+ * daemon used. Reported under Paseo's own name (`LastUsage`) rather than
+ * renamed to `totalCostUsd`: the two are not obviously the same thing, and a
+ * cost report that quietly relabels its source is the kind of number people
+ * later build a budget on.
+ */
+function normalizeUsage(detail) {
+	const raw = detail?.LastUsage ?? detail?.lastUsage ?? detail?.usage ?? null;
+	if (!raw || typeof raw !== "object") return null;
+	const num = (...keys) => {
+		for (const key of keys) {
+			const value = raw[key];
+			if (typeof value === "number" && Number.isFinite(value)) return value;
+		}
+		return null;
+	};
+	return {
+		costUsd: num("CostUsd", "costUsd", "cost_usd", "totalCostUsd"),
+		inputTokens: num("InputTokens", "inputTokens"),
+		outputTokens: num("OutputTokens", "outputTokens"),
+		cachedTokens: num("CachedTokens", "cachedTokens"),
+	};
+}
+
+/**
+ * Cost for a whole cluster in ONE command.
+ *
+ * `paseo ls` carries no cost column and `paseo inspect` carries it one agent at
+ * a time, so a fifteen-Peer project had no way to answer "what has this cost"
+ * except fifteen sequential calls and mental arithmetic. The cluster is the
+ * right unit because it is already the pack's authority boundary: the same
+ * grouping that decides which Supervisor may bind which Lead decides whose
+ * spend this is.
+ *
+ * Cost discipline (paseo-bridge.mjs): one `paseo` invocation is ~3s of process
+ * startup, so the inspects run with bounded concurrency and an agent that fails
+ * to answer is reported as unavailable rather than silently counted as zero — a
+ * total that quietly omits a seat is worse than one that names the gap.
+ */
+async function cmdCost(argv) {
+	rejectUnknownFlags(argv, ["--all", "--cluster", "--concurrency", "--json"]);
+	const concurrencyRaw = flagValue(argv, "--concurrency");
+	// Validated to the range the message names rather than clamped: this repo
+	// already treats a silently-ignored flag value as the same defect class as a
+	// silently-ignored flag.
+	if (
+		concurrencyRaw !== undefined &&
+		(!/^\d{1,2}$/.test(concurrencyRaw) || Number(concurrencyRaw) < 1 || Number(concurrencyRaw) > 16)
+	) {
+		fail("--concurrency must be a number between 1 and 16");
+	}
+	const concurrency = concurrencyRaw === undefined ? 6 : Number(concurrencyRaw);
+	const clusterRaw = flagValue(argv, "--cluster");
+	const clusterFilter = clusterRaw === undefined ? null : normalizeCluster(clusterRaw);
+	if (clusterRaw !== undefined && clusterFilter === null) {
+		fail(`--cluster '${clusterRaw}' is not a usable cluster id`);
+	}
+
+	const listed = await live(flag(argv, "--all") ? ["ls", "-g", "-a"] : ["ls", "-g"], "cost");
+	// The Paseo CLI reports some daemon failures as a successful JSON body, so an
+	// unchecked envelope here would render as "0 agents, $0.00, ok: true" — the
+	// most dangerous possible answer to "what has this cost".
+	const listEnvelope = paseoErrorEnvelope(listed);
+	if (listEnvelope) {
+		json({ ok: false, command: "cost", ...listEnvelope });
+		process.exit(3);
+	}
+	const rows = Array.isArray(listed) ? listed : [];
+	const ids = rows.map((agent) => agent?.id).filter(isAgentId);
+	const { states } = readAgentStates(ids);
+
+	const candidates = rows
+		// An id `paseo ls` returned in a shape we cannot validate never becomes an
+		// argv element: safeRef would exit the process mid-snapshot, turning one
+		// odd row into a cost report nobody gets.
+		.filter((agent) => isAgentId(agent?.id))
+		.map((agent) => {
+			const state = states[agent.id] ?? null;
+			return { agent, cluster: state ? agentCluster(state) : null };
+		})
+		// A null cluster is "unknown", not "mine": including it would inflate one
+		// project's bill with another's seats. It stays visible via `--all`
+		// without a filter, where the caller has asked for everything.
+		.filter(({ cluster }) => clusterFilter === null || cluster === clusterFilter);
+
+	const results = await mapWithConcurrency(candidates, concurrency, async ({ agent, cluster }) => {
+		const detail = await runPaseoJson(["inspect", safeRef(agent.id)]);
+		// Same trap as the inventory reads above: `paseo inspect` can answer a
+		// daemon failure with exit 0 and an `{ error }` body. Left unchecked it has
+		// no usage field, so it would be filed as "Paseo reports no usage for this
+		// agent" — a transport failure silently reclassified as a benign state,
+		// and a total quietly missing a seat.
+		const envelope = paseoErrorEnvelope(detail);
+		if (envelope) {
+			const failure = new PaseoError(envelope.code, envelope.message);
+			return { agent, cluster, usage: null, failure };
+		}
+		return { agent, cluster, usage: normalizeUsage(detail), failure: null };
+	});
+
+	const agents = [];
+	const unavailable = [];
+	const totals = { costUsd: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+	let costedCount = 0;
+	for (const [index, result] of results.entries()) {
+		const { agent, cluster } = candidates[index];
+		if (!result.ok) {
+			unavailable.push({
+				id: agent?.id ?? null,
+				shortId: agent?.shortId ?? null,
+				cluster,
+				code: result.error instanceof PaseoError ? result.error.code : "PASEO_FAILED",
+				message: String(result.error?.message ?? result.error),
+			});
+			continue;
+		}
+		const { usage, failure } = result.value;
+		if (failure) {
+			unavailable.push({
+				id: agent.id,
+				shortId: agent?.shortId ?? null,
+				cluster,
+				code: failure.code,
+				message: failure.message,
+			});
+			continue;
+		}
+		if (usage === null) {
+			// An agent Paseo has recorded no usage for (never started, archived
+			// before its first turn) is not a failure and not a zero — say so.
+			unavailable.push({
+				id: agent?.id ?? null,
+				shortId: agent?.shortId ?? null,
+				cluster,
+				code: "USAGE_UNREPORTED",
+				message: "Paseo reports no usage for this agent",
+			});
+			continue;
+		}
+		costedCount += 1;
+		for (const key of Object.keys(totals)) {
+			if (typeof usage[key] === "number") totals[key] += usage[key];
+		}
+		agents.push({
+			id: agent?.id ?? null,
+			shortId: agent?.shortId ?? null,
+			name: agent?.name ?? null,
+			role: inferRole(agent?.provider),
+			provider: agent?.provider ?? null,
+			status: agent?.status ?? null,
+			cluster,
+			...usage,
+		});
+	}
+	agents.sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0));
+	json({
+		ok: true,
+		cluster: clusterFilter,
+		scope: flag(argv, "--all") ? "all" : "active",
+		agentCount: candidates.length,
+		costedCount,
+		totals: { ...totals, costUsd: Number(totals.costUsd.toFixed(6)) },
+		agents,
+		unavailable,
+		source: "paseo inspect -> LastUsage (per agent); summed here, not by the daemon",
+	});
+}
+
+// --- activity ---------------------------------------------------------------
+
+/** An entry in `paseo logs` output starts a line with its own `[Speaker]` tag. */
+const ACTIVITY_ENTRY_RE = /^\[[A-Za-z][A-Za-z ]{0,30}\]/;
+
+/**
+ * Split a transcript into entries and cap each one INDEPENDENTLY.
+ *
+ * A per-entry cap is the whole point. `limit`/`--tail` bounds how many entries
+ * come back but not how big one is, and a single entry can be a Peer's whole
+ * PEER_MESSAGE_V1 report — thousands of lines whose full text is, by the pack's
+ * own output contract, already sitting in a file the report names. Asking for
+ * four activities and being handed half a megabyte is not a large answer to a
+ * small question; it is the same document twice.
+ */
+export function clipActivity(text, { maxChars, tail }) {
+	const lines = String(text ?? "").split(/\r?\n/);
+	const entries = [];
+	for (const line of lines) {
+		if (entries.length === 0 || ACTIVITY_ENTRY_RE.test(line)) {
+			entries.push({ kind: ACTIVITY_ENTRY_RE.exec(line)?.[0].slice(1, -1) ?? null, lines: [line] });
+		} else {
+			entries[entries.length - 1].lines.push(line);
+		}
+	}
+	const picked = tail > 0 ? entries.slice(-tail) : entries;
+	return picked.map((entry, index) => {
+		const body = entry.lines.join("\n").replace(/\s+$/, "");
+		const truncated = body.length > maxChars;
+		return {
+			index,
+			kind: entry.kind,
+			chars: body.length,
+			truncated,
+			text: truncated
+				? `${body.slice(0, maxChars)}\n[... ${body.length - maxChars} more characters withheld by --max-chars. The full text is in the artifact this entry names, or read it with: paseo logs <agent> --tail 1]`
+				: body,
+		};
+	});
+}
+
+/**
+ * Bounded read of one agent's activity.
+ *
+ * Exists because the monitoring tool a Lead reaches for first
+ * (`get_agent_activity`) has no per-entry bound, and a Lead that blows its
+ * context reading a report it already has on disk has paid twice for one
+ * document.
+ */
+async function cmdActivity(argv) {
+	const [ref, ...rest] = argv;
+	if (!ref || ref.startsWith("--")) fail("activity: missing agent reference");
+	rejectUnknownFlags(rest, ["--tail", "--max-chars", "--filter"]);
+	const tailRaw = flagValue(rest, "--tail");
+	// 0 is rejected rather than treated as "all": this command exists to BOUND a
+	// read, and a spelling of it that silently removes the bound is a trap.
+	if (tailRaw !== undefined && (!/^\d{1,4}$/.test(tailRaw) || Number(tailRaw) < 1)) {
+		fail("--tail must be a number of entries, 1 or more");
+	}
+	const maxCharsRaw = flagValue(rest, "--max-chars");
+	if (maxCharsRaw !== undefined && !/^\d{1,7}$/.test(maxCharsRaw)) fail("--max-chars must be a number");
+	const filter = flagValue(rest, "--filter");
+	const FILTERS = ["tools", "text", "errors", "permissions"];
+	if (filter !== undefined && !FILTERS.includes(filter)) {
+		fail(`--filter must be one of: ${FILTERS.join(", ")}`);
+	}
+	const tail = tailRaw === undefined ? 20 : Number(tailRaw);
+	const maxChars = Math.max(200, maxCharsRaw === undefined ? 2000 : Number(maxCharsRaw));
+
+	const agent = safeRef(ref);
+	const args = ["logs", agent];
+	// Ask paseo for a few more entries than we return: --tail counts entries and
+	// our own splitter may merge or split differently, so a short read is worse
+	// than a slightly long one.
+	if (tail > 0) args.push("--tail", String(Math.min(9999, tail + 5)));
+	if (filter !== undefined) args.push("--filter", filter);
+
+	let raw;
+	try {
+		raw = await runPaseoText(args);
+	} catch (error) {
+		const code = error instanceof PaseoError ? error.code : "PASEO_FAILED";
+		json({ ok: false, code, command: "activity", agentId: agent, message: String(error?.message ?? error) });
+		process.exit(3);
+		return;
+	}
+	const entries = clipActivity(raw.text, { maxChars, tail });
+	const returnedChars = entries.reduce((sum, entry) => sum + entry.text.length, 0);
+	json({
+		ok: true,
+		agentId: agent,
+		tail,
+		maxChars,
+		filter: filter ?? null,
+		entryCount: entries.length,
+		sourceChars: raw.totalChars,
+		returnedChars,
+		withheldChars: Math.max(0, raw.totalChars - returnedChars),
+		entries,
+	});
+}
+
 // --- graph -----------------------------------------------------------------
 
 async function cmdGraph(argv) {
@@ -904,6 +1180,8 @@ live plane (talks to the Paseo daemon):
   pteam permits allow <agent> <reqId>
   pteam permits deny  <agent> <reqId>
   pteam models [--provider <role-provider>]
+  pteam cost [--all] [--cluster <id>] [--concurrency <n>]
+  pteam activity <ref> [--tail <n>] [--max-chars <n>] [--filter tools|text|errors|permissions]
   pteam graph [--all] [--max-inspect <n>] [--refresh]
   pteam watchdog [--stale-after <ms>]
   pteam web [--port <n>] [--open] [--no-token]
@@ -976,6 +1254,8 @@ async function main() {
 		case "permits": return dispatchPermits(argv);
 		case "models": return cmdModels(argv);
 		case "seats": return dispatchSeats(argv);
+		case "cost": return cmdCost(argv);
+		case "activity": return cmdActivity(argv);
 		case "graph": return cmdGraph(argv);
 		case "watchdog": return cmdWatchdog(argv);
 		case "web": return cmdWeb(argv);

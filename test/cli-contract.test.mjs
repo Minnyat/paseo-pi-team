@@ -47,7 +47,7 @@ try {
 	{
 		const help = run(["--help"]);
 		assert.equal(help.status, 0);
-		for (const command of ["agents", "permits list", "graph", "web", "update", "uninstall", "models"]) {
+		for (const command of ["agents", "permits list", "graph", "web", "update", "uninstall", "models", "cost", "activity"]) {
 			assert.ok(help.stdout.includes(command), `help documents '${command}'`);
 		}
 
@@ -145,6 +145,103 @@ try {
 		assert.equal(warm.json.inspectSpent, 0);
 		assert.equal(warm.json.pendingParents, 0);
 		assert.equal(warm.json.counts.edges, 2);
+	}
+
+	// --- cost: one command for a whole cluster ------------------------------
+	// `paseo ls` has no cost column and `paseo inspect` has one per agent, so a
+	// fifteen-Peer project previously had to call inspect fifteen times and add
+	// the numbers by hand. Cluster is the unit because it is already the pack's
+	// authority boundary.
+	{
+		// Two of the three fake agents are labelled into one cluster; the third
+		// carries a different one, so the filter has something to exclude.
+		const stateDir = join(sandbox, "paseo", "agents", "w");
+		mkdirSync(stateDir, { recursive: true });
+		const clusters = {
+			"11111111-1111-1111-1111-111111111111": "wks_alpha",
+			"22222222-2222-2222-2222-222222222222": "wks_alpha",
+			"33333333-3333-3333-3333-333333333333": "wks_beta",
+		};
+		for (const [id, cluster] of Object.entries(clusters)) {
+			writeFileSync(
+				join(stateDir, `${id}.json`),
+				JSON.stringify({ id, cwd: "/w", labels: { "team.cluster": cluster } }),
+			);
+		}
+
+		const all = run(["cost"]);
+		assert.equal(all.status, 0, all.stderr);
+		assert.equal(all.json.ok, true);
+		assert.equal(all.json.agentCount, 3);
+		// The third agent reports no usage at all. That is neither a failure nor
+		// a zero, and a total that silently absorbed it would understate the bill.
+		assert.equal(all.json.costedCount, 2);
+		assert.equal(all.json.totals.costUsd, 3.75);
+		assert.deepEqual(
+			all.json.unavailable.map((row) => row.code),
+			["USAGE_UNREPORTED"],
+		);
+		// Most expensive first: the point of the report is to find the seat to
+		// look at, not to re-sort it by hand.
+		assert.deepEqual(all.json.agents.map((agent) => agent.costUsd), [2.25, 1.5]);
+
+		const alpha = run(["cost", "--cluster", "wks_alpha"]);
+		assert.equal(alpha.json.agentCount, 2);
+		assert.equal(alpha.json.costedCount, 2);
+		assert.equal(alpha.json.totals.costUsd, 3.75);
+		assert.equal(alpha.json.cluster, "wks_alpha");
+
+		const beta = run(["cost", "--cluster", "wks_beta"]);
+		assert.equal(beta.json.agentCount, 1);
+		assert.equal(beta.json.costedCount, 0);
+		assert.equal(beta.json.totals.costUsd, 0);
+
+		// An `{ error }` body that paseo returns with exit 0 must never be read as
+		// "this agent used nothing". A transport failure filed as a benign state
+		// is how a total quietly loses a seat.
+		const broken = run(["cost"], { FAKE_INSPECT: "envelope" });
+		assert.equal(broken.json.costedCount, 0);
+		assert.equal(broken.json.totals.costUsd, 0);
+		assert.deepEqual(
+			[...new Set(broken.json.unavailable.map((row) => row.code))],
+			["UNKNOWN_ERROR"],
+			"the daemon's own error code survives, it does not become USAGE_UNREPORTED",
+		);
+
+		assert.notEqual(run(["cost", "--concurrency", "abc"]).status, 0);
+		// The message promises 1-16, so 0 and 99 must be refused rather than
+		// silently clamped.
+		assert.notEqual(run(["cost", "--concurrency", "0"]).status, 0);
+		assert.notEqual(run(["cost", "--concurrency", "99"]).status, 0);
+		assert.notEqual(run(["cost", "--with-everything"]).status, 0);
+	}
+
+	// --- activity: the cap is PER ENTRY, not per call -----------------------
+	// A `limit` bounds how many entries come back and says nothing about how big
+	// one is — and one entry can be a Peer's whole report, whose full text the
+	// output contract already puts in a file. Four activities must not cost half
+	// a megabyte.
+	{
+		const capped = run(["activity", "22222222-2222-2222-2222-222222222222", "--tail", "4", "--max-chars", "200"]);
+		assert.equal(capped.status, 0, capped.stderr);
+		assert.equal(capped.json.ok, true);
+		assert.equal(capped.json.entryCount, 4);
+		const big = capped.json.entries.find((entry) => entry.truncated);
+		assert.ok(big, "the 5000-character entry is truncated");
+		assert.ok(big.chars > 4000, "the ORIGINAL size is still reported");
+		assert.ok(big.text.length < 500, "...but the text returned is bounded");
+		assert.match(big.text, /withheld by --max-chars/);
+		assert.ok(capped.json.withheldChars > 4000);
+		// A short entry is returned whole — the cap must not blunt everything.
+		const small = capped.json.entries.find((entry) => entry.kind === "Tool");
+		assert.equal(small.truncated, false);
+
+		assert.notEqual(run(["activity"]).status, 0);
+		// `--tail 0` used to mean "no --tail at all", i.e. read the WHOLE
+		// transcript — the exact opposite of the bound this command exists for.
+		assert.notEqual(run(["activity", "22222222-2222-2222-2222-222222222222", "--tail", "0"]).status, 0);
+		assert.notEqual(run(["activity", "$(rm -rf /)"]).status, 0);
+		assert.notEqual(run(["activity", "22222222-2222-2222-2222-222222222222", "--filter", "everything"]).status, 0);
 	}
 
 	// --- config still round-trips through the sandbox ------------------------
