@@ -496,11 +496,18 @@ export function providerIsOurs(live, ledgerEntry) {
  * here rather than left for someone to discover.
  *
  * Observed rather than hypothesised: on 2026-09-09 at 08:48:56 this file changed
- * under an idle host DURING the task that added this code, flipping
- * `daemon.relay.enabled` false -> true — a live-reloadable network-posture
- * setting, and the first entry in the server's RELOADABLE_PATHS (initiator NOT
- * ESTABLISHED). That is also the case against a lockfile: one held here would
- * contend with THAT writer, not with a second operator.
+ * DURING the task that added this code, flipping `daemon.relay.enabled` false ->
+ * true — a live-reloadable network-posture setting, and the first entry in the
+ * server's RELOADABLE_PATHS. The writer was the Paseo app's own UI, acting on
+ * the operator's deliberate toggle.
+ *
+ * That makes the case stronger. A daemon writing this file spontaneously would
+ * be exotic and rare; an operator running --apply in a terminal while their app
+ * is open in another window is an ordinary Tuesday, so the conflict check is
+ * defending the COMMON case rather than a corner one. It is also the real
+ * argument against a lockfile: a lock held here would contend with the
+ * operator's own app — with the person running the install — which is a worse
+ * failure than the silent lost update it was meant to prevent.
  *
  * Two further known gaps, same discipline:
  *

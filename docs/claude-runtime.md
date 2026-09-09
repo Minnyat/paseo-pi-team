@@ -261,14 +261,23 @@ would close it and buy a stale-lock failure mode on a daemon host, which is the
 worse trade.
 
 This is observed, not hypothesised. On 2026-09-09 at 08:48:56 the file changed
-on an otherwise idle development host, flipping `daemon.relay.enabled` from
-`false` to `true` — a live-reloadable network-posture setting, and the first
-entry in the server's `RELOADABLE_PATHS`; the initiator was **not established**.
-A second writer making a semantic change to that file is therefore a thing that
-happens without anyone driving it, and it is also why the lockfile is the wrong
-trade: a lock held during `--apply` would contend with *that* writer rather than
-with another operator. If an apply ever reports `conflict`, re-running it is the
-correct response.
+on the development host mid-task, flipping `daemon.relay.enabled` from `false`
+to `true` — a live-reloadable network-posture setting, and the first entry in
+the server's `RELOADABLE_PATHS`. The writer was the **Paseo app's own UI**,
+acting on the operator's deliberate toggle.
+
+That makes the case for the check stronger, not weaker. A daemon rewriting this
+file spontaneously would be exotic and rare, and easy to dismiss as a corner
+case. An operator running `--apply` in a terminal while their Paseo app sits
+open in another window is an ordinary Tuesday — so the second writer is the
+**common** case, not the unlucky one.
+
+It is also the real argument against a lockfile. A lock held during `--apply`
+would contend with the operator's own app, which is to say with the person
+running the install: a worse failure than the silent lost update it was meant to
+prevent, and worse again on a host running many seats where a stale lock strands
+everything. If an apply ever reports `conflict`, re-running it is the correct
+response.
 
 Both target files belong to the user and already carry other tools' entries
 (Paseo installs its own hooks in the same settings file), so every write
