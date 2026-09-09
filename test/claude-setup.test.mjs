@@ -326,10 +326,20 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 	assert.deepEqual(durableNodeCandidates("/opt/node/22/bin/node"), []);
 
 	// An operator who knows their layout beats the heuristic outright.
-	assert.equal(
-		nodeExecPath({ PASEO_TEAM_NODE_EXEC: "/opt/pinned/node" }),
-		"/opt/pinned/node",
-	);
+	//
+	// The override is resolved, the way `hookScriptPath` already resolves its
+	// own — so the expectation has to be absolute in the PLATFORM's terms, not
+	// in POSIX's. A bare "/opt/..." picks up the current drive on Windows
+	// ("D:/opt/..."), which is correct behaviour and a wrong expectation.
+	const pinned = process.platform === "win32" ? "C:/opt/pinned/node" : "/opt/pinned/node";
+	assert.equal(nodeExecPath({ PASEO_TEAM_NODE_EXEC: pinned }), pinned);
+	// Whatever comes back carries no backslashes, on any platform: the value is
+	// interpolated into a command string a shell may read, where a backslash is
+	// an escape. Asserted as the property rather than as a literal, so it says
+	// something real on both runners instead of restating normalizePath.
+	for (const given of [pinned, String.raw`C:\opt\pinned\node.exe`]) {
+		assert.doesNotMatch(nodeExecPath({ PASEO_TEAM_NODE_EXEC: given }), /\\/);
+	}
 	// With no candidate on disk, the running interpreter stands — the old
 	// behaviour, which was never wrong so much as unnecessarily fragile.
 	assert.equal(nodeExecPath({}), normalizePath(nodeExecPath({})));
