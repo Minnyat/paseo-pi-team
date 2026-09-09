@@ -203,8 +203,14 @@ follows the same ownership rule as the two files above:
   never treated as a fresh file and overwritten;
 - a provider **you** wrote is reported as skipped, never overwritten;
 - a provider we created and you then **deleted** stays deleted;
-- `--force` opts into both of those, and records what it replaced so
-  `--uninstall` can put your original back exactly.
+- `--force` opts into both of those, and additionally retires a provider this
+  pack no longer generates even if you have edited it since — plain `--apply`
+  leaves that one alone;
+- `--force` records what it replaced, so `--uninstall` can put your original
+  back exactly **while the entry is still the one we wrote**. Edit it afterwards
+  and it becomes yours: `--uninstall` then leaves your version in place rather
+  than reverting it. The record of your original is kept either way, never
+  discarded, so nothing is lost by that choice.
 
 What it owns is tracked in `~/.paseo-pi-team/claude-provider-ledger.json` —
 deliberately a different file from the seat ledger, so that `pteam seats apply`

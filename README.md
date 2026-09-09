@@ -732,14 +732,24 @@ stays a separate, explicit step so the change is under your control:
    generating the block from the code so the static tool policy in the config can
    never drift from the policy the hook enforces. It backs the file up, refuses
    to overwrite a provider you wrote, leaves an unparseable file alone, and does
-   not reload anything. `--print-providers` still prints the block if you would
-   rather merge it yourself. The `pi-*` providers are not generated — copy those
-   from the example file.
+   not reload anything. `--force` opts into overwriting, and records what it
+   replaced so `--uninstall` can put your original back exactly **while the entry
+   is still the one it wrote** — edit it afterwards and it is yours, so uninstall
+   leaves your version in place instead of reverting it (the record of the
+   original is kept either way). `--print-providers` still prints the block if
+   you would rather merge it yourself. The `pi-*` providers are not generated —
+   copy those from the example file.
 2. Reload the Paseo daemon. A reload is enough: `agents.providers` is reloadable
    and the registry is rebuilt live, so a full restart — which kills every
    running agent — is not needed. Providers do NOT appear in
    `paseo provider ls` until then, and because a seat reads its provider at
    spawn, only agents created *after* the reload pick the change up.
+
+   Writing the file is the step you control; **when it takes effect is not.** A
+   written-but-unloaded config is not dormant — it activates at the next reload
+   *or restart*, whoever causes one, including an unattended restart or a crash
+   recovery. Treat it as live from the moment you write it. See
+   [the Install section](docs/claude-runtime.md#install) for the long form.
 3. Run `/reload` in pi to load the new extension.
 
 With no `PASEO_PI_ROLE`, both adapters are passive: they inject nothing and

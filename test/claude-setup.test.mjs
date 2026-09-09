@@ -634,22 +634,61 @@ function applySandbox(tag) {
 	rmSync(s.dir, { recursive: true, force: true });
 }
 
+// The operator's ORIGINAL survives a later skip.
+//
+// Full sequence: they own P; --force replaces it with W and records P; they
+// edit W into E; a plain --apply then correctly skips the name (it is theirs
+// again). Skipping must not drop the ledger entry, because that entry holds the
+// only copy of P — and this pack promises in writing that --force records what
+// it replaced.
+//
+// The second half pins the behaviour the narrowed promise describes: uninstall
+// LEAVES E. It does not revert to P. Reverting would destroy their edit to
+// restore something two steps stale, and an entry reshaped after we wrote it is
+// theirs by the same exact-match rule isOwnBrowserMcpServer uses. Anyone reading
+// "records what it replaced" and concluding the code should revert should find
+// this test instead.
+{
+	const s = applySandbox("apply-skip-keeps-previous");
+	const P = { extends: "claude", label: "the operator's own", model: "sonnet" };
+	writeFileSync(s.configPath, JSON.stringify({ agents: { providers: { "claude-peer": P } } }, null, 2), "utf8");
+
+	await applyProviders(s.env, { force: true });
+	const W = s.read().agents.providers["claude-peer"];
+	assert.equal(W.env.CLAUDE_CODE_ENABLE_CFC, "1", "--force took it");
+	const ledgerPath = claudeProviderLedgerPath(s.env);
+	assert.deepEqual(JSON.parse(readFileSync(ledgerPath, "utf8")).providers["claude-peer"].previous, P);
+
+	// They edit our entry. It becomes theirs.
+	const config = s.read();
+	const E = { ...W, model: "edited-after-we-wrote-it" };
+	config.agents.providers["claude-peer"] = E;
+	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
+
+	const rerun = await applyProviders(s.env);
+	assert.deepEqual(rerun.skipped, ["claude-peer"], "correctly skipped — it is theirs now");
+	const afterSkip = JSON.parse(readFileSync(ledgerPath, "utf8")).providers["claude-peer"];
+	assert.deepEqual(afterSkip.previous, P, "P survives the skip — the record is not dropped");
+
+	// And uninstall leaves E alone rather than reverting to P.
+	const backedOut = removeProviders(s.env);
+	assert.deepEqual(backedOut.kept, ["claude-peer"]);
+	assert.deepEqual(s.read().agents.providers["claude-peer"], E, "their edit stands");
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
 // A competing write between the read and the write aborts, having written
-// nothing. No injection point needed: applyProviders awaits, so a timer armed
-// before the call fires inside it and the re-read differs on the way out.
+// nothing. Produced by racing two real applyProviders calls, NOT by a timer:
+// its single await is a dynamic import of an already-cached module, which
+// settles as a microtask, so the timers phase is never reached inside the call
+// and no setTimeout can interleave with it.
 {
 	const s = applySandbox("apply-conflict");
 	writeFileSync(s.configPath, JSON.stringify({ agents: { providers: {} } }, null, 2), "utf8");
 
-	// Two writers racing over the same file, which is what the guard exists for.
-	// Both read the same `before`, then both suspend on the single await in
-	// applyProviders; the first to resume writes, and the second's re-read no
-	// longer matches what it read. Deterministic, and it needs no seam in the
-	// production path.
-	//
-	// (A setTimeout cannot produce this: that one await is a dynamic import of an
-	// already-cached module, so it settles as a MICROtask and the timers phase is
-	// never reached inside the call.)
+	// Both read the same `before`, then both suspend on that await; the first to
+	// resume writes, and the second's re-read no longer matches what it read.
+	// Deterministic, and it needs no seam in the production path.
 	const [first, second] = await Promise.all([
 		applyProviders(s.env),
 		applyProviders(s.env),
@@ -707,7 +746,7 @@ function applySandbox(tag) {
 	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
 
 	const forced = await applyProviders(s.env, { force: true });
-	assert.ok(forced.removed?.includes("claude-archivist") ?? true);
+	assert.ok(forced.removed.includes("claude-archivist"), "reported as retired");
 	assert.equal(
 		s.read().agents.providers["claude-archivist"],
 		undefined,
@@ -755,12 +794,16 @@ function applySandbox(tag) {
 		assert.match(text, /may not be under your control/, `${label}: says whose choice it is not`);
 	}
 
-	// Restart is never presented as a step to RUN. Checked line by line, because
-	// `.` does not cross newlines and a whole-text lookahead silently passes.
-	for (const line of updated.split("\n").concat(unchanged.split("\n"))) {
+	// Restart is never offered as a command to run. Asserted against the command
+	// SPELLING rather than a line shape: the previous per-line check matched only
+	// a bare indented invocation, so a run-prefixed inline one would have slipped
+	// through while the claim being made was the broader "never offered". Prose
+	// ABOUT restarting is deliberately still allowed — both branches say a
+	// restart may happen without you — and only the invocation is banned.
+	for (const [label, text] of [["updated", updated], ["unchanged", unchanged]]) {
 		assert.ok(
-			!/^\s+\S*\s*daemon restart\s*$/i.test(line),
-			`restart must never be offered as a command: ${JSON.stringify(line)}`,
+			!/daemon\s+restart/i.test(text),
+			`${label}: must never spell out the restart invocation`,
 		);
 	}
 }

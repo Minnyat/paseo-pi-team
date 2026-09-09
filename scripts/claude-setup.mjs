@@ -574,7 +574,16 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 
 	const nextLedger = {};
 	for (const name of Object.keys(toWrite)) {
-		if (result.skipped.includes(name)) continue;
+		if (result.skipped.includes(name)) {
+			// We did not write it, so we make no NEW claim — but an earlier
+			// --force may have recorded the operator's original here, and that
+			// record is the only copy of it. Dropping the entry because this run
+			// skipped the name would quietly retire a guarantee this pack makes in
+			// writing: that --force stores what it replaced so --uninstall can put
+			// the original back.
+			if (ledger[name] !== undefined) nextLedger[name] = ledger[name];
+			continue;
+		}
 		const live = existingProviders[name];
 		const wrote = toWrite[name];
 		if (live === undefined || liveIsOurs(name)) {
@@ -649,6 +658,10 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 		absent,
 		created: result.created,
 		updated: result.updated,
+		// Names this pack once generated and no longer does, retired from the
+		// config. Exposed because a caller cannot otherwise tell a retirement
+		// happened, and a test asserting on it had nothing to read.
+		removed: result.removed,
 		// A provider the operator hand-wrote is never overwritten without --force.
 		skipped: result.skipped,
 		// In our ledger, deleted from the config by the operator, left deleted.
@@ -956,8 +969,11 @@ function usage() {
 		"  --uninstall        remove only this pack's tagged entries",
 		"  --print-providers  print the claude-* provider block for ~/.paseo/config.json",
 		"",
-		"  --force            with --apply: overwrite a provider the operator owns,",
-		"                     and re-create one they deleted. Off by default.",
+		"  --force            with --apply, three things. Overwrite a provider the",
+		"                     operator owns; re-create one they deleted; and retire",
+		"                     one this pack no longer generates EVEN IF they have",
+		"                     since edited it (plain --apply leaves that one alone).",
+		"                     Off by default.",
 	].join("\n");
 }
 
