@@ -16,6 +16,7 @@ import {
 	loadRoutingConfig,
 	missingHostCapabilities,
 	modelsCacheKey,
+	normalizeModelEntry,
 	providerFamily,
 	resolveClusterRoute,
 	resolveRoute,
@@ -344,6 +345,122 @@ expectRoutingError("HOST_ROUTE_UNAVAILABLE", () =>
 		resolveRoute(validateRoutingConfig(unverifiable), "FAST_READ", inventory, {
 			strict: true,
 		}),
+	);
+}
+
+// --- "we do not know" vs "we know it has none" --------------------------------
+// The daemon can say three different things about extended thinking, and the
+// resolver used to hear only two of them. A model that genuinely has no
+// extended thinking (Haiku-class) was read as UNVERIFIABLE and refused from
+// every strict route, which took the cheapest seat on the host out of service
+// for work that never needed thinking in the first place.
+{
+	// Shape 1: the daemon says nothing at all, and the route asks for "off".
+	// Nothing to verify, so nothing can be unverifiable — strict included.
+	const off = structuredClone(validConfigData);
+	off.routes.FAST_READ.model = "testprov/non-reasoning";
+	off.routes.FAST_READ.thinking = "off";
+	assert.equal(
+		resolveRoute(validateRoutingConfig(off), "FAST_READ", inventory, {
+			strict: true,
+		}).thinkingValidated,
+		"off",
+	);
+
+	// Shape 2: the daemon states it outright. `thinkingSupported: false` is a
+	// FACT about the model, so "off" is fully verified, not tolerated.
+	const declared = {
+		...inventory,
+		models: [
+			...inventory.models,
+			{ id: "testprov/haiku-like", thinkingSupported: false },
+			// Shape 3: the same statement written as data — an option list that
+			// is present and empty. Before this fix it failed with "offered: ".
+			{ id: "testprov/empty-options", thinkingOptions: [] },
+		],
+	};
+	for (const model of ["testprov/haiku-like", "testprov/empty-options"]) {
+		const cfg = structuredClone(validConfigData);
+		cfg.routes.FAST_READ.model = model;
+		cfg.routes.FAST_READ.thinking = "off";
+		assert.equal(
+			resolveRoute(validateRoutingConfig(cfg), "FAST_READ", declared, {
+				strict: true,
+			}).thinkingValidated,
+			"unsupported",
+			`${model} at thinking:off must resolve as a known-unsupported pass`,
+		);
+
+		// Fail-closed is unchanged where it was ever load-bearing: asking such a
+		// model for a real thinking level is still refused, in BOTH modes, and
+		// the message names the level that would work.
+		const raised = structuredClone(validConfigData);
+		raised.routes.FAST_READ.model = model;
+		raised.routes.FAST_READ.thinking = "medium";
+		for (const strict of [false, true]) {
+			expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
+				resolveRoute(validateRoutingConfig(raised), "FAST_READ", declared, {
+					strict,
+				}),
+			);
+		}
+	}
+
+	// The opposite direction stays UNVERIFIABLE: a model that claims thinking
+	// but publishes no levels tells us nothing about WHICH level, so a strict
+	// route to a specific level is still refused.
+	const claims = {
+		...inventory,
+		models: [
+			...inventory.models,
+			{ id: "testprov/claims-thinking", thinkingSupported: true },
+		],
+	};
+	const claimsCfg = structuredClone(validConfigData);
+	claimsCfg.routes.FAST_READ.model = "testprov/claims-thinking";
+	assert.equal(
+		resolveRoute(validateRoutingConfig(claimsCfg), "FAST_READ", claims)
+			.thinkingValidated,
+		"unverifiable",
+	);
+	expectRoutingError("THINKING_OPTION_UNAVAILABLE", () =>
+		resolveRoute(validateRoutingConfig(claimsCfg), "FAST_READ", claims, {
+			strict: true,
+		}),
+	);
+}
+
+// normalizeModelEntry carries the tri-state through, because the CLI's routing
+// form reads the inventory through this same parser.
+{
+	assert.equal(
+		normalizeModelEntry({ id: "m" }).thinkingSupported,
+		null,
+		"silence is not a claim either way",
+	);
+	assert.equal(
+		normalizeModelEntry({ id: "m", thinkingSupported: false }).thinkingSupported,
+		false,
+	);
+	assert.equal(
+		normalizeModelEntry({ id: "m", thinkingOptions: [] }).thinkingSupported,
+		false,
+		"a present-but-empty option list IS the no-thinking statement",
+	);
+	assert.equal(
+		normalizeModelEntry({ id: "m", thinkingOptionIds: ["off", "low"] })
+			.thinkingSupported,
+		true,
+	);
+	// An explicit field wins over the list, so a daemon that publishes both a
+	// stale list and a correct flag is read the way it means.
+	assert.equal(
+		normalizeModelEntry({
+			id: "m",
+			thinkingSupported: false,
+			thinkingOptions: [{ id: "low" }],
+		}).thinkingSupported,
+		false,
 	);
 }
 
