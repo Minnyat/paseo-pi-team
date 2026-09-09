@@ -451,6 +451,28 @@ export function readProviderLedger(path) {
 }
 
 /**
+ * THE OWNERSHIP RULE. One statement of it, for both halves.
+ *
+ * An entry is ours iff the ledger claims it AND the live value is still byte-
+ * equal to what we recorded writing. Being in the ledger is only a claim: a
+ * provider we created and the operator has since hand-tuned is theirs, and
+ * nothing but this comparison can tell the two apart.
+ *
+ * It lives in one place because this single concept has already produced three
+ * separate defects in this pack — the base role providers put under the seat
+ * ledger's delete-when-absent ownership, an apply that treated every ledger name
+ * as ours-to-overwrite and replaced a hand-tuned provider wholesale, and a
+ * skipped name losing the original an earlier --force had recorded. Different
+ * code each time, one idea. `applyProviders` decides what it may write and
+ * `removeProviders` decides what it may take back; both ask HERE, so they cannot
+ * drift apart again the way they did when only one of them implemented it.
+ */
+export function providerIsOurs(live, ledgerEntry) {
+	if (live === undefined || ledgerEntry === undefined) return false;
+	return stableJson(live) === stableJson(ledgerEntry.wrote ?? null);
+}
+
+/**
  * Merge the claude-* provider block into ~/.paseo/config.json.
  *
  * The merge itself is delegated to applySeatsToPaseoConfig — the same function
@@ -537,25 +559,12 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 		toWrite[name] = entry;
 	}
 
-	/**
-	 * Is the LIVE entry still the one we wrote?
-	 *
-	 * Being in the ledger is not enough. A provider we created and the operator
-	 * has since hand-tuned is THEIRS, and the ledger alone cannot tell the two
-	 * apart. Without this, ownedForMerge would carry the name into
-	 * applySeatsToPaseoConfig's owned set, bypass its skip guard, and overwrite
-	 * their edit wholesale — and since the generated block changed in 6ac3e81,
-	 * "run --apply again" is the upgrade path for every existing install, so
-	 * that is the exact run that would have discarded it.
-	 *
-	 * This is the same comparison removeProviders makes before removing
-	 * anything. One ownership model, both halves agreeing.
-	 */
-	const liveIsOurs = (name) => {
-		const live = existingProviders[name];
-		if (live === undefined || ledger[name] === undefined) return false;
-		return stableJson(live) === stableJson(ledger[name].wrote ?? null);
-	};
+	// See providerIsOurs. Without this the name would go into
+	// applySeatsToPaseoConfig's owned set, bypass its skip guard and overwrite the
+	// operator's edit wholesale — and since the generated block changed in
+	// 6ac3e81, running --apply again is the upgrade path for every existing
+	// install, so that is the exact run that would have discarded it.
+	const liveIsOurs = (name) => providerIsOurs(existingProviders[name], ledger[name]);
 
 	// Names we still own: ours-and-unmodified, plus ones already gone from the
 	// config (kept owned so a retired provider can still be cleaned up).
@@ -646,6 +655,9 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 	// was already done while the host carries none of it.
 	const finalProviders = result.config?.agents?.providers ?? {};
 	const absent = Object.keys(generated).filter((name) => finalProviders[name] === undefined);
+	// The complement, because "some of ours are on the host" is what decides
+	// whether an activation warning is owed on a run that wrote nothing.
+	const present = Object.keys(generated).filter((name) => finalProviders[name] !== undefined);
 
 	return {
 		action: "apply",
@@ -656,6 +668,7 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 		// reported as success: the host is missing providers we are supposed to
 		// have put there, whatever the reason.
 		absent,
+		present,
 		created: result.created,
 		updated: result.updated,
 		// Names this pack once generated and no longer does, retired from the
@@ -713,7 +726,7 @@ export function removeProviders(env = process.env) {
 	for (const [name, entry] of Object.entries(ledger)) {
 		const live = providers[name];
 		if (live === undefined) continue;
-		if (stableJson(live) !== stableJson(entry.wrote ?? null)) {
+		if (!providerIsOurs(live, entry)) {
 			// Changed since we wrote it: it is the operator's now.
 			kept.push(name);
 			continue;
@@ -752,10 +765,28 @@ export function removeProviders(env = process.env) {
  * and apply ships exactly that state by design — so the inertness has to be
  * stated in words, for someone who does not know how Paseo loads providers.
  */
+/** Did this run change the config at all? */
+function wroteAnything(result) {
+	return (
+		(result.created?.length ?? 0) +
+			(result.updated?.length ?? 0) +
+			(result.removed?.length ?? 0) >
+		0
+	);
+}
+
 export function applyNextSteps(result) {
 	// Providers we are supposed to have written are not on the host. Saying
 	// "already applied" here would be false in the most expensive direction.
 	if (result.absent?.length) {
+		// A run can BOTH write and leave something absent — the operator deleted
+		// one provider, and the other two need updating because the generated
+		// block changed. That is the ordinary upgrade path, and returning early
+		// here dropped the activation warning from the one branch that says the
+		// operator most needs to read it. The note is owed whenever this run wrote
+		// anything, and equally whenever some of our providers ARE on the host and
+		// may simply not have been loaded yet.
+		const pending = wroteAnything(result) || (result.present?.length ?? 0) > 0;
 		return [
 			"",
 			`  MISSING FROM THIS HOST: ${result.absent.join(", ")}`,
@@ -764,6 +795,7 @@ export function applyNextSteps(result) {
 			"  are restored, seats using them cannot start. Re-create them with:",
 			"",
 			"         node scripts/claude-setup.mjs --apply --force",
+			...(pending ? ["", ...pendingStateNote()] : []),
 		];
 	}
 	if (result.status === "unchanged") {
@@ -1031,6 +1063,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 			for (const [label, names] of [
 				["created", result.created],
 				["updated", result.updated],
+				// A retirement DELETES an entry from the operator's config. Leaving
+				// it off this list meant the default output said nothing about it.
+				["retired (no longer generated by this pack)", result.removed],
 				["skipped (yours — use --force to overwrite)", result.skipped],
 				["left deleted (you removed it — use --force to re-create)", result.deletedByOperator],
 			]) {

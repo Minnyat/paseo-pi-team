@@ -209,8 +209,12 @@ follows the same ownership rule as the two files above:
 - `--force` records what it replaced, so `--uninstall` can put your original
   back exactly **while the entry is still the one we wrote**. Edit it afterwards
   and it becomes yours: `--uninstall` then leaves your version in place rather
-  than reverting it. The record of your original is kept either way, never
-  discarded, so nothing is lost by that choice.
+  than reverting it. The record of your original survives every later `--apply`,
+  including runs that skip the name because you now own it — but `--uninstall`
+  deletes the ledger along with our claim, so the recorded original goes with it
+  in the same call that decides to leave your version alone. Uninstall is
+  terminal: after it, your entry is simply yours and there is nothing of ours
+  left to revert to.
 
 What it owns is tracked in `~/.paseo-pi-team/claude-provider-ledger.json` —
 deliberately a different file from the seat ledger, so that `pteam seats apply`

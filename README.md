@@ -723,7 +723,9 @@ policy already allows `mcp` for Lead/Supervisor and blocks it for Peers.
 ### Paseo configuration
 
 The installers **do not merge** `~/.paseo/config.json` on their own — applying it
-stays a separate, explicit step so the change is under your control:
+is a separate, explicit step, so that writing the file is always a decision you
+made rather than a side effect of installing. Note that this controls *whether*
+the change is written, not *when* it takes effect; see step 2:
 
 1. Merge `config/paseo.providers.example.json` into `~/.paseo/config.json`
    (`agents.providers.pi-*` and `claude-*` + `daemon.mcp.injectIntoAgents: true`
@@ -735,8 +737,10 @@ stays a separate, explicit step so the change is under your control:
    not reload anything. `--force` opts into overwriting, and records what it
    replaced so `--uninstall` can put your original back exactly **while the entry
    is still the one it wrote** — edit it afterwards and it is yours, so uninstall
-   leaves your version in place instead of reverting it (the record of the
-   original is kept either way). `--print-providers` still prints the block if
+   leaves your version in place instead of reverting it. The recorded original
+   survives every later `--apply`, including ones that skip the name; uninstall
+   then deletes the ledger along with the claim, so after it your entry is simply
+   yours. `--print-providers` still prints the block if
    you would rather merge it yourself. The `pi-*` providers are not generated —
    copy those from the example file.
 2. Reload the Paseo daemon. A reload is enough: `agents.providers` is reloadable

@@ -787,9 +787,37 @@ function applySandbox(tag) {
 	assert.ok(!/nothing to reload/i.test(unchanged));
 	assert.match(unchanged, /NOT the same as the change being live/);
 
-	// Both must carry the framing that a restart nobody asked for will activate
-	// this. Asserted per branch so dropping it from either one fails.
-	for (const [label, text] of [["updated", updated], ["unchanged", unchanged]]) {
+	// A run can BOTH write and leave something absent: the operator deleted one
+	// provider, and the other two need updating because the generated block
+	// changed — the ordinary upgrade path. That branch returned early and carried
+	// no activation warning at all, in the output it calls the most important to
+	// read. The previous loop covered only two branches, so nothing caught it.
+	const mixed = applyNextSteps({
+		status: "incomplete",
+		absent: ["claude-lead"],
+		present: ["claude-peer", "claude-supervisor"],
+		created: [],
+		updated: ["claude-peer", "claude-supervisor"],
+		removed: [],
+	}).join("\n");
+	assert.match(mixed, /MISSING FROM THIS HOST/);
+
+	// Nothing of ours on the host and nothing written: there is genuinely no
+	// pending change, and the warning would be noise.
+	const nothingApplied = applyNextSteps({
+		status: "incomplete",
+		absent: ROLE_PROVIDERS,
+		present: [],
+		created: [],
+		updated: [],
+		removed: [],
+	}).join("\n");
+	assert.ok(!/reload OR RESTART/.test(nothingApplied), "no pending change to warn about");
+
+	// Every branch that left something pending must carry the framing that a
+	// restart nobody asked for will activate it. Asserted per branch so dropping
+	// it from any one of them fails.
+	for (const [label, text] of [["updated", updated], ["unchanged", unchanged], ["mixed", mixed]]) {
 		assert.match(text, /reload OR RESTART/, `${label}: names restart as an activation path`);
 		assert.match(text, /may not be under your control/, `${label}: says whose choice it is not`);
 	}
