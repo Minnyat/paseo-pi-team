@@ -228,6 +228,16 @@ at SPAWN: a seat keeps whatever its provider said at the moment it was created,
 so existing seats keep the old settings and only newly created seats pick up the
 change. Nothing you do to this file reaches an agent that is already up.
 
+**A written-but-unloaded config is not dormant.** It is tempting to read the
+step above as "it takes effect when you decide to reload", and that is not what
+the file means. It takes effect at the next reload **or restart**, whoever or
+whatever causes one — an unattended restart, a second operator, a crash
+recovery. This is not hypothetical: a daemon on the development host restarted
+with nobody instructing it and took 9 of 16 live seats with it. So `--apply` is
+not a staging step you can leave half-finished; treat the config as live from
+the moment you write it, and if you are not ready for the change to take
+effect, do not apply it yet.
+
 One known race, stated rather than hidden: `~/.paseo/config.json` has a second
 writer. The daemon persists config itself, and the app can edit providers while
 it runs. `--apply` writes atomically — a rename over the destination, so no

@@ -252,6 +252,23 @@ function stableJson(value) {
 // File IO — merge in place, back up first, write atomically.
 // ---------------------------------------------------------------------------
 
+/**
+ * Raw bytes, or `null` when absent, or `undefined` when present-but-unreadable.
+ *
+ * existsSync-then-readFileSync is a TOCTOU: the file can vanish between the two,
+ * and a permission or IO error throws regardless. An unguarded read here would
+ * escape main() as a Node stack trace — and a --json caller would get empty
+ * stdout — instead of the refusal this module is careful to produce everywhere
+ * else.
+ */
+export function readTextOrNull(path) {
+	try {
+		return existsSync(path) ? readFileSync(path, "utf8") : null;
+	} catch {
+		return undefined;
+	}
+}
+
 export function readJsonOrNull(path) {
 	if (!existsSync(path)) return null;
 	try {
@@ -390,6 +407,22 @@ export function paseoConfigPath(env = process.env) {
  * the next unrelated `seats apply` delete all three role providers. Two files,
  * two ownership tokens, and neither command can reach the other's providers.
  */
+/**
+ * Parse a config that must be a JSON OBJECT. `undefined` means unusable —
+ * unparseable, or valid JSON of the wrong shape (`[]`, `42`, `"x"`, `true`),
+ * which would otherwise spread into an object and quietly replace the file.
+ */
+export function parseConfigObject(text) {
+	let parsed;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+	return parsed;
+}
+
 export function claudeProviderLedgerPath(env = process.env) {
 	const dir = env.PST_TEAM_CONFIG_DIR?.trim() || join(homedir(), ".paseo-pi-team");
 	return join(dir, "claude-provider-ledger.json");
@@ -439,6 +472,19 @@ export function readProviderLedger(path) {
  * the final read and the rename; it does not close it. A daemon write landing
  * inside that window is still lost, and that is a known, accepted race — stated
  * here rather than left for someone to discover.
+ *
+ * Two further known gaps, same discipline:
+ *
+ * - The config write and the ledger write are not atomic WITH RESPECT TO EACH
+ *   OTHER, and the config goes first. If the process dies between them, the
+ *   providers exist with no ownership record: a later --apply sees names it
+ *   does not recognise and skips them as operator-owned, and --uninstall never
+ *   removes them. Config-first is the deliberate order — the opposite failure
+ *   (a ledger claiming providers that were never written) would make uninstall
+ *   delete entries it did not create, which is the worse of the two.
+ * - writeJsonAtomic leaves its `.tmp` sibling behind if writeFileSync throws
+ *   (the rename is guarded, the write is not). Pre-existing and shared with the
+ *   install path; noted, not fixed here.
  */
 export async function applyProviders(env = process.env, { force = false } = {}) {
 	const configPath = paseoConfigPath(env);
@@ -447,19 +493,21 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 	// ONE read, reused for both the parse and the conflict check below. Reading
 	// twice would let `current` come from different bytes than the snapshot we
 	// later compare against.
-	const before = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
-	let current = null;
-	if (before !== null) {
-		try {
-			current = JSON.parse(before);
-		} catch {
-			current = undefined;
-		}
+	const before = readTextOrNull(configPath);
+	if (before === undefined) {
+		return {
+			action: "apply",
+			configPath,
+			status: "failed",
+			error: `${configPath} exists but could not be read — left untouched`,
+			ok: false,
+		};
 	}
-	// `undefined` is unparseable, `null` is absent — the distinction is the whole
+	const current = before === null ? null : parseConfigObject(before);
+	// `undefined` is unusable, `null` is absent — the distinction is the whole
 	// point. cli/lib/config-walker.mjs's reader collapses both to null, which
 	// would make a corrupt config look like a fresh one and get overwritten.
-	if (current === undefined || (current !== null && (typeof current !== "object" || Array.isArray(current)))) {
+	if (current === undefined) {
 		return {
 			action: "apply",
 			configPath,
@@ -489,20 +537,59 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 		toWrite[name] = entry;
 	}
 
-	// --force additionally adopts names the operator owns, so the merge replaces
-	// them instead of reporting them as skipped.
-	const ownedForMerge = force ? Object.keys(toWrite) : Object.keys(ledger);
+	/**
+	 * Is the LIVE entry still the one we wrote?
+	 *
+	 * Being in the ledger is not enough. A provider we created and the operator
+	 * has since hand-tuned is THEIRS, and the ledger alone cannot tell the two
+	 * apart. Without this, ownedForMerge would carry the name into
+	 * applySeatsToPaseoConfig's owned set, bypass its skip guard, and overwrite
+	 * their edit wholesale — and since the generated block changed in 6ac3e81,
+	 * "run --apply again" is the upgrade path for every existing install, so
+	 * that is the exact run that would have discarded it.
+	 *
+	 * This is the same comparison removeProviders makes before removing
+	 * anything. One ownership model, both halves agreeing.
+	 */
+	const liveIsOurs = (name) => {
+		const live = existingProviders[name];
+		if (live === undefined || ledger[name] === undefined) return false;
+		return stableJson(live) === stableJson(ledger[name].wrote ?? null);
+	};
+
+	// Names we still own: ours-and-unmodified, plus ones already gone from the
+	// config (kept owned so a retired provider can still be cleaned up).
+	const ownedNow = Object.keys(ledger).filter(
+		(name) => existingProviders[name] === undefined || liveIsOurs(name),
+	);
+	// --force adopts what the operator owns. The set is the UNION with the
+	// ledger, not just what we are writing: a name we generated in an older
+	// version and no longer generate must stay owned, or the deletion loop never
+	// sees it and it is stranded in the config with no ownership record —
+	// unreachable by any later --apply or --uninstall.
+	const ownedForMerge = force
+		? [...new Set([...Object.keys(ledger), ...Object.keys(toWrite)])]
+		: ownedNow;
 	const result = applySeatsToPaseoConfig(current, toWrite, ownedForMerge);
 
 	const nextLedger = {};
 	for (const name of Object.keys(toWrite)) {
 		if (result.skipped.includes(name)) continue;
-		const previous = existingProviders[name];
-		const wasOurs = ledger[name] !== undefined;
-		nextLedger[name] =
-			previous !== undefined && !wasOurs
-				? { mode: "replaced", wrote: toWrite[name], previous }
-				: { mode: ledger[name]?.mode === "replaced" ? "replaced" : "created", wrote: toWrite[name], ...(ledger[name]?.previous !== undefined ? { previous: ledger[name].previous } : {}) };
+		const live = existingProviders[name];
+		const wrote = toWrite[name];
+		if (live === undefined || liveIsOurs(name)) {
+			// Ours, or not there at all. Carry forward an operator original we
+			// recorded on an earlier --force so uninstall can still restore it.
+			const prior = ledger[name];
+			nextLedger[name] =
+				prior?.previous !== undefined
+					? { mode: "replaced", wrote, previous: prior.previous }
+					: { mode: "created", wrote };
+		} else {
+			// Theirs — never ours, or ours-then-edited. --force is replacing it,
+			// so THEIR version is what uninstall has to be able to put back.
+			nextLedger[name] = { mode: "replaced", wrote, previous: live };
+		}
 	}
 	// A name the operator deleted stays claimed, so a later run still recognises
 	// it as ours-but-removed rather than creating it afresh.
@@ -511,18 +598,27 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 	const unchanged =
 		result.created.length === 0 && result.updated.length === 0 && result.removed.length === 0;
 
+	// See CONCURRENCY above: detect a competing write, do not try to lock. An
+	// unreadable re-read counts as one too — fail closed, since the one thing we
+	// must not do is write over bytes we could not check.
+	//
+	// This runs BEFORE the unchanged branch, not inside it. Every conclusion
+	// below was drawn from `before`, and "there is nothing to do" is just as
+	// stale as any other: a competing write that lands between our read and the
+	// ledger read makes the three providers look deliberately deleted, so we
+	// would report a confident no-op — and skip the conflict check entirely —
+	// on the strength of data we already know is out of date.
+	const now = readTextOrNull(configPath);
+	if (now === undefined || now !== before) {
+		return {
+			action: "apply",
+			configPath,
+			status: "conflict",
+			error: `${configPath} changed while this command was running (the daemon or the app also writes it) — nothing was written, re-run to pick up both changes`,
+			ok: false,
+		};
+	}
 	if (!unchanged) {
-		// See CONCURRENCY above: detect a competing write, do not try to lock.
-		const now = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
-		if (now !== before) {
-			return {
-				action: "apply",
-				configPath,
-				status: "conflict",
-				error: `${configPath} changed while this command was running (the daemon or the app also writes it) — nothing was written, re-run to pick up both changes`,
-				ok: false,
-			};
-		}
 		writeJsonAtomic(configPath, result.config);
 	}
 	// Only when it actually differs: an unchanged apply that still rewrote the
@@ -535,11 +631,22 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 		});
 	}
 
+	// What is ACTUALLY on the host now. "Nothing to do" and "the providers are
+	// present" are different claims, and only this one can be checked: an
+	// operator who deleted all three and re-ran would otherwise be told the work
+	// was already done while the host carries none of it.
+	const finalProviders = result.config?.agents?.providers ?? {};
+	const absent = Object.keys(generated).filter((name) => finalProviders[name] === undefined);
+
 	return {
 		action: "apply",
 		configPath,
 		ledgerPath,
-		status: unchanged ? "unchanged" : current === null ? "created" : "updated",
+		status: absent.length > 0 ? "incomplete" : unchanged ? "unchanged" : current === null ? "created" : "updated",
+		// Generated names that are NOT in the config after this run. Never
+		// reported as success: the host is missing providers we are supposed to
+		// have put there, whatever the reason.
+		absent,
 		created: result.created,
 		updated: result.updated,
 		// A provider the operator hand-wrote is never overwritten without --force.
@@ -547,7 +654,9 @@ export async function applyProviders(env = process.env, { force = false } = {}) 
 		// In our ledger, deleted from the config by the operator, left deleted.
 		deletedByOperator: deleted,
 		providers: toWrite,
-		ok: true,
+		// Not ok when a generated provider is missing from the host, even though
+		// the command itself did exactly what it should have.
+		ok: absent.length === 0,
 	};
 }
 
@@ -567,13 +676,19 @@ export function removeProviders(env = process.env) {
 	if (Object.keys(ledger).length === 0) {
 		return { action: "remove-providers", configPath, status: "missing", ok: true };
 	}
-	const current = readJsonOrNull(configPath);
+	// The SAME discriminator apply uses. A weaker check here let valid JSON of
+	// the wrong shape through: nothing was removed or restored, and the ledger
+	// was then deleted anyway — destroying the `previous` entries needed to put
+	// a --force-replaced operator provider back. The ledger is the only record
+	// of that, so it must outlive any config we did not understand.
+	const raw = readTextOrNull(configPath);
+	const current = raw === null ? null : raw === undefined ? undefined : parseConfigObject(raw);
 	if (current === undefined) {
 		return {
 			action: "remove-providers",
 			configPath,
 			status: "failed",
-			error: `${configPath} is not valid JSON — left untouched`,
+			error: `${configPath} is not a readable JSON object — left untouched, and the ledger is kept`,
 			ok: false,
 		};
 	}
@@ -625,8 +740,32 @@ export function removeProviders(env = process.env) {
  * stated in words, for someone who does not know how Paseo loads providers.
  */
 export function applyNextSteps(result) {
+	// Providers we are supposed to have written are not on the host. Saying
+	// "already applied" here would be false in the most expensive direction.
+	if (result.absent?.length) {
+		return [
+			"",
+			`  MISSING FROM THIS HOST: ${result.absent.join(", ")}`,
+			"  These were not written, because you deleted them after a previous",
+			"  apply and a deliberate deletion is not undone silently. Until they",
+			"  are restored, seats using them cannot start. Re-create them with:",
+			"",
+			"         node scripts/claude-setup.mjs --apply --force",
+		];
+	}
 	if (result.status === "unchanged") {
-		return ["  already applied — nothing to write, and nothing to reload."];
+		return [
+			"",
+			result.skipped?.length
+				? `  Nothing was written. ${result.skipped.join(", ")} still differ${result.skipped.length === 1 ? "s" : ""} from what this pack generates, and was left alone because you own it.`
+				: "  The file already says what it should — nothing was written.",
+			"  That is NOT the same as the change being live. This command cannot",
+			"  tell whether the daemon has re-read the file since it was written,",
+			"  and it cannot tell whether any running agent predates that. If you",
+			"  have not reloaded since the first apply, see the note below.",
+			"",
+			...pendingStateNote(),
+		];
 	}
 	return [
 		"",
@@ -638,10 +777,10 @@ export function applyNextSteps(result) {
 		"         paseo daemon reload",
 		"",
 		"       A reload is enough — agents.providers is reloadable, and the",
-		"       provider registry is rebuilt live. A full restart is NOT needed",
-		"       and would kill every agent running on this host.",
+		"       provider registry is rebuilt live. You do not need to restart,",
+		"       and a restart would kill every agent running on this host.",
 		"",
-		"    2. The agents have to be created AFTER that reload. An agent reads",
+		"    2. The agents have to be created AFTER that re-read. An agent reads",
 		"       its provider once, at the moment it is spawned, and keeps those",
 		"       settings for the rest of its life. Agents that are already",
 		"       running will NOT pick this up — there is no way to hand them the",
@@ -649,6 +788,32 @@ export function applyNextSteps(result) {
 		"",
 		"  In short: reload, then start a NEW agent. An agent started before now",
 		"  keeps the old settings no matter how many times you reload.",
+		"",
+		...pendingStateNote(),
+	];
+}
+
+/**
+ * The pending state is not dormant.
+ *
+ * It is tempting to describe an unapplied config as waiting for the operator to
+ * act. It is not: the daemon can be re-read by something other than the person
+ * who wrote the file — an unattended restart, a supervisor, another operator,
+ * a crash-recovery — at a time nobody chose. On this host a daemon restarted on
+ * its own and took 9 of 16 live seats with it. So the honest framing is not
+ * "run this when ready" but "this will activate at the next reload OR restart,
+ * whoever causes it".
+ */
+export function pendingStateNote() {
+	return [
+		"  WHEN THIS ACTIVATES IS NOT ENTIRELY UP TO YOU.",
+		"  A written-but-unloaded config is not dormant. It takes effect at the",
+		"  next reload OR RESTART of the daemon,",
+		"  and that may not be under your control:",
+		"  an unattended restart, another operator, or a crash recovery will apply",
+		"  it just as surely as you would, at a moment you did not pick.",
+		"  Treat the file as live from the moment you write it — if you are not",
+		"  ready for this change to take effect, do not apply it yet.",
 	];
 }
 
@@ -826,7 +991,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 	} else if (mode === "--print-providers") {
 		process.stdout.write(`${JSON.stringify(result.agents, null, 2)}\n`);
 	} else {
-		const lines = [`[paseo-team] claude ${result.action}: ${result.ok ? "ok" : "FAILED"}`];
+		// apply has more outcomes than ok/FAILED — "incomplete" is neither a
+		// success nor a failure of the command, so print the status it computed.
+		const headline =
+			result.action === "apply" ? result.status : result.ok ? "ok" : "FAILED";
+		const lines = [`[paseo-team] claude ${result.action}: ${headline}`];
 		if (result.action === "verify") {
 			// verify reports STATE (which hooks are present), not a write result:
 			// printing it through the install shape yields "undefined (undefined)".
@@ -851,7 +1020,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 			]) {
 				if (names?.length) lines.push(`    ${label}: ${names.join(", ")}`);
 			}
-			if (result.ok) lines.push(...applyNextSteps(result));
+			// Printed for "incomplete" too (ok is false there): that branch is
+			// precisely the one the operator most needs to read.
+			if (result.status !== "failed" && result.status !== "conflict") {
+				lines.push(...applyNextSteps(result));
+			}
 		} else {
 			if (result.hooks) lines.push(`  hooks -> ${result.hooks.path} (${result.hooks.status})`);
 			if (result.mcp) lines.push(`  mcp   -> ${result.mcp.path} (${result.mcp.status})`);

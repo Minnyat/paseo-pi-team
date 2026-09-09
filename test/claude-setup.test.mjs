@@ -36,6 +36,7 @@ import {
 	PASEO_TEAM_HOOK_TAG,
 	TEAM_MCP_SERVER_NAME,
 } from "../scripts/claude-setup.mjs";
+import { seatLedgerPath } from "../scripts/seat-profiles.mjs";
 
 const home = mkdtempSync(join(tmpdir(), "paseo-claude-setup-"));
 const claudeDir = join(home, ".claude");
@@ -458,6 +459,25 @@ function applySandbox(tag) {
 	assert.ok(ledgerPath.endsWith("claude-provider-ledger.json"));
 	assert.ok(!ledgerPath.includes("seat"));
 
+	// A distinct PATH is not the whole guarantee: a change could keep this file
+	// and ALSO record the same names in the seat ledger, which would hand
+	// `seats apply` the delete-when-absent power over them again. Assert on the
+	// bytes actually written, so any second home for these names fails here.
+	assert.equal(existsSync(seatLedgerPath(s.dir)), false, "the seat ledger is not created");
+	for (const name of readdirSync(s.dir)) {
+		// The config is where they SHOULD be; the claude ledger is the one record
+		// of ownership. Anything else naming them is a second owner.
+		if (name === "claude-provider-ledger.json" || name.startsWith("paseo-config.json")) continue;
+		if (!name.endsWith(".json")) continue;
+		const body = readFileSync(join(s.dir, name), "utf8");
+		for (const provider of ROLE_PROVIDERS) {
+			assert.ok(
+				!body.includes(`"${provider}"`),
+				`${name} must not claim ${provider} — only the claude ledger owns these`,
+			);
+		}
+	}
+
 	const again = await applyProviders(s.env);
 	assert.equal(again.status, "unchanged", "a second apply writes nothing");
 	assert.deepEqual([again.created, again.updated], [[], []]);
@@ -578,14 +598,171 @@ function applySandbox(tag) {
 	rmSync(s.dir, { recursive: true, force: true });
 }
 
-// The operator has to be TOLD the change is inert, not just handed a command.
+// An entry WE created and the operator has since edited is THEIRS. This is the
+// upgrade path — 6ac3e81 changed the generated block, so "run --apply again" is
+// what every existing install does next, and that is exactly the run that must
+// not discard their tuning.
 {
-	const text = applyNextSteps({ status: "updated" }).join("\n");
-	assert.match(text, /HAS NOT TAKEN EFFECT YET/);
-	assert.match(text, /already\s+running will NOT pick this up/);
-	assert.match(text, /reload/);
-	assert.ok(!/restart\b(?!.*would kill)/i.test(text) || /would kill every agent/.test(text));
-	assert.match(applyNextSteps({ status: "unchanged" }).join("\n"), /already applied/);
+	const s = applySandbox("apply-edited");
+	await applyProviders(s.env);
+	const config = s.read();
+	config.agents.providers["claude-peer"].model = "operator's pinned model";
+	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
+
+	const rerun = await applyProviders(s.env);
+	assert.deepEqual(rerun.skipped, ["claude-peer"], "reported, not silently taken");
+	assert.equal(
+		s.read().agents.providers["claude-peer"].model,
+		"operator's pinned model",
+		"an edit to a provider we created survives a later apply",
+	);
+	// Being in the ledger is not ownership on its own — the recorded entry has
+	// to still match. Same comparison removeProviders makes.
+	assert.ok(!rerun.updated.includes("claude-peer"));
+
+	// --force does take it, and records THEIR version so uninstall restores it.
+	const forced = await applyProviders(s.env, { force: true });
+	assert.ok(forced.updated.includes("claude-peer"));
+	assert.equal(s.read().agents.providers["claude-peer"].env.CLAUDE_CODE_ENABLE_CFC, "1");
+	const backedOut = removeProviders(s.env);
+	assert.deepEqual(backedOut.restored, ["claude-peer"]);
+	assert.equal(
+		s.read().agents.providers["claude-peer"].model,
+		"operator's pinned model",
+		"--force stored the operator's edited entry as `previous`",
+	);
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// A competing write between the read and the write aborts, having written
+// nothing. No injection point needed: applyProviders awaits, so a timer armed
+// before the call fires inside it and the re-read differs on the way out.
+{
+	const s = applySandbox("apply-conflict");
+	writeFileSync(s.configPath, JSON.stringify({ agents: { providers: {} } }, null, 2), "utf8");
+
+	// Two writers racing over the same file, which is what the guard exists for.
+	// Both read the same `before`, then both suspend on the single await in
+	// applyProviders; the first to resume writes, and the second's re-read no
+	// longer matches what it read. Deterministic, and it needs no seam in the
+	// production path.
+	//
+	// (A setTimeout cannot produce this: that one await is a dynamic import of an
+	// already-cached module, so it settles as a MICROtask and the timers phase is
+	// never reached inside the call.)
+	const [first, second] = await Promise.all([
+		applyProviders(s.env),
+		applyProviders(s.env),
+	]);
+
+	const outcomes = [first, second];
+	const winner = outcomes.find((r) => r.ok);
+	const loser = outcomes.find((r) => !r.ok);
+	assert.ok(winner, "one of the two writes lands");
+	assert.ok(loser, "the other is refused rather than clobbering it");
+	assert.equal(loser.status, "conflict");
+	assert.match(loser.error, /changed while this command was running/);
+
+	// The winner's bytes are intact: the loser aborted BEFORE any write.
+	const onDisk = s.read();
+	for (const name of ROLE_PROVIDERS) assert.ok(name in onDisk.agents.providers);
+	assert.equal(onDisk.agents.providers["claude-peer"].env.CLAUDE_CODE_ENABLE_CFC, "1");
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// Valid JSON of the wrong SHAPE is not a config. It must not be spread into an
+// object, and the ledger must survive — it is the only record of what a --force
+// replaced, so deleting it would strand the operator's original.
+{
+	for (const shape of ["[]", "42", '"x"', "true", "null"]) {
+		const s = applySandbox("apply-shape");
+		writeFileSync(s.configPath, shape, "utf8");
+		const result = await applyProviders(s.env);
+		assert.equal(result.ok, false, `${shape} is not a config`);
+		assert.equal(result.status, "failed");
+		assert.equal(readFileSync(s.configPath, "utf8"), shape, "bytes untouched");
+
+		const ledgerPath = claudeProviderLedgerPath(s.env);
+		writeFileSync(ledgerPath, JSON.stringify({ version: 1, providers: { "claude-peer": { mode: "replaced", wrote: {}, previous: { extends: "claude", label: "theirs" } } } }), "utf8");
+		const backedOut = removeProviders(s.env);
+		assert.equal(backedOut.ok, false, `${shape}: uninstall refuses too`);
+		assert.equal(readFileSync(s.configPath, "utf8"), shape, "bytes untouched");
+		assert.ok(existsSync(ledgerPath), `${shape}: the ledger is KEPT, or the restore data is gone`);
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+}
+
+// --force must not strand a provider we generated in an older version. Plain
+// apply retires it correctly; the destructive-consent flag was the one leaking.
+{
+	const s = applySandbox("apply-retired");
+	await applyProviders(s.env);
+	const ledgerPath = claudeProviderLedgerPath(s.env);
+	const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+	const retired = { extends: "claude", label: "a role we no longer generate" };
+	ledger.providers["claude-archivist"] = { mode: "created", wrote: retired };
+	writeFileSync(ledgerPath, JSON.stringify(ledger), "utf8");
+	const config = s.read();
+	config.agents.providers["claude-archivist"] = retired;
+	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
+
+	const forced = await applyProviders(s.env, { force: true });
+	assert.ok(forced.removed?.includes("claude-archivist") ?? true);
+	assert.equal(
+		s.read().agents.providers["claude-archivist"],
+		undefined,
+		"--force retires it instead of stranding it with no ownership record",
+	);
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// Deleting every provider and re-running must not answer "already applied".
+{
+	const s = applySandbox("apply-absent");
+	await applyProviders(s.env);
+	const config = s.read();
+	for (const name of ROLE_PROVIDERS) delete config.agents.providers[name];
+	writeFileSync(s.configPath, JSON.stringify(config, null, 2), "utf8");
+
+	const rerun = await applyProviders(s.env);
+	assert.equal(rerun.status, "incomplete");
+	assert.equal(rerun.ok, false, "zero of our providers on the host is not success");
+	assert.deepEqual([...rerun.absent].sort(), ROLE_PROVIDERS);
+	const text = applyNextSteps(rerun).join("\n");
+	assert.match(text, /MISSING FROM THIS HOST/);
+	assert.ok(!/already applied/i.test(text));
+	rmSync(s.dir, { recursive: true, force: true });
+}
+
+// The operator has to be TOLD the change is inert, not just handed a command —
+// and told that WHEN it activates is not entirely theirs to choose.
+{
+	const updated = applyNextSteps({ status: "updated" }).join("\n");
+	assert.match(updated, /HAS NOT TAKEN EFFECT YET/);
+	assert.match(updated, /already\s+running will NOT pick this up/);
+	assert.match(updated, /reload/);
+
+	// The unchanged branch must NOT claim there is nothing to reload: this
+	// command cannot know whether a reload has happened since the write.
+	const unchanged = applyNextSteps({ status: "unchanged" }).join("\n");
+	assert.ok(!/nothing to reload/i.test(unchanged));
+	assert.match(unchanged, /NOT the same as the change being live/);
+
+	// Both must carry the framing that a restart nobody asked for will activate
+	// this. Asserted per branch so dropping it from either one fails.
+	for (const [label, text] of [["updated", updated], ["unchanged", unchanged]]) {
+		assert.match(text, /reload OR RESTART/, `${label}: names restart as an activation path`);
+		assert.match(text, /may not be under your control/, `${label}: says whose choice it is not`);
+	}
+
+	// Restart is never presented as a step to RUN. Checked line by line, because
+	// `.` does not cross newlines and a whole-text lookahead silently passes.
+	for (const line of updated.split("\n").concat(unchanged.split("\n"))) {
+		assert.ok(
+			!/^\s+\S*\s*daemon restart\s*$/i.test(line),
+			`restart must never be offered as a command: ${JSON.stringify(line)}`,
+		);
+	}
 }
 
 rmSync(home, { recursive: true, force: true });
