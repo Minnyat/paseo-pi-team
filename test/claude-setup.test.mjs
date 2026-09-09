@@ -306,6 +306,18 @@ assert.notEqual(claudeUserConfigPath({}), join(claudeDir, ".claude.json"));
 			"/home/u/.nvm/versions/node/v22.23/bin/node",
 		],
 	);
+	// A Windows path arrives with backslashes and must come back usable. The
+	// separators are normalized but the path is NOT resolved: resolving would
+	// staple the current drive onto every POSIX-looking case above, which is
+	// how this test would pass on Linux and fail on the Windows CI runner.
+	assert.deepEqual(
+		durableNodeCandidates(String.raw`C:\Users\u\AppData\Roaming\nvm\v22.23.2\node.exe`),
+		[
+			"C:/Users/u/AppData/Roaming/nvm/v22/node.exe",
+			"C:/Users/u/AppData/Roaming/nvm/v22.23/node.exe",
+		],
+	);
+
 	// Nothing version-shaped (a distro or Windows install) → nothing to prefer.
 	assert.deepEqual(durableNodeCandidates("/usr/bin/node"), []);
 	assert.deepEqual(durableNodeCandidates("C:/Program Files/nodejs/node.exe"), []);

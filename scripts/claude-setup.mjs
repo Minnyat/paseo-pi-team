@@ -159,11 +159,17 @@ function usableNode(candidate) {
  * durable still, and they are exactly how a hook would silently start running
  * on a node too old for the pack.
  *
+ * Separators are normalized but the path is NOT resolved: this is a pure
+ * shape transform over an already-absolute interpreter path, and running it
+ * through `resolve()` would staple the current drive onto a POSIX-looking path
+ * on Windows — which is fine for the real `process.execPath` and wrong for
+ * every test that describes a layout this machine does not have.
+ *
  * Exported for the tests, which build paths for managers this machine does not
  * have installed.
  */
 export function durableNodeCandidates(execPath) {
-	const segments = normalizePath(execPath).split("/");
+	const segments = String(execPath).replace(/\\/g, "/").split("/");
 	const candidates = [];
 	for (let i = 0; i < segments.length; i++) {
 		const segment = segments[i];
