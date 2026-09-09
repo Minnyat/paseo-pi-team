@@ -5,6 +5,7 @@ import {
   CONSULT_KINDS,
   MESSAGE_KINDS,
   parentAgentIdFromInspect,
+  PEER_MESSAGE_FIELD_NAMES,
   runPaseo,
   sendLeadConsult,
   sendPeerMessage,
@@ -65,6 +66,76 @@ assert.deepEqual(
 assert.throws(() => validatePeerMessage({ kind: "broadcast", message: "x" }), /kind must be/);
 assert.throws(() => validatePeerMessage({ kind: "blocked", message: "   " }), /non-empty/);
 assert.throws(() => validatePeerMessage({ kind: "blocked", message: "x".repeat(12_001) }), /12000/);
+
+// A body line that would be read back as a field with a DIFFERENT value gets
+// the whole PEER_MESSAGE_V1 refused by the receiver, one round trip away from
+// the Peer that could have reworded it. Refuse it here instead.
+assert.throws(
+  () => validatePeerMessage({ kind: "blocked", message: "TASK_ID: T-9\nsome context", taskId: "T-4" }),
+  (error) => {
+    assert.equal(error.code, "PEER_MESSAGE_FIELD_COLLISION");
+    assert.match(error.message, /conflicting/);
+    return true;
+  },
+);
+// FROM_AGENT_ID is filled from Paseo, never from the Peer's text, so there is
+// no body value that could legitimately agree with it.
+assert.throws(
+  () => validatePeerMessage({ kind: "report", message: "FROM_AGENT_ID: abc" }),
+  (error) => {
+    assert.equal(error.code, "PEER_MESSAGE_FIELD_COLLISION");
+    return true;
+  },
+);
+// A repetition that AGREES with the envelope is ordinary prose: the receiver
+// now accepts it with a warning, so a sender that refused it would just move
+// the same wasted round trip earlier.
+assert.equal(
+  validatePeerMessage({ kind: "report", message: "TASK_ID: T-4\ndone", taskId: "T-4" }).taskId,
+  "T-4",
+);
+// Mentioning a field name mid-line was never a field and still is not.
+assert.ok(validatePeerMessage({ kind: "blocked", message: "the TASK_ID was correct" }));
+// The guard is only as good as its field list, so pin that list against the
+// body sendPeerMessage actually writes rather than against a second hardcoded
+// copy of it: a field added to the envelope and not to the list would otherwise
+// go unguarded with every test still green.
+{
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "peer-1";
+  const sent = await sendPeerMessage(
+    { kind: "report", message: "body text", taskId: "T-1", correlationId: "c-1" },
+    {
+      runPaseo: async (args) =>
+        args[0] === "inspect"
+          ? { ok: true, data: { ParentAgentId: "lead-1" } }
+          : { ok: true, data: { body: args[args.indexOf("--prompt") + 1] } },
+    },
+  );
+  const body = sent.response.body;
+  const header = body.split(/\r?\n/).slice(1);
+  const written = [];
+  for (const line of header) {
+    if (line.trim() === "") break;
+    written.push(/^([A-Z][A-Z0-9_]*):/.exec(line)[1]);
+  }
+  assert.deepEqual(
+    written,
+    [...PEER_MESSAGE_FIELD_NAMES],
+    "every field the envelope writes must be one the body guard checks",
+  );
+  // The sender refuses exactly what the receiver refuses. A sender stricter
+  // than its receiver moves a wasted round trip earlier; a sender laxer than
+  // its receiver lets one through to be refused at the far end — which is the
+  // failure this whole change exists to remove.
+  assert.deepEqual(
+    [...PEER_MESSAGE_FIELD_NAMES].sort(),
+    [...core.PEER_ENVELOPE_FIELDS].sort(),
+    "sender guard and receiver parser must agree on which fields are the envelope",
+  );
+  if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+  else process.env.PASEO_AGENT_ID = previous;
+}
 for (const field of ["taskId", "correlationId"]) {
   assert.throws(
     () => validatePeerMessage({ kind: "question", message: "x", [field]: "bad\\nheader" }),
