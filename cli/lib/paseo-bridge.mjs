@@ -114,6 +114,56 @@ export function runPaseoJson(args, options = {}) {
 }
 
 /**
+ * Run `paseo <args>` and return raw stdout.
+ *
+ * The `--json` sibling above is the default and should stay that way; this
+ * exists for the handful of paseo subcommands that have no JSON form at all
+ * (`logs` is one — it accepts `--json` and prints a transcript regardless).
+ * Callers get text and must parse it themselves, so keep that list short.
+ *
+ * `maxChars` bounds what is RETURNED to the caller (keeping the tail, which is
+ * the useful end of a transcript), not what the child process produces —
+ * `maxBuffer` is the only real cap on that, and it is deliberately generous.
+ * `totalChars` always reports the true size, so a caller can say how much it
+ * chose not to look at.
+ */
+export function runPaseoText(args, options = {}) {
+	return new Promise((resolve, reject) => {
+		assertArgv(args);
+		const timeoutMs = Math.max(250, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+		const maxChars = Math.max(1024, options.maxChars ?? 4 * 1024 * 1024);
+		const [bin, ...prefix] = paseoExec();
+		execFile(
+			bin,
+			[...prefix, ...args],
+			{
+				encoding: "utf8",
+				timeout: timeoutMs,
+				signal: options.signal,
+				stdio: ["ignore", "pipe", "pipe"],
+				maxBuffer: 32 * 1024 * 1024,
+				env: process.env,
+				windowsHide: true,
+			},
+			(error, stdout, stderr) => {
+				if (error) {
+					const text = `${String(stderr ?? "").trim()} ${String(error.message ?? "")}`.trim();
+					const code = error.killed || error.signal ? "TIMEOUT" : (error.code ?? "CLI_ERROR");
+					reject(new PaseoError(typeof code === "number" ? "CLI_ERROR" : code, text || "paseo failed", { args }));
+					return;
+				}
+				const text = String(stdout ?? "");
+				resolve({
+					text: text.length > maxChars ? text.slice(text.length - maxChars) : text,
+					totalChars: text.length,
+					clipped: text.length > maxChars,
+				});
+			},
+		);
+	});
+}
+
+/**
  * Bounded-concurrency map that never rejects: a failing item resolves to
  * `{ ok: false, error }`. A snapshot must degrade per item, not collapse
  * because one cold agent timed out.

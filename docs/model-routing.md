@@ -133,11 +133,42 @@ Mã lỗi fail-closed (không bao giờ fallback):
 CONFIG_INVALID                 route file lỗi schema/đọc được nhưng sai
 ROLE_PROVIDER_UNAVAILABLE      role profile thiếu/vô hiệu trên daemon
 MODEL_UNAVAILABLE              exact model không có trong list_models
-THINKING_OPTION_UNAVAILABLE    thinking level model không offer
+THINKING_OPTION_UNAVAILABLE    thinking level model không offer, HOẶC model
+                               tự khai không hỗ trợ extended thinking mà route
+                               lại xin một level khác "off"
 STARTUP_IDENTITY_UNAVAILABLE   runtimeInfo chưa xuất hiện trong startup timeout
 MODEL_RESOLUTION_MISMATCH      observed runtime identity ≠ requested
 HOST_ROUTE_UNAVAILABLE         class không có route trên host này
 ```
+
+## Ba trạng thái của extended thinking
+
+`list_models` có thể nói ba điều khác nhau về thinking, và resolver phân biệt
+đủ ba — gộp trạng thái 2 vào trạng thái 3 chính là lỗi đã loại hẳn model rẻ
+nhất (`claude-peer/claude-haiku-4-5`) khỏi mọi route strict:
+
+| Daemon trả về | `thinkingValidated` | Kết quả |
+|---|---|---|
+| Có option list, chứa level yêu cầu | `exact` | pass |
+| Có option list, KHÔNG chứa level | — | `THINKING_OPTION_UNAVAILABLE` |
+| `thinkingSupported: false`, hoặc option list RỖNG (có mặt nhưng trống — đúng cách Haiku 4.5 tự khai) | `unsupported` | pass **chỉ khi** `thinking: off`; level khác → `THINKING_OPTION_UNAVAILABLE` |
+| Không nói gì cả, route xin `thinking: off` | `off` | pass (kể cả `--strict`: không có gì để xác minh) |
+| Không nói gì cả, route xin level khác | `unverifiable` | warn; `--strict` → FAIL |
+
+Hai dòng cuối là ranh giới thật sự: **"không biết"** vẫn fail-closed như cũ,
+còn **"biết chắc là không có"** là một sự kiện đã xác minh, không phải một
+khoảng trống. Daemon nên công bố `thinkingSupported: false` một cách tường
+minh; resolver chấp nhận cả option list rỗng như cùng một tuyên bố viết dưới
+dạng dữ liệu.
+
+## Provider `available` ≠ có model dùng được
+
+`list_providers` báo `available` là nói về PROVIDER, không nói gì về inventory.
+Đã quan sát thấy `pi-peer` báo `available` nhưng `list_models` trả về mảng rỗng
+— provider trông như tồn tại, phía sau không có gì route được. Luôn gọi
+`list_models` trước khi định tuyến; `node scripts/preflight.mjs` nay tự làm
+việc này cho mọi role provider khỏe mạnh và cảnh báo (FAIL với `--strict`) khi
+inventory rỗng.
 
 ## Ranh giới secret
 

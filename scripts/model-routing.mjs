@@ -47,6 +47,14 @@ export const THINKING_LEVELS_BY_FAMILY = Object.freeze({
 /** Kept for compatibility: the pi levels, which predate the Claude family. */
 export const THINKING_LEVELS = THINKING_LEVELS_BY_FAMILY.pi;
 
+/**
+ * The one level that means "no extended thinking". It is in EVERY family's
+ * list, and it is the level a model without extended thinking runs at whether
+ * or not anybody asked for it — which is why a model that publishes no options
+ * can still be routed at exactly this level and no other.
+ */
+export const NO_THINKING_LEVEL = "off";
+
 export const RUNTIME_FAMILIES = Object.freeze(["pi", "claude"]);
 export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 
@@ -569,7 +577,25 @@ export function normalizeModelEntry(entry) {
 			.map((option) => (typeof option === "string" ? option : option?.id))
 			.filter((v) => typeof v === "string");
 	}
-	return { id: id.trim(), thinkingOptionIds };
+	// Tri-state, and the three states are genuinely different questions:
+	//
+	//   true  — the daemon says this model has extended thinking;
+	//   false — the daemon says it does NOT (an explicit `thinkingSupported:
+	//           false`, or an option list that is present and EMPTY, which is
+	//           the same statement written as data);
+	//   null  — the daemon said nothing, so we do not know.
+	//
+	// Collapsing false into null is what made the cheapest available model
+	// unroutable: a Haiku-class seat that genuinely has no extended thinking
+	// was read as "unverifiable" and refused, even for `thinking: off`, which
+	// such a model satisfies by construction. Only `null` is unverifiable.
+	let thinkingSupported = null;
+	if (typeof entry.thinkingSupported === "boolean") {
+		thinkingSupported = entry.thinkingSupported;
+	} else if (thinkingOptionIds !== null) {
+		thinkingSupported = thinkingOptionIds.length > 0;
+	}
+	return { id: id.trim(), thinkingOptionIds, thinkingSupported };
 }
 
 /** Provider status strings we accept as "available". Anything else present
@@ -635,7 +661,8 @@ export function buildProviderInventory(entries) {
  *   "unverifiable" as a failure (no warn-as-pass) and requires provider
  *   status to be explicitly healthy when a status field is present.
  * @returns {{paseoProvider: string, model: string, thinking: string,
- *            createAgentProvider: string, thinkingValidated: "exact"|"unverifiable"}}
+ *            createAgentProvider: string,
+ *            thinkingValidated: "exact"|"off"|"unsupported"|"unverifiable"}}
  * @throws {RoutingError} ROLE_PROVIDER_UNAVAILABLE | MODEL_UNAVAILABLE |
  *   THINKING_OPTION_UNAVAILABLE | HOST_ROUTE_UNAVAILABLE
  */
@@ -693,16 +720,35 @@ export function resolveRoute(config, modelClass, inventory, options = {}) {
 	}
 
 	let thinkingValidated = "exact";
-	if (modelEntry.thinkingOptionIds === null) {
-		if (strict) {
+	if (modelEntry.thinkingSupported === false) {
+		// KNOWN not to support extended thinking. That is a fact, not a gap, so
+		// it must not be spelled "unverifiable": the only level such a model can
+		// run is NO_THINKING_LEVEL, and asking for it is fully verified.
+		if (route.thinking !== NO_THINKING_LEVEL) {
+			throw new RoutingError(
+				"THINKING_OPTION_UNAVAILABLE",
+				`model "${route.model}" reports that it does not support extended thinking — route it with thinking "${NO_THINKING_LEVEL}" (requested "${route.thinking}")`,
+				{ model: route.model, thinking: route.thinking, modelClass },
+			);
+		}
+		thinkingValidated = "unsupported";
+	} else if (modelEntry.thinkingOptionIds === null) {
+		if (route.thinking === NO_THINKING_LEVEL) {
+			// Nothing published, but nothing to publish either: "off" is the
+			// absence of extended thinking, so an empty inventory satisfies it in
+			// every case an inventory could have. Strict mode included — there is
+			// no fact here that could later turn out to be false.
+			thinkingValidated = "off";
+		} else if (strict) {
 			throw new RoutingError(
 				"THINKING_OPTION_UNAVAILABLE",
 				`model "${route.model}" exposes no thinking option list — thinking "${route.thinking}" is UNVERIFIABLE (strict mode: unverifiable is not a pass)`,
 				{ model: route.model, thinking: route.thinking, modelClass },
 			);
+		} else {
+			// Non-reasoning models may carry no option list; only the default is safe.
+			thinkingValidated = "unverifiable";
 		}
-		// Non-reasoning models may carry no option list; only the default is safe.
-		thinkingValidated = "unverifiable";
 	} else if (!modelEntry.thinkingOptionIds.includes(route.thinking)) {
 		throw new RoutingError(
 			"THINKING_OPTION_UNAVAILABLE",

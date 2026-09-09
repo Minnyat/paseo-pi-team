@@ -99,6 +99,22 @@ INITIAL_WORKTREE_CLEAN: yes | no
   → `STATUS: BLOCKED`, `REASON: DIRTY_INITIAL_WORKTREE` (possibly another
   user's unrelated changes; do not overwrite, do not reset yourself).
 
+  **Unless your brief says `WORKSPACE_MODE: shared`.** Then you are one of
+  several Peers in ONE checkout, isolation comes from `OWNED_SCOPE` and the
+  scope lease rather than from a private tree, and files with ` M` or `??`
+  outside your scope are the normal state of a working shared workspace — not
+  a broken environment. In that mode:
+  - dirt OUTSIDE `OWNED_SCOPE` → carry on. Report it as an observation, never
+    as `DIRTY_INITIAL_WORKTREE`. Never stage, revert, reset or stash it, and
+    never `git add -A` — stage your own paths by name.
+  - dirt INSIDE `OWNED_SCOPE` → still a blocker, and a sharper one: you are
+    supposed to be the only writer there. `STATUS: BLOCKED`,
+    `REASON: SCOPE_CONFLICT`, list the paths, change nothing.
+
+  Without `WORKSPACE_MODE: shared`, assume a private tree and treat any dirt
+  as a blocker — a lone writer in a dirty tree really is about to overwrite
+  someone.
+
 Start editing only when both gates pass.
 
 ## Peer ↔ Lead communication
@@ -109,6 +125,29 @@ Use the custom tool `peer_ask_lead` with message kinds:
 kind: question | blocked | dependency | progress | report
 message: evidence + the specific question/proposal
 ```
+
+**Point at the artifact; do not resend it.** When your work produced a file,
+the report says WHERE it is and what changed — path, and the few lines that
+carry the finding. It does not paste the document back. Every message you send
+is stored verbatim in your activity log, so a report that inlines a document
+already on disk stores that document twice and makes it twice as expensive for
+the Lead to read: a Lead asking for the last three activities gets hundreds of
+kilobytes of text it could have read from the file, and often has to give up on
+reading the log at all. Keep a report to roughly a screen; put the long form in
+the file and name it.
+
+Field-shaped lines in your report body are fine. Writing `TASK_ID: T-4` or
+`STATUS: DONE` in your own prose no longer gets the message refused: a
+repetition that agrees is accepted, and a line the receiver does not act on
+(`STATUS`, `FILES_CHANGED`, anything outside the envelope) is accepted even if
+you write it twice with different values — the first one is kept and the Lead
+sees a note.
+
+The exception is the four ENVELOPE fields — `KIND`, `CORRELATION_ID`,
+`TASK_ID`, `FROM_AGENT_ID`. Those are what the Lead acts on, so a body line
+giving one of them a DIFFERENT value than the header is refused the moment you
+send it: the receiver could not tell which you meant. Reword or quote it
+(`> TASK_ID: ...`).
 
 The tool reads `PASEO_AGENT_ID` itself, inspects the parent label
 `paseo.parent-agent-id`, and sends to the correct parent Lead. The inspect has

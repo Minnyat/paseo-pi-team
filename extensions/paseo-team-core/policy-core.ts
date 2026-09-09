@@ -1710,9 +1710,28 @@ export interface PeerBlock {
 	/** Uppercase FIELD -> first occurrence value. */
 	fields: Map<string, string>;
 	malformed: string[];
+	/**
+	 * Repetitions that changed nothing. Surfaced to the Lead but NOT a reason
+	 * to refuse the message — see `parsePeerBlock`.
+	 */
+	warnings: string[];
 }
 
 const PEER_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
+
+/**
+ * The fields of the envelope itself — the only ones any receiver acts on, and
+ * therefore the only ones where two different values are a real ambiguity
+ * rather than ordinary prose. `scripts/team-communication.mjs` writes exactly
+ * these (its `PEER_MESSAGE_FIELD_NAMES`), and team-communication.test.mjs pins
+ * the two together.
+ */
+export const PEER_ENVELOPE_FIELDS: ReadonlySet<string> = new Set([
+	"KIND",
+	"CORRELATION_ID",
+	"TASK_ID",
+	"FROM_AGENT_ID",
+]);
 
 /**
  * Parse a PEER_MESSAGE_V1 message.
@@ -1720,8 +1739,35 @@ const PEER_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
  * Same two rules as `parseSupervisorBlock`, for the same two reasons. The
  * header must be a line of its OWN, because this repo's prompts discuss the
  * contract in prose and a mention of it is not an instance of it. And a
- * duplicate field becomes an entry in `malformed` rather than a quietly
- * chosen value, because the receiving Lead is about to act on it.
+ * CONFLICTING duplicate field becomes an entry in `malformed` rather than a
+ * quietly chosen value, because the receiving Lead is about to act on it.
+ *
+ * A repetition that agrees with itself is a different thing, and the
+ * difference is worth a rule of its own. Everything after the header line is
+ * scanned, body included, so a Peer whose report restates `TASK_ID: T-4` in
+ * its own prose — the natural way to write a report, and how the same id
+ * already appears in the artifact it points at — used to get the WHOLE message
+ * refused as malformed. That cost a full round trip of the Lead's context to
+ * recover a value nobody actually disagreed about. Observed twice in one
+ * fifteen-Peer project.
+ *
+ * So: same value → a warning the Lead can see and ignore; DIFFERENT value →
+ * still malformed, because that is the case where the receiver would have to
+ * guess which one the Peer meant, and guessing is the thing this parser exists
+ * not to do.
+ *
+ * "Which one the Peer meant" only bites for a field somebody READS, and this
+ * parser has no allowlist — any `WORD:` line in free prose becomes a field. A
+ * report legitimately writes `STATUS: DONE` near the top and `STATUS: blocked
+ * on review` further down, and refusing the message over it protects nothing:
+ * `peerMessageTurnNotice` reads KIND, TASK_ID and FROM_AGENT_ID, and the sender
+ * uses CORRELATION_ID to deduplicate. Those four are the envelope, and a
+ * conflict in one of them stays fatal. A conflict in a name nobody acts on is a
+ * warning, because the alternative is a full resend round trip to fix prose.
+ *
+ * Fail-closed is preserved exactly where it was load-bearing.
+ * `parseSupervisorBlock` deliberately keeps the stricter rule for EVERY field:
+ * there, a duplicate is a question about AUTHORITY, not about tidiness.
  */
 export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 	if (typeof prompt !== "string" || prompt.trim() === "") return null;
@@ -1731,6 +1777,7 @@ export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 
 	const fields = new Map<string, string>();
 	const malformed: string[] = [];
+	const warnings: string[] = [];
 
 	for (const line of lines.slice(start + 1)) {
 		const trimmed = line.trim();
@@ -1741,7 +1788,17 @@ export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 		const key = match[1] as string;
 		const value = (match[2] ?? "").trim();
 		if (fields.has(key)) {
-			malformed.push(`duplicate field ${key}`);
+			if (fields.get(key) === value) {
+				warnings.push(`repeated field ${key} (same value)`);
+			} else if (PEER_ENVELOPE_FIELDS.has(key)) {
+				malformed.push(
+					`conflicting envelope field ${key} ("${fields.get(key)}" then "${value}")`,
+				);
+			} else {
+				warnings.push(
+					`repeated body line ${key} with a different value (kept the first: "${fields.get(key)}")`,
+				);
+			}
 			continue;
 		}
 		fields.set(key, value);
@@ -1759,7 +1816,7 @@ export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 		);
 	}
 
-	return { kind, fields, malformed };
+	return { kind, fields, malformed, warnings };
 }
 
 /**
@@ -1787,6 +1844,14 @@ export function peerMessageTurnNotice({
 		block.malformed.length
 			? `The message is malformed (${block.malformed.join("; ")}). Treat it as unverified: ask the Peer to resend rather than acting on a field you cannot trust.`
 			: peerMessageDirective(block.kind),
+		// Appended, never substituted: a harmless repetition must not displace
+		// the directive that says what this turn obliges the Lead to do.
+		...(block.malformed.length === 0 && block.warnings.length
+			? [
+					"",
+					`Note (no action needed): ${block.warnings.join("; ")}. These are repeated lines in the Peer's prose, not a disagreement about the envelope, so the message was accepted as sent.`,
+				]
+			: []),
 	].join("\n");
 }
 

@@ -39,6 +39,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isEntrypoint } from "./lib-common.mjs";
 // The SAME merge `pteam seats apply` uses. Reused rather than reimplemented: a
@@ -104,8 +105,113 @@ export function mcpScriptPath(env = process.env) {
 	);
 }
 
+/**
+ * The lowest node this pack runs on, from package.json `engines`. A candidate
+ * interpreter that cannot clear it is not a candidate.
+ */
+const MIN_NODE = Object.freeze({ major: 22, minor: 18 });
+
+/**
+ * Version-shaped path segments, from most to least specific: "22.23.2" also
+ * lives at "22.23" and "22" under every version manager that keeps aliases,
+ * and those aliases survive the upgrade that deletes the exact patch.
+ */
+function versionPrefixes(segment) {
+	const bare = segment.startsWith("v") ? segment.slice(1) : segment;
+	const prefix = segment.startsWith("v") ? "v" : "";
+	const parts = bare.split(".");
+	const out = [];
+	// Longest first is the CALLER's order; here we go shortest-first because a
+	// shorter alias is the more durable one and should win.
+	for (let take = 1; take < parts.length; take++) {
+		out.push(prefix + parts.slice(0, take).join("."));
+	}
+	return out;
+}
+
+/** Does this path run, and is it a node new enough for the pack? */
+function usableNode(candidate) {
+	if (!existsSync(candidate)) return false;
+	try {
+		const raw = execFileSync(candidate, ["--version"], {
+			encoding: "utf8",
+			timeout: 10_000,
+			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
+		});
+		const match = /^v(\d+)\.(\d+)\./.exec(String(raw).trim());
+		if (!match) return false;
+		const major = Number(match[1]);
+		const minor = Number(match[2]);
+		if (major > MIN_NODE.major) return true;
+		return major === MIN_NODE.major && minor >= MIN_NODE.minor;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Durable stand-ins for a version-pinned interpreter path, most durable first.
+ *
+ * Only the version SEGMENT is rewritten, and only to a prefix of itself, so the
+ * major version — and with it the `engines` guarantee — is never traded away.
+ * `latest`/`default`-style aliases are deliberately NOT tried: they are more
+ * durable still, and they are exactly how a hook would silently start running
+ * on a node too old for the pack.
+ *
+ * Separators are normalized but the path is NOT resolved: this is a pure
+ * shape transform over an already-absolute interpreter path, and running it
+ * through `resolve()` would staple the current drive onto a POSIX-looking path
+ * on Windows — which is fine for the real `process.execPath` and wrong for
+ * every test that describes a layout this machine does not have.
+ *
+ * Exported for the tests, which build paths for managers this machine does not
+ * have installed.
+ */
+export function durableNodeCandidates(execPath) {
+	const segments = String(execPath).replace(/\\/g, "/").split("/");
+	const candidates = [];
+	for (let i = 0; i < segments.length; i++) {
+		const segment = segments[i];
+		if (!/^v?\d+(\.\d+)*$/.test(segment) || !segment.includes(".")) continue;
+		for (const alias of versionPrefixes(segment)) {
+			const copy = [...segments];
+			copy[i] = alias;
+			candidates.push(copy.join("/"));
+		}
+	}
+	return candidates;
+}
+
+/**
+ * The interpreter to write into the hook and MCP registrations.
+ *
+ * This used to be `process.execPath`, full stop, which meant the hook was
+ * pinned to whatever node happened to run the installer. Under a version
+ * manager that is an exact patch directory — installing from a mise shell wrote
+ * `.../installs/node/22.23.2/bin/node` — and the next `mise upgrade node`
+ * deletes it. The consequence is not a broken command in a log somewhere: this
+ * pack is fail-closed, a hook that cannot start is a hook that DENIES, and all
+ * three events are registered. One node upgrade would take every Claude seat on
+ * the host offline with no message naming the cause.
+ *
+ * So prefer the most durable path that provably works right now, and let
+ * PASEO_TEAM_NODE_EXEC override the choice for an operator who knows their
+ * layout better than this heuristic does. `verify` re-checks the result, which
+ * is the half that matters when the heuristic is not enough — see there.
+ */
+export function nodeExecPath(env = process.env) {
+	const override = env.PASEO_TEAM_NODE_EXEC?.trim();
+	if (override) return normalizePath(override);
+	const current = normalizePath(process.execPath);
+	for (const candidate of durableNodeCandidates(current)) {
+		if (usableNode(candidate)) return candidate;
+	}
+	return current;
+}
+
 export function hookCommand(event, env = process.env) {
-	return `"${normalizePath(process.execPath)}" "${hookScriptPath(env)}" ${event}`;
+	return `"${nodeExecPath(env)}" "${hookScriptPath(env)}" ${event}`;
 }
 
 /**
@@ -171,7 +277,7 @@ export function removeHooks(settings) {
 export function mcpServerEntry(env = process.env) {
 	return {
 		type: "stdio",
-		command: normalizePath(process.execPath),
+		command: nodeExecPath(env),
 		args: [mcpScriptPath(env)],
 	};
 }
@@ -938,15 +1044,16 @@ export function uninstall(env = process.env) {
 }
 
 /**
- * Every hook script path recorded in the settings file, taken from our own
- * tagged entries. The command is `"<node>" "<script>" <event>`, so the second
- * quoted token is the script.
+ * Both halves of every hook command recorded in the settings file, taken from
+ * our own tagged entries. The command is `"<node>" "<script>" <event>`, so the
+ * first quoted token is the interpreter and the second is the script.
  *
- * All three are collected, not just the first: an install that was partially
- * re-pointed (one event still calling a moved checkout) is precisely the
- * stale-install failure this command exists to catch.
+ * All three events are collected, not just the first: an install that was
+ * partially re-pointed (one event still calling a moved checkout) is precisely
+ * the stale-install failure this command exists to catch.
  */
-export function installedHookScripts(settings) {
+export function installedHookCommands(settings) {
+	const interpreters = new Set();
 	const scripts = new Set();
 	for (const event of Object.keys(HOOK_EVENTS)) {
 		const entries = Array.isArray(settings?.hooks?.[event])
@@ -956,11 +1063,17 @@ export function installedHookScripts(settings) {
 			if (!isOurEntry(entry)) continue;
 			for (const hook of entry.hooks ?? []) {
 				const quoted = String(hook?.command ?? "").match(/"([^"]+)"\s+"([^"]+)"/);
+				if (quoted?.[1]) interpreters.add(quoted[1]);
 				if (quoted?.[2]) scripts.add(quoted[2]);
 			}
 		}
 	}
-	return [...scripts];
+	return { interpreters: [...interpreters], scripts: [...scripts] };
+}
+
+/** Back-compat shape for callers that only ever wanted the script paths. */
+export function installedHookScripts(settings) {
+	return installedHookCommands(settings).scripts;
 }
 
 export function verify(env = process.env) {
@@ -977,17 +1090,42 @@ export function verify(env = process.env) {
 	// checkout would install. They differ whenever the pack was installed from
 	// somewhere else, and a hook pointing at a moved or deleted checkout is
 	// exactly the stale-install failure this command exists to catch.
-	const registeredScripts = installedHookScripts(settings);
-	const checkedScripts = registeredScripts.length > 0 ? registeredScripts : [hookScriptPath(env)];
+	const registered = installedHookCommands(settings);
+	const checkedScripts = registered.scripts.length > 0 ? registered.scripts : [hookScriptPath(env)];
 	const missingScripts = checkedScripts.filter((script) => !existsSync(script));
 	const scriptPresent = missingScripts.length === 0;
-	const mcpPresent = Boolean(userConfig?.mcpServers?.[TEAM_MCP_SERVER_NAME]);
+	const mcpEntry = userConfig?.mcpServers?.[TEAM_MCP_SERVER_NAME];
+	const mcpPresent = Boolean(mcpEntry);
+
+	// The INTERPRETER is checked, not just the script it runs.
+	//
+	// Without this the worst failure on the Claude side was also the quietest.
+	// The registered command names an absolute node path; a version manager
+	// deleting that path (`mise upgrade node` retiring an exact patch directory)
+	// leaves three hooks that cannot start. This pack is fail-closed, so a hook
+	// that cannot start DENIES — every tool call, on every Claude seat, with the
+	// reason "hook failed" and nothing pointing at a missing interpreter. An
+	// install still looked complete, because every check here was about files
+	// this installer wrote rather than the one thing it merely referenced.
+	//
+	// The remedy is the same command that got it right the first time, so the
+	// missing entry names it: re-running --install re-resolves the interpreter.
+	const checkedInterpreters =
+		registered.interpreters.length > 0 ? registered.interpreters : [];
+	if (mcpPresent && typeof mcpEntry.command === "string" && mcpEntry.command.trim() !== "") {
+		checkedInterpreters.push(mcpEntry.command);
+	}
+	const missingInterpreters = [...new Set(checkedInterpreters)].filter(
+		(candidate) => !existsSync(candidate),
+	);
+
 	const missing = [
 		...Object.entries(hookState)
 			.filter(([, installed]) => !installed)
 			.map(([event]) => `hook:${event}`),
 		...(mcpPresent ? [] : [`mcp:${TEAM_MCP_SERVER_NAME}`]),
 		...missingScripts.map((script) => `script:${script}`),
+		...missingInterpreters.map((node) => `interpreter:${node}`),
 	];
 	return {
 		action: "verify",
@@ -997,6 +1135,8 @@ export function verify(env = process.env) {
 		mcpServer: mcpPresent,
 		hookScript: scriptPresent ? checkedScripts[0] : null,
 		hookScripts: checkedScripts,
+		interpreters: [...new Set(checkedInterpreters)],
+		missingInterpreters,
 		missing,
 		ok: missing.length === 0,
 	};
@@ -1070,7 +1210,22 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 				...(result.hookScripts ?? []).map(
 					(script) => `  script -> ${result.missing.includes(`script:${script}`) ? "✗ MISSING" : "✓"} ${script}`,
 				),
+				// Printed even when present: an operator upgrading node needs to be
+				// able to SEE which interpreter their hooks are pinned to, without
+				// hand-parsing settings.json.
+				...(result.interpreters ?? []).map(
+					(node) => `  node   -> ${result.missingInterpreters?.includes(node) ? "✗ MISSING" : "✓"} ${node}`,
+				),
 			);
+			if (result.missingInterpreters?.length) {
+				lines.push(
+					"",
+					"  The interpreter these hooks are registered with is gone (a node",
+					"  version manager most likely retired it). Every hook is fail-closed,",
+					"  so until this is fixed each Claude seat DENIES every tool call.",
+					"  Fix: node scripts/claude-setup.mjs --install   (re-resolves node)",
+				);
+			}
 		} else if (result.action === "apply") {
 			lines.push(`  config -> ${result.configPath} (${result.status})`);
 			if (result.error) lines.push(`  ${result.error}`);

@@ -1946,6 +1946,7 @@ import {
 		"2110335f-8d7d-4ea9-9ab3-97217589798b",
 	);
 	assert.deepEqual(block.malformed, []);
+	assert.deepEqual(block.warnings, []);
 
 	// The header must own its line: this repo's prompts discuss PEER_MESSAGE_V1
 	// in prose, and a mention of the contract is not an instance of it. Same
@@ -1954,11 +1955,80 @@ import {
 	assert.equal(parsePeerBlock(""), null);
 	assert.equal(parsePeerBlock(null), null);
 
-	// Fail closed, do not guess: a duplicate field is named, not silently kept.
+	// Fail closed, do not guess: a CONFLICTING duplicate is named, not silently
+	// kept — the receiver would otherwise have to pick one of two task ids.
 	const dup = parsePeerBlock(
 		["PEER_MESSAGE_V1", "KIND: report", "TASK_ID: A", "TASK_ID: B", "", "x"].join("\n"),
 	);
 	assert.match(dup!.malformed.join("; "), /TASK_ID/);
+	assert.deepEqual(dup!.warnings, []);
+
+	// ...but a repetition that AGREES with the header is not a defect. The whole
+	// message (body included) is scanned, so a report that restates its own task
+	// id in prose used to be refused outright and cost a full resend round trip.
+	// It is now accepted, with a warning the Lead can see and ignore.
+	const echoed = parsePeerBlock(
+		[
+			"PEER_MESSAGE_V1",
+			"KIND: report",
+			"TASK_ID: PR-X",
+			"FROM_AGENT_ID: a",
+			"",
+			"TASK_ID: PR-X",
+			"done, full text in docs/REVIEW-x.md",
+		].join("\n"),
+	);
+	assert.deepEqual(echoed!.malformed, [], "an agreeing repetition is not malformed");
+	assert.match(echoed!.warnings.join("; "), /TASK_ID/);
+	assert.equal(echoed!.kind, "report");
+	assert.equal(echoed!.fields.get("TASK_ID"), "PR-X");
+	// The notice still tells the Lead what the turn obliges it to do, and adds
+	// the repetition as a footnote rather than in place of the directive.
+	const echoedNotice = peerMessageTurnNotice({ block: echoed })!;
+	assert.match(echoedNotice, /FINISHED/);
+	assert.match(echoedNotice, /no action needed/);
+	assert.doesNotMatch(echoedNotice, /malformed/);
+
+	// Only the ENVELOPE fields carry meaning: peerMessageTurnNotice reads KIND,
+	// TASK_ID and FROM_AGENT_ID, and the sender deduplicates on CORRELATION_ID.
+	// This parser has no allowlist, so any `WORD:` line in free prose becomes a
+	// "field" — and a report that legitimately writes STATUS twice was getting
+	// the whole message refused over its own prose.
+	const prose = parsePeerBlock(
+		[
+			"PEER_MESSAGE_V1",
+			"KIND: report",
+			"TASK_ID: PR-X",
+			"",
+			"STATUS: DONE",
+			"STATUS: blocked on review",
+		].join("\n"),
+	);
+	assert.deepEqual(prose!.malformed, [], "a repeated body line is not malformed");
+	assert.match(prose!.warnings.join("; "), /STATUS/);
+	assert.equal(prose!.fields.get("STATUS"), "DONE", "the FIRST value is kept, as before");
+	assert.equal(prose!.kind, "report");
+
+	// ...but a disagreement inside the envelope is still fatal, because that is
+	// the value the Lead is about to act on.
+	for (const field of ["KIND", "TASK_ID", "FROM_AGENT_ID", "CORRELATION_ID"]) {
+		const conflict = parsePeerBlock(
+			[
+				"PEER_MESSAGE_V1",
+				"KIND: report",
+				"CORRELATION_ID: c-1",
+				"TASK_ID: PR-X",
+				"FROM_AGENT_ID: a",
+				"",
+				`${field}: something-else`,
+			].join("\n"),
+		);
+		assert.match(
+			conflict!.malformed.join("; "),
+			new RegExp(`conflicting envelope field ${field}`),
+			`${field} is part of the envelope and must stay fail-closed`,
+		);
+	}
 
 	// An unknown kind is reported rather than trusted — the receiving Lead is
 	// about to decide what this turn obliges it to do.

@@ -35,13 +35,76 @@ function metadataToken(name, value) {
   return value;
 }
 
+/**
+ * The envelope's own field names, in the order sendPeerMessage() writes them.
+ * policy-core.ts exports no equivalent constant for the peer envelope (its
+ * parser is an allowlist-free `[A-Z][A-Z0-9_]*:` scan), so this is the one copy,
+ * and it is the list the body guard below iterates — not a parallel description
+ * of it. team-communication.test.mjs pins it against the body sendPeerMessage
+ * actually writes, so adding a field to the envelope without adding it here
+ * fails the suite rather than silently leaving that field unguarded.
+ */
+export const PEER_MESSAGE_FIELD_NAMES = Object.freeze([
+  "KIND",
+  "CORRELATION_ID",
+  "TASK_ID",
+  "FROM_AGENT_ID",
+]);
+
+/**
+ * A body line the receiver would read back as a field with a DIFFERENT value.
+ *
+ * The receiver (policy-core `parsePeerBlock`) accepts a repetition that agrees
+ * with the header and only refuses one that disagrees, so this guard is shaped
+ * to match it exactly: `TASK_ID: T-4` inside a report whose header already says
+ * `T-4` is ordinary prose and passes; `TASK_ID: T-9` in the same report is
+ * refused HERE, one line away from the Peer that can reword it, instead of at
+ * the receiver a full round trip later. `FROM_AGENT_ID` has no legitimate body
+ * form at all — the sender fills it from Paseo, never from the Peer's text — so
+ * any body line spelling it is a conflict by construction.
+ *
+ * Deliberately narrower than the consult channel's `assertNoFieldLines`, which
+ * refuses a field-shaped line on NAME alone. There, the receiver refuses the
+ * same way; here it no longer does, and a sender stricter than its receiver
+ * would just move the same wasted round trip earlier.
+ */
+function assertNoConflictingFieldLines(name, value, known) {
+  // Driven by the exported field list, so a field added to the envelope and to
+  // that list but NOT to `known` resolves to undefined -> null -> "no body form
+  // is legitimate". Fail-closed on the author's omission, not silently
+  // unguarded. `Object.hasOwn` rather than `in`: a plain object literal also
+  // answers `in` for inherited names.
+  const guarded = new Map(
+    PEER_MESSAGE_FIELD_NAMES.map((field) => [
+      field,
+      Object.hasOwn(known, field) ? known[field] : null,
+    ]),
+  );
+  for (const line of value.split(/\r?\n/)) {
+    const match = /^([A-Z][A-Z0-9_]*):\s*(.*)$/.exec(line.trim());
+    if (!match) continue;
+    const [, field, body] = match;
+    if (!guarded.has(field)) continue;
+    const envelope = guarded.get(field);
+    if (envelope !== null && body.trim() === envelope) continue;
+    throw Object.assign(
+      new Error(
+        envelope === null
+          ? `${name} contains a line starting with "${field}:", which the peer-message parser reads as a field. That field is filled in from Paseo, never from your text — reword it or quote it, e.g. "> ${field}: ...".`
+          : `${name} contains a line "${field}: ${body.trim()}", which the peer-message parser reads as a field conflicting with the envelope's "${field}: ${envelope}". Reword it or quote it, e.g. "> ${field}: ...".`,
+      ),
+      { code: "PEER_MESSAGE_FIELD_COLLISION" },
+    );
+  }
+}
+
 export function validatePeerMessage(input) {
   if (!input || typeof input !== "object") throw new Error("message must be an object");
   const { kind, message, taskId, correlationId } = input;
   if (!MESSAGE_KINDS.includes(kind)) throw new Error(`kind must be one of: ${MESSAGE_KINDS.join(", ")}`);
   if (typeof message !== "string" || message.trim().length === 0) throw new Error("message must be non-empty");
   if (message.length > 12_000) throw new Error("message exceeds 12000 characters");
-  return {
+  const resolved = {
     kind,
     message: message.trim(),
     taskId: taskId === undefined ? "unknown" : metadataToken("taskId", taskId),
@@ -49,6 +112,14 @@ export function validatePeerMessage(input) {
       ? `peer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       : metadataToken("correlationId", correlationId),
   };
+  assertNoConflictingFieldLines("message", resolved.message, {
+    KIND: resolved.kind,
+    TASK_ID: resolved.taskId,
+    CORRELATION_ID: resolved.correlationId,
+    // null = "no body form of this field is ever legitimate".
+    FROM_AGENT_ID: null,
+  });
+  return resolved;
 }
 
 export function runPaseo(args, timeoutMs = 20_000) {
