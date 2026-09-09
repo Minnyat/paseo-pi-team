@@ -417,6 +417,28 @@ if (wantClaude) {
 
 // --- role providers + model inventory -----------------------------------------
 
+const modelsCache = new Map();
+function listModels(roleProvider) {
+	if (modelsCache.has(roleProvider)) return modelsCache.get(roleProvider);
+	const res = tryExec(
+		"paseo",
+		["provider", "models", roleProvider, "--json"],
+		120000,
+	);
+	if (!res.ok) {
+		modelsCache.set(roleProvider, null);
+		return null;
+	}
+	try {
+		const models = JSON.parse(res.stdout);
+		modelsCache.set(roleProvider, models);
+		return models;
+	} catch {
+		modelsCache.set(roleProvider, null);
+		return null;
+	}
+}
+
 const providersById = new Map();
 if (daemonUp) {
 	const ls = tryExec("paseo", ["provider", "ls", "--json"]);
@@ -461,35 +483,41 @@ if (daemonUp) {
 						`role-provider:${role}`,
 						`status "${entry.status}" is unhealthy (expected: ${[...PROVIDER_OK_STATUSES].join("/")})`,
 					);
-				} else {
+				} else if (skipModels) {
 					pass(`role-provider:${role}`, String(entry.status ?? "ok"));
+				} else {
+					// "available" is a claim about the PROVIDER, not about anything
+					// routable behind it. A registered, enabled, healthy provider whose
+					// model inventory comes back EMPTY passes every check above and
+					// cannot serve a single create_agent — the same shape of trap as a
+					// permission that looks granted while the daemon never registered
+					// the tool. Observed live on `pi-peer`.
+					const models = listModels(role);
+					// An `{ error }` body that paseo returns with exit 0 parses fine and
+					// is NOT an empty inventory. Telling an operator to go check their
+					// credentials when the daemon simply failed to answer sends them to
+					// fix something that is not broken.
+					if (models === null || !Array.isArray(models)) {
+						warn(
+							`role-provider:${role}`,
+							`status "${entry.status ?? "ok"}" but its model inventory could not be read — routability is unverified`,
+						);
+					} else if (models.length === 0) {
+						strictCheck(
+							`role-provider:${role}`,
+							`reports status "${entry.status ?? "ok"}" but list_models is EMPTY — nothing can be routed through it. "available" describes the provider, not its inventory: check the credentials/base URL behind ${role} in ~/.paseo/config.json.`,
+						);
+					} else {
+						pass(
+							`role-provider:${role}`,
+							`${entry.status ?? "ok"}, ${models.length} model(s)`,
+						);
+					}
 				}
 			}
 		}
 	} else {
 		fail("role-providers", "could not list providers");
-	}
-}
-
-const modelsCache = new Map();
-function listModels(roleProvider) {
-	if (modelsCache.has(roleProvider)) return modelsCache.get(roleProvider);
-	const res = tryExec(
-		"paseo",
-		["provider", "models", roleProvider, "--json"],
-		120000,
-	);
-	if (!res.ok) {
-		modelsCache.set(roleProvider, null);
-		return null;
-	}
-	try {
-		const models = JSON.parse(res.stdout);
-		modelsCache.set(roleProvider, models);
-		return models;
-	} catch {
-		modelsCache.set(roleProvider, null);
-		return null;
 	}
 }
 
