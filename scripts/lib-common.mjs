@@ -191,8 +191,15 @@ export function resolvePaseoClientModule(onMissing) {
 		} catch {
 			real = bin;
 		}
-		const root = dirname(dirname(real));
-		const candidate = join(root, "dist", "utils", "client.js");
+		// On Windows the thing on PATH is an npm .cmd shim that lives nowhere
+		// near the package — walking up from it lands outside @getpaseo/cli
+		// entirely. resolveCmdEntry reads the shim for the JS entry it runs,
+		// and both known layouts (<root>/dist/index.js, <root>/bin/paseo) sit
+		// two levels below the package root, same as the POSIX bin.
+		const entry = /\.(?:cmd|bat)$/i.test(real)
+			? (resolveCmdEntry(real, PASEO_CONVENTIONAL_ENTRIES) ?? real)
+			: real;
+		const candidate = join(dirname(dirname(entry)), "dist", "utils", "client.js");
 		tried.push(candidate);
 		if (existsSync(candidate)) return pathToFileURL(candidate).href;
 	}

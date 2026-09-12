@@ -80,14 +80,40 @@ export function normalizeConfig(doc) {
 	return { entries, legacy };
 }
 
+/** A host whose traffic never leaves the machine. */
+function isLoopback(hostname) {
+	const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+	return host === "localhost" || host === "::1" || /^127\./.test(host);
+}
+
+/**
+ * Why a baseUrl cannot be used, or null.
+ *
+ * Every request carries `Authorization: Bearer <key>`, so a plain-http endpoint
+ * puts the key on the wire in clear. https is required — except on loopback,
+ * where the traffic never leaves the machine and a local proxy over http is a
+ * normal way to run one of these.
+ */
+export function baseUrlProblem(baseUrl) {
+	if (typeof baseUrl !== "string" || baseUrl.trim() === "") return "baseUrl is required";
+	let url;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		return `baseUrl is not a URL: ${baseUrl}`;
+	}
+	if (url.protocol === "https:") return null;
+	if (url.protocol === "http:" && isLoopback(url.hostname)) return null;
+	return `baseUrl must be https (the API key is sent to it); got ${url.protocol}//${url.hostname}`;
+}
+
 /** Problems that must stop a run before it touches the network. */
 export function configProblems(entries) {
 	const problems = [];
 	if (entries.length === 0) problems.push("no provider configured");
 	for (const entry of entries) {
-		if (typeof entry.baseUrl !== "string" || entry.baseUrl.trim() === "") {
-			problems.push(`provider "${entry.name}": baseUrl is required`);
-		}
+		const bad = baseUrlProblem(entry.baseUrl);
+		if (bad) problems.push(`provider "${entry.name}": ${bad}`);
 		// A slash would split the pi model reference in the wrong place:
 		// Paseo splits "<pi-provider>/<model-id>" at the FIRST slash only.
 		if (entry.name.includes("/")) problems.push(`provider "${entry.name}": name must not contain "/"`);
@@ -263,17 +289,33 @@ export function mergeCatalog(existing, entry, models) {
  * run over three endpoints leaves one backup rather than three.
  */
 export async function syncProvider(options) {
-	const { entry, apiKey, fetchImpl = fetch, probe = entry.probe !== false, keepAll = false, previousReasoning = new Map() } = options;
+	const {
+		entry,
+		apiKey,
+		fetchImpl = fetch,
+		probe = entry.probe !== false,
+		keepAll = false,
+		previousReasoning = new Map(),
+		// Node's fetch waits up to 300s for headers and again between body
+		// chunks. Every probe below is already bounded; the listing was not, so
+		// one unresponsive endpoint could hold the whole run — and the WebUI
+		// button — for five minutes before anything was reported.
+		listTimeoutMs = 20_000,
+	} = options;
 	const baseUrl = String(entry.baseUrl).replace(/\/+$/, "");
 	const auth = { Authorization: `Bearer ${apiKey}` };
 
 	let listed;
 	let listedText;
 	try {
-		listed = await fetchImpl(`${baseUrl}/models`, { headers: auth });
+		// One signal for both: a body that never finishes arriving is the same
+		// failure as headers that never arrive.
+		const signal = AbortSignal.timeout(listTimeoutMs);
+		listed = await fetchImpl(`${baseUrl}/models`, { headers: auth, signal });
 		listedText = await listed.text();
 	} catch (error) {
-		return { ok: false, provider: entry.name, baseUrl, code: "ENDPOINT_UNREACHABLE", message: String(error?.message ?? error) };
+		const message = error?.name === "TimeoutError" ? `khong tra loi trong ${listTimeoutMs} ms` : String(error?.message ?? error);
+		return { ok: false, provider: entry.name, baseUrl, code: "ENDPOINT_UNREACHABLE", message };
 	}
 	if (!listed.ok) {
 		return {
@@ -347,7 +389,7 @@ export async function syncProvider(options) {
  * than deleting them, and the failure is reported instead of swallowed.
  */
 export async function syncModels(options) {
-	const { entries, keys, modelsPath, fetchImpl = fetch, probe, keepAll = false, dryRun = false } = options;
+	const { entries, keys, modelsPath, fetchImpl = fetch, probe, keepAll = false, dryRun = false, listTimeoutMs } = options;
 
 	let existing = {};
 	if (existsSync(modelsPath)) {
@@ -373,6 +415,7 @@ export async function syncModels(options) {
 				probe: probe === undefined ? entry.probe !== false : probe,
 				keepAll,
 				previousReasoning,
+				...(listTimeoutMs === undefined ? {} : { listTimeoutMs }),
 			}),
 		);
 	}

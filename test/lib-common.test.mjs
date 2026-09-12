@@ -17,6 +17,7 @@ import {
   parseOcrVersion,
   paseoHomeDir,
   resolveCmdEntry,
+  resolvePaseoClientModule,
   resolvePaseoExec,
   searchPathDirs,
   splitCommandLine,
@@ -260,6 +261,59 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
     orchestrationPreferencesNotice({ PASEO_HOME: home }),
     "a corrupt preferences file is still just a notice, never a throw",
   );
+}
+
+// --- locating Paseo's client SDK ------------------------------------------
+// `pteam models refresh` imports the module the paseo CLI itself imports, so
+// the path is derived from wherever `paseo` really lives. The Windows case is
+// the one that bites: what is on PATH there is an npm .cmd shim that lives
+// nowhere near the package, so walking up from it lands outside @getpaseo/cli.
+{
+  const sandbox = mkdtempSync(join(tmpdir(), "pst-client-"));
+  const binDir = join(sandbox, "bin");
+  const pkgRoot = join(binDir, "node_modules", "@getpaseo", "cli");
+  mkdirSync(join(pkgRoot, "dist", "utils"), { recursive: true });
+  writeFileSync(join(pkgRoot, "dist", "index.js"), "// entry\n");
+  const client = join(pkgRoot, "dist", "utils", "client.js");
+  writeFileSync(client, "export function connectToDaemon() {}\n");
+
+  const realPath = process.env.PATH;
+  const realOverride = process.env.PASEO_TEAM_PASEO_CLIENT;
+  delete process.env.PASEO_TEAM_PASEO_CLIENT;
+  try {
+    // An npm-generated shim: the entry it runs is the only pointer back to
+    // the package, and it is written with %~dp0 and backslashes.
+    writeFileSync(
+      join(binDir, "paseo.cmd"),
+      '@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe" "%~dp0\\node_modules\\@getpaseo\\cli\\dist\\index.js" %*\r\n)\r\n',
+    );
+    process.env.PATH = binDir;
+    assert.equal(
+      resolvePaseoClientModule(),
+      pathToFileURL(client).href,
+      "a .cmd shim must be read for its JS entry before the package root is derived",
+    );
+
+    // The override wins over everything, which is also how the tests inject a
+    // fake daemon.
+    process.env.PASEO_TEAM_PASEO_CLIENT = client;
+    assert.equal(resolvePaseoClientModule(), pathToFileURL(client).href);
+    delete process.env.PASEO_TEAM_PASEO_CLIENT;
+
+    // Nothing on PATH and nothing beside the cwd: a configuration fault with
+    // the places it looked, not a crash.
+    process.env.PATH = join(sandbox, "empty");
+    let reported = null;
+    assert.throws(
+      () => resolvePaseoClientModule((reason, tried) => { reported = { reason, tried }; throw new Error(reason); }),
+      /could not find the paseo CLI/,
+    );
+    assert.ok(Array.isArray(reported.tried), "the failure names what it tried");
+  } finally {
+    process.env.PATH = realPath;
+    if (realOverride === undefined) delete process.env.PASEO_TEAM_PASEO_CLIENT;
+    else process.env.PASEO_TEAM_PASEO_CLIENT = realOverride;
+  }
 }
 
 console.log("lib-common tests passed");

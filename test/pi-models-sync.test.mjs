@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	baseUrlProblem,
 	buildModelEntry,
 	configProblems,
 	describeFailure,
@@ -96,10 +97,23 @@ const DEFAULTS_FOR_SECOND = { api: "openai-completions", keyEnv: "K", concurrenc
 
 	assert.deepEqual(configProblems([]), ["no provider configured"]);
 	assert.match(configProblems([{ name: "x" }])[0], /baseUrl is required/);
+
+	// Every request carries the API key in an Authorization header, so a plain
+	// http endpoint puts it on the wire in clear.
+	assert.equal(baseUrlProblem("https://a.example/v1"), null);
+	assert.match(baseUrlProblem("http://a.example/v1"), /must be https/);
+	assert.match(baseUrlProblem("not-a-url"), /not a URL/);
+	// Loopback stays allowed: the traffic never leaves the machine, and a local
+	// proxy over http is a normal way to run one of these (the tests below are
+	// exactly that).
+	for (const local of ["http://127.0.0.1:9/v1", "http://localhost:9/v1", "http://[::1]:9/v1"]) {
+		assert.equal(baseUrlProblem(local), null, `${local} is loopback`);
+	}
+	assert.match(configProblems([{ name: "x", baseUrl: "http://evil.example/v1" }]).join(" "), /must be https/);
 	// Paseo splits "<pi-provider>/<model-id>" at the FIRST slash, so a slash in
 	// the provider name silently re-points every route built from it.
-	assert.match(configProblems([{ name: "a/b", baseUrl: "http://x" }]).join(" "), /must not contain/);
-	assert.deepEqual(configProblems([{ name: "ok", baseUrl: "http://x" }]), []);
+	assert.match(configProblems([{ name: "a/b", baseUrl: "https://x" }]).join(" "), /must not contain/);
+	assert.deepEqual(configProblems([{ name: "ok", baseUrl: "https://x" }]), []);
 }
 
 assert.match(describeFailure(530, "cloudflare tunnel down"), /tunnel/);
@@ -207,6 +221,28 @@ assert.match(describeFailure(403, JSON.stringify({ error: { message: "not enable
 	assert.equal(allDeadReport.ok, false);
 	assert.equal(only(allDeadReport).code, "ALL_MODELS_DEAD");
 	assert.equal(readFileSync(modelsPath, "utf8"), before, "a total failure leaves the previous catalog exactly as it was");
+
+	// A listing that never answers must fail on OUR deadline. Node's fetch
+	// would otherwise wait 300s for headers, holding the whole run.
+	{
+		const stalled = await syncModels({
+			entries,
+			keys,
+			modelsPath,
+			listTimeoutMs: 50,
+			fetchImpl: (url, init) =>
+				new Promise((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => {
+						const error = new Error("timed out");
+						error.name = "TimeoutError";
+						reject(error);
+					});
+				}),
+		});
+		assert.equal(stalled.ok, false);
+		assert.equal(only(stalled).code, "ENDPOINT_UNREACHABLE");
+		assert.match(only(stalled).message, /50 ms/, "the deadline is named, not swallowed");
+	}
 
 	// --- several endpoints, one of them down -----------------------------
 	// The whole point of a provider map: a dead endpoint must not take the

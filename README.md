@@ -801,15 +801,18 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
    `config/pi-models.example.json` → `~/.paseo-pi-team/pi-models.local.json` and
    run `pteam models sync`: it probes every model each endpoint lists, writes only
    the ones that answer, and derives each model's `reasoning` flag from that
-   answer rather than from its name — a wrong flag there makes Paseo report
+   answer rather than from its name (`--no-probe`, or `probe: false` on one
+   endpoint, skips all of that and keeps whatever an earlier run proved) — a wrong flag there makes Paseo report
    `thinkingOptions: "none"` and refuse every route above `thinking: off`. As many
    endpoints as you like can be configured under `providers`; they are written in
    one pass, and one whose endpoint is down keeps the models it already had
    instead of losing them (`--only <name>` syncs just one). The
    API key never enters that file: it names the env var and the file holding it.
    The daemon caches the catalog for its whole lifetime, so `models sync` ends by
-   refreshing it; `pteam models refresh` does that step alone, and neither needs
-   a daemon restart.
+   refreshing it; `pteam models refresh` does that step alone. A refresh that
+   succeeds is what removes the need to restart the daemon — when it is skipped
+   (`--dry-run`, `--no-refresh`) or fails, both commands say so and name the
+   restart that finishes the job.
 2. Copy `config/model-routing.example.json` →
    `~/.paseo-pi-team/model-routing.local.json` and fill in the host's REAL model
    IDs (5 classes: `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`,
