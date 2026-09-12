@@ -6,6 +6,7 @@
 // disallowedTools layer that must not overlap with the per-turn decisions.
 
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
 import {
 	claudeBaseTools,
 	claudeDisallowedTools,
@@ -13,6 +14,7 @@ import {
 	classifyClaudeTool,
 	describeClaudePolicy,
 	teamToolName,
+	claudeReadPath,
 	claudeSkillName,
 	CLAUDE_PASEO_TOOL_NAMES,
 } from "../extensions/paseo-team-core/claude-policy.ts";
@@ -770,6 +772,45 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 			);
 		}
 	}
+
+	// The OTHER door, and the one that makes the first mean anything: pi has no
+	// `Skill` tool and gates the READ of the installed SKILL.md, so a Claude Peer
+	// refused Skill(paseo-team-lead) must not simply Read the same bytes. That is
+	// the cross-runtime asymmetry the shared table exists to prevent.
+	const readCall = (role, file_path, toolName = "Read") =>
+		claudeToolBlockReason({ role, toolName, toolInput: { file_path }, brief: null });
+	const installed = `${homedir()}/.claude/skills/paseo-team-lead/SKILL.md`;
+
+	assert.match(String(readCall("peer", installed)), /not admitted for the peer/);
+	assert.match(String(readCall("supervisor", installed)), /not admitted/);
+	assert.equal(readCall("lead", installed), null, "the Lead's own procedure stays readable");
+	assert.match(
+		String(readCall("peer", `${homedir()}/.pi/agent/skills/paseo-team-lead/SKILL.md`)),
+		/not admitted/,
+		"the pi install location is gated on Claude too — one machine, both copies",
+	);
+	// Glob/Grep carry a `path` rather than a `file_path`.
+	assert.match(
+		String(
+			claudeToolBlockReason({
+				role: "peer",
+				toolName: "Grep",
+				toolInput: { pattern: "x", path: installed },
+				brief: null,
+			}),
+		),
+		/not admitted/,
+	);
+	// A repository checkout of the same file is ordinary work — this repo is one,
+	// and a Peer assigned to edit the Lead skill has to be able to read it.
+	assert.equal(readCall("peer", `${process.cwd()}/skills/paseo-team-lead/SKILL.md`), null);
+	assert.equal(readCall("peer", "skills/paseo-team-lead/SKILL.md"), null);
+	// Everything else a seat reads is untouched.
+	assert.equal(readCall("peer", `${homedir()}/.claude/skills/my-own-skill/SKILL.md`), null);
+	assert.equal(readCall("peer", "README.md"), null);
+	assert.equal(claudeReadPath({ path: "a" }), "a");
+	assert.equal(claudeReadPath({ file_path: "a", path: "b" }), "a");
+	assert.equal(claudeReadPath("nope"), "");
 
 	// The field the name is read from, and the wrapper spellings.
 	assert.equal(claudeSkillName({ skill: "a" }), "a");

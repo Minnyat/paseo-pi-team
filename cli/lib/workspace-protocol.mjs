@@ -56,7 +56,17 @@ export const RECOMMENDED_KEYS = [
 ];
 
 const VERSION_RE = /^\s*(?:<!--\s*)?WORKSPACE_PROTOCOL_VERSION\s*[:=]\s*(\S+)/im;
-const CONFLICT_RE = /^(?:<{7}|={7}|>{7})(?:\s|$)/m;
+/**
+ * A git conflict, not a Markdown heading.
+ *
+ * `=======` on its own line is a setext underline under an ordinary `## `-less
+ * heading, and seven characters is a perfectly normal width for one — matching
+ * it alone would hard-fail a valid protocol written in plain Markdown. A real
+ * conflict always carries BOTH the opening and closing markers, so both are
+ * required and the separator is left out of the test entirely.
+ */
+const CONFLICT_OPEN_RE = /^<{7}(?:\s|$)/m;
+const CONFLICT_CLOSE_RE = /^>{7}(?:\s|$)/m;
 
 /**
  * Both paths, in precedence order. The legacy one is still resolved because
@@ -128,7 +138,7 @@ export function protocolState(repoRoot = process.cwd()) {
 	// a binary written to this path, or a truncated half-write.
 	if (text.includes("\u0000")) issues.push("contains NUL bytes — not a text file");
 	if (text.trim() === "") issues.push("file is blank");
-	if (CONFLICT_RE.test(text)) {
+	if (CONFLICT_OPEN_RE.test(text) && CONFLICT_CLOSE_RE.test(text)) {
 		issues.push(
 			"unresolved merge conflict markers — a Lead reading this gets both sides as if they were rules",
 		);

@@ -106,6 +106,28 @@ function compareDir({ kind, sourceDir, installedDir, owned, sourceFilter = () =>
 	return results;
 }
 
+/**
+ * The support scripts `scripts/install.sh` ships, read from the installer
+ * itself.
+ *
+ * One source of truth on purpose. A second copy of this list here would be a
+ * list that drifts, and a drift checker whose own expectations have drifted is
+ * worse than none — it reports confidently about the wrong thing.
+ */
+export function installerSupportFiles(root = ROOT) {
+	let text;
+	try {
+		text = readFileSync(join(root, "scripts", "install.sh"), "utf8");
+	} catch {
+		return [];
+	}
+	const start = text.indexOf("TEAM_SUPPORT_FILES=(");
+	if (start < 0) return [];
+	const end = text.indexOf("\n)", start);
+	if (end < 0) return [];
+	return [...text.slice(start, end).matchAll(/^\s*([a-z0-9-]+\.mjs)\s*$/gm)].map((m) => m[1]);
+}
+
 /** Where Claude Code keeps the user's skills; mirrors claude-setup.mjs. */
 function claudeSkillsDir(env = process.env) {
 	return join(env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude"), "skills");
@@ -184,27 +206,47 @@ export function installDrift({ root = ROOT, env = process.env } = {}) {
 	}
 
 	// 5. Support scripts. The installers own that directory outright, and the
-	//    list of what goes in it lives in the installers rather than here — so
-	//    the check walks what was installed and asks scripts/ about each one.
-	//    A file the installers no longer ship shows up as `unexpected`, which is
-	//    the same leftover-from-an-older-release failure as a stale core.
+	//    list of what belongs in it lives in the installers rather than here — so
+	//    it is READ from install.sh instead of copied, and both directions are
+	//    checked against it. Walking only the installed side would make the
+	//    half-upgrade case invisible in exactly the way this module exists to
+	//    prevent: a release that adds a support script installs nothing new, and
+	//    the first thing to import it fails at runtime on the user's machine.
 	const scriptsDir = join(extDir, "paseo-team-scripts");
-	if (existsSync(scriptsDir)) {
-		for (const rel of walk(scriptsDir)) {
-			const source = join(root, "scripts", ...rel.split("/"));
-			const installed = join(scriptsDir, ...rel.split("/"));
-			if (!existsSync(source)) {
-				groups.push({ kind: "support-script", file: rel, verdict: "unexpected", path: installed });
-			} else if (!sameBytes(source, installed)) {
-				groups.push({ kind: "support-script", file: rel, verdict: "changed", path: installed });
+	const shippedScripts = installerSupportFiles(root);
+	if (!existsSync(scriptsDir)) {
+		groups.push({ kind: "support-script", file: "paseo-team-scripts/", verdict: "missing", path: scriptsDir });
+	} else {
+		for (const name of shippedScripts) {
+			const installed = join(scriptsDir, name);
+			const source = join(root, "scripts", name);
+			if (!existsSync(installed)) {
+				groups.push({ kind: "support-script", file: name, verdict: "missing", path: installed });
+			} else if (existsSync(source) && !sameBytes(source, installed)) {
+				groups.push({ kind: "support-script", file: name, verdict: "changed", path: installed });
 			}
 		}
-	} else {
-		groups.push({ kind: "support-script", file: "paseo-team-scripts/", verdict: "missing", path: scriptsDir });
+		const shipped = new Set(shippedScripts);
+		for (const rel of walk(scriptsDir)) {
+			if (shipped.has(rel)) continue;
+			groups.push({
+				kind: "support-script",
+				file: rel,
+				verdict: "unexpected",
+				path: join(scriptsDir, rel),
+			});
+		}
 	}
 
 	return {
 		root,
+		// "Was the pack ever installed here at all?" — the pi adapter is the
+		// first thing every installer writes, so its absence separates a host
+		// that never ran the installer from one whose install has gone stale.
+		// The caller needs that distinction: the two have completely different
+		// remedies, and reporting a one-file gap as "not installed" hides the
+		// filename that would fix it.
+		installed: existsSync(policyInstalled),
 		checked: {
 			extension: policyInstalled,
 			policyCore: join(extDir, POLICY_CORE_DIR),

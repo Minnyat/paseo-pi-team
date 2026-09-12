@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
 	appendFileSync,
 	cpSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -30,24 +31,28 @@ delete process.env.PI_CODING_AGENT_DIR;
 // Imported AFTER the env is set: config-walker resolves paths per call, but
 // reading the module with the developer's real HOME in scope is the kind of
 // test that edits the machine it runs on.
-const { installDrift, summarizeDrift } = await import("../cli/lib/install-drift.mjs");
+const { installDrift, installerSupportFiles, summarizeDrift } = await import(
+	"../cli/lib/install-drift.mjs"
+);
 
 const extDir = join(piHome, "agent", "extensions");
 const skillsDir = join(piHome, "agent", "skills");
 const coreDir = join(extDir, "paseo-team-core");
 const scriptsDir = join(extDir, "paseo-team-scripts");
 
-const drift = (env) => installDrift({ env: env ?? { ...process.env } }).drift;
+const report = (env) => installDrift({ env: env ?? { ...process.env } });
+const drift = (env) => report(env).drift;
 const verdicts = (items, kind) =>
 	items.filter((item) => item.kind === kind).map((item) => `${item.file}:${item.verdict}`);
 
 // An install that never happened is every file missing — the honest answer, and
 // the one the caller special-cases into a single "not installed" line.
 {
-	const initial = drift();
-	assert.ok(initial.length > 0);
+	const initial = report();
+	assert.equal(initial.installed, false, "the pi adapter is absent, so nothing is installed");
+	assert.ok(initial.drift.length > 0);
 	assert.ok(
-		initial.every((item) => item.verdict === "missing"),
+		initial.drift.every((item) => item.verdict === "missing"),
 		"an absent install reports missing, never changed or unexpected",
 	);
 }
@@ -80,16 +85,22 @@ function install() {
 	}
 }
 
-/** The installers own the list; read it from install.sh rather than repeat it. */
+/**
+ * The installers own the list, and the module under test reads it from
+ * install.sh rather than keeping a copy. This test asserts that parse works
+ * before relying on it — a drift checker whose own expectations have drifted is
+ * worse than none, because it reports confidently about the wrong thing.
+ */
 function supportFiles() {
-	const text = readFileSync(join(root, "scripts", "install.sh"), "utf8");
-	const start = text.indexOf("TEAM_SUPPORT_FILES=(");
-	assert.ok(start >= 0, "install.sh must still declare TEAM_SUPPORT_FILES");
-	const end = text.indexOf("\n)", start);
-	const files = [...text.slice(start, end).matchAll(/^\s*([a-z0-9-]+\.mjs)\s*$/gm)].map(
-		(m) => m[1],
-	);
+	const files = installerSupportFiles(root);
 	assert.ok(files.length >= 4, "install.sh support-file list did not parse");
+	assert.ok(files.includes("lib-common.mjs"), "every other support script imports it");
+	for (const name of files) {
+		assert.ok(
+			existsSync(join(root, "scripts", name)),
+			`install.sh ships scripts/${name}, which does not exist`,
+		);
+	}
 	return files;
 }
 
@@ -113,6 +124,27 @@ assert.deepEqual(verdicts(drift(), "skill"), ["paseo-ocr-reviewer/SKILL.md:missi
 //    pack owns and replaces wholesale.
 writeFileSync(join(scriptsDir, "retired-helper.mjs"), "from an older release");
 assert.deepEqual(verdicts(drift(), "support-script"), ["retired-helper.mjs:unexpected"]);
+
+// A support script this release ADDS is the half-upgrade case, and it is
+// invisible to anything that only walks what was installed: the install looks
+// complete and the first thing to import the new script fails at runtime on the
+// user's machine. Checked against the installers' own list for that reason —
+// and note the file still exists in scripts/, so "does the source have it?" is
+// not a substitute.
+install();
+rmSync(join(scriptsDir, "lease-ledger.mjs"));
+assert.deepEqual(verdicts(drift(), "support-script"), ["lease-ledger.mjs:missing"]);
+assert.equal(report().installed, true, "one missing file is not an absent install");
+
+// A file in scripts/ that the installers do not ship is not expected to be
+// installed, and its absence is not drift.
+install();
+writeFileSync(join(root, "scripts", "__drift_probe_not_shipped.mjs"), "// scratch\n");
+try {
+	assert.deepEqual(verdicts(drift(), "support-script"), []);
+} finally {
+	rmSync(join(root, "scripts", "__drift_probe_not_shipped.mjs"), { force: true });
+}
 
 // A built .js in the policy core is drift in its own right, for the reason
 // install.sh deletes it: two sources of truth for one rule set, and the two
@@ -171,6 +203,24 @@ assert.deepEqual(drift(), [], "an unknown file in the shared prompts dir is not 
 		"the summary is a preflight line, not a file listing",
 	);
 	assert.match(summarizeDrift(drift(), { perKind: 1 }).join("\n"), /\+\d+ more/);
+}
+
+// --- a customised prompt is drift, and must not be reported as a mistake -----
+//
+// `pteam prompts write` and `pteam skills write` are first-class commands that
+// deliberately edit the installed copies. Reporting the result is right — the
+// running agent is not on this release's rules — but the caller has to be able
+// to tell that case apart, because the obvious remedy (`pteam install`)
+// overwrites the edit.
+{
+	install();
+	appendFileSync(join(extDir, "prompts", "lead.md"), "\n## Local house rule\n");
+	const items = drift();
+	assert.deepEqual(verdicts(items, "prompt"), ["lead.md:changed"]);
+	assert.ok(
+		items.every((item) => item.kind === "prompt" || item.kind === "skill"),
+		"a prompt edit alone must be distinguishable from a stale install",
+	);
 }
 
 rmSync(piHome, { recursive: true, force: true });

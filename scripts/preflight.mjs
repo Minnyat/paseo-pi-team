@@ -437,20 +437,38 @@ if (wantClaude) {
 		const state = installDrift();
 		if (state.ok) {
 			pass("install-drift", "installed copies match this release");
-		} else {
-			// A host that never ran the installer is already reported by the
-			// extension/prompt/policy-core checks above; saying it again in four
-			// more lines helps nobody, so name the remedy once.
-			const everythingMissing = state.drift.every((d) => d.verdict === "missing");
+		} else if (!state.installed) {
+			// Never installed for this user. The extension/prompt/policy-core
+			// checks above already say so; repeating it as a file listing helps
+			// nobody, so name the remedy once. Keyed on the pi adapter's absence
+			// rather than on "every verdict is missing", or a complete install
+			// short one new file would be reported as no install at all — and the
+			// filename that would fix it suppressed.
 			warn(
 				"install-drift",
-				everythingMissing
-					? "the pack is not installed for this user → run scripts/install.{sh,ps1} (or `pteam install`)"
-					: `${state.drift.length} file(s) differ from this release → re-run \`pteam install\`; ${summarizeDrift(state.drift).join(" | ")}`,
+				"the pack is not installed for this user → run scripts/install.{sh,ps1} (or `pteam install`)",
+			);
+		} else {
+			// A prompt or skill can differ because the operator ran
+			// `pteam prompts write` / `pteam skills write`, both of which
+			// deliberately edit the installed copy. So the finding is stated as a
+			// fact and the remedy names both causes: re-running `pteam install`
+			// OVERWRITES a local customization, and a check that tells someone to
+			// destroy their own edit is worse than one that says nothing.
+			const customizable = state.drift.every(
+				(d) => (d.kind === "prompt" || d.kind === "skill") && d.verdict === "changed",
+			);
+			strictCheck(
+				"install-drift",
+				`${state.drift.length} file(s) differ from this release: ${summarizeDrift(state.drift).join(" | ")} — ${
+					customizable
+						? "expected if you ran `pteam prompts write` / `pteam skills write`; otherwise re-run `pteam install` (which overwrites those edits)"
+						: "re-run `pteam install`"
+				}`,
 			);
 		}
 	} catch (error) {
-		warn(
+		strictCheck(
 			"install-drift",
 			`could not compare installed copies: ${String(error?.message ?? error).slice(0, 160)}`,
 		);

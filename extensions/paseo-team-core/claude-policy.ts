@@ -47,6 +47,7 @@ import {
 	mcpAllowedTargets,
 	peerAuthority,
 	peerGitAuthority,
+	packSkillFromPath,
 	resolvePeerMode,
 	skillBlockReason,
 	leadCreateSupervisorArgsBlockReason,
@@ -125,6 +126,28 @@ const CLAUDE_HUMAN_QUESTION_TOOL = "AskUserQuestion";
 
 /** The skill loader. Allowed for every role; the PACKAGE is what gets gated. */
 const CLAUDE_SKILL_TOOL = "Skill";
+
+/**
+ * The path out of a Read/Glob/Grep call. Claude spells it `file_path`; the
+ * others carry a `path`, and either can name a file inside an installed skill
+ * package.
+ *
+ * Like the bash guards further down, this closes the obvious door rather than
+ * drawing an authorization boundary: a Grep scoped to the package DIRECTORY
+ * still runs, and reassembling a 50 KB procedure out of match output is a
+ * possible but self-defeating way to spend a turn. The boundary that matters
+ * is the tool policy, which already denies the wrong role everything the
+ * procedure would tell it to do.
+ */
+export function claudeReadPath(toolInput: unknown): string {
+	if (typeof toolInput !== "object" || toolInput === null) return "";
+	const args = toolInput as Record<string, unknown>;
+	for (const key of ["file_path", "path", "notebook_path"]) {
+		const value = args[key];
+		if (typeof value === "string" && value.trim() !== "") return value;
+	}
+	return "";
+}
 
 /**
  * The package name out of a `Skill` call.
@@ -298,11 +321,26 @@ export function claudeToolBlockReason(
 			: "A Peer does not put questions to the Human. Send the question to your own Lead with peer_ask_lead (KIND: question | dependency | blocker); the Lead answers it or escalates to the Supervisor.";
 	}
 
-	// Skill admission. `Skill` stays in CLAUDE_NEUTRAL_TOOLS — the tool itself is
-	// harmless and the user's own skills go through it — so the gate is per call,
-	// on the package name, using the same table the Pi adapter reads.
+	// Skill admission, both doors.
+	//
+	// `Skill` stays in CLAUDE_NEUTRAL_TOOLS — the tool itself is harmless and the
+	// user's own skills go through it — so the gate is per call, on the package
+	// name, using the same table the Pi adapter reads.
+	//
+	// The second door is the one that makes the first mean anything. pi has no
+	// `skill` tool at all: its agent loads a skill by READING the SKILL.md, which
+	// is why the Pi adapter gates the read path. Claude has both, so a Peer
+	// refused `Skill(paseo-team-lead)` could otherwise just
+	// `Read ~/.claude/skills/paseo-team-lead/SKILL.md` and get the same bytes —
+	// a rule denied on one runtime and reachable on the other, which is the exact
+	// asymmetry the shared core exists to prevent.
 	if (toolName === CLAUDE_SKILL_TOOL) {
 		const reason = skillBlockReason(role, claudeSkillName(input.toolInput), brief);
+		if (reason) return reason;
+	}
+	if (classified.kind === "read") {
+		const skill = packSkillFromPath(claudeReadPath(input.toolInput));
+		const reason = skill && skillBlockReason(role, skill, brief);
 		if (reason) return reason;
 	}
 

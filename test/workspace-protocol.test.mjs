@@ -99,17 +99,23 @@ const FULL = [
 	assert.equal(unversioned.state, "invalid");
 	assert.match(unversioned.issues.join("; "), /WORKSPACE_PROTOCOL_VERSION/);
 
-	// A row of equals signs under a Markdown heading is a setext underline, not
-	// a conflict marker — and it is seven characters wide often enough to
-	// matter. Only a marker at the start of its own line counts.
+	// A row of equals signs on its own line is a Markdown setext underline, and
+	// seven characters is a perfectly normal width for one. Hard-failing a valid
+	// protocol because it was written in plain Markdown would be the check
+	// costing more than it catches, so a conflict needs BOTH markers.
 	write(`Protocol\n${"=".repeat(7)}\n\nWORKSPACE_PROTOCOL_VERSION: 1\n`);
 	assert.equal(
 		protocolState(repo).state,
-		"invalid",
-		"a bare setext underline still trips the marker check",
+		"valid",
+		"a setext underline is a heading, not a conflict",
 	);
-	write(`WORKSPACE_PROTOCOL_VERSION: 1\n\nsome ==== short rule\n`);
-	assert.equal(protocolState(repo).state, "valid", "a short rule is not a marker");
+	write(`Protocol\n${"-".repeat(20)}\n\nWORKSPACE_PROTOCOL_VERSION: 1\n${"=".repeat(40)}\n`);
+	assert.equal(protocolState(repo).state, "valid", "a horizontal rule is not a conflict either");
+	// An opening marker with no closing one is a truncated paste, not a
+	// conflict; it is caught by the version check when it takes the version
+	// line with it, and is not this rule's business.
+	write(`WORKSPACE_PROTOCOL_VERSION: 1\n<<<<<<< HEAD\nPROJECT_ID: demo\n`);
+	assert.equal(protocolState(repo).state, "valid", "one marker alone is not a conflict");
 }
 
 // --- a version marker written as an HTML comment, the way the downstream does --
