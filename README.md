@@ -57,7 +57,7 @@ paseo-pi-team/
 │   └── cluster-routing.example.json   # controller-local N-host contract template
 ├── templates/
 │   ├── TASK_BRIEF_V3.md               # canonical V3 task brief + parser rules
-│   └── WORKSPACE_PROTOCOL.example.md  # .orchestration/WORKSPACE_PROTOCOL.md for the target repo
+│   └── WORKSPACE_PROTOCOL.example.md  # root WORKSPACE_PROTOCOL.md for the target repo
 ├── prompts/
 │   ├── supervisor.md               # Governance Supervisor
 │   ├── lead.md                     # Project Lead (orchestration owner)
@@ -125,8 +125,11 @@ paseo-pi-team/
 │   └── fixtures/                   # fake CLIs (paseo, ocr) + version-pinned OCR output
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # original design
+    ├── claude-runtime.md           # Claude Code as the second runtime: hooks, MCP, install
+    ├── downstream-doctrine-review.md   # what Paseo's own Foundation does that we don't
     ├── model-routing.md            # the 4 model-routing layers, verified commands
     ├── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-supervisor-topology.md    # domains, clusters, and who may seat whom
     ├── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
 ```

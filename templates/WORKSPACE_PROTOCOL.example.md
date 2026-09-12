@@ -1,8 +1,20 @@
 # Workspace Protocol — example
 
-Place this file at `.orchestration/WORKSPACE_PROTOCOL.md` in the repo being
+Place this file at `WORKSPACE_PROTOCOL.md` in the ROOT of the repo being
 orchestrated by the team. It is the hard contract between the Human, the Lead,
 and the Peers; the project's preflight may read it to validate values.
+
+The root is the only path the Lead is told to read (`prompts/lead.md`, invariant
+1, and `skills/paseo-team-lead/SKILL.md`), and it is where both the deep dive
+(`docs/demonthorn-agent-orchestration-deep-dive.md` §6) and Paseo's own
+Foundation put it. Earlier revisions of this template named
+`.orchestration/WORKSPACE_PROTOCOL.md`; a protocol left there is read by nobody
+and reports nothing, so move it to the root rather than expecting a fallback.
+
+Readership is part of the contract: the Lead reads it in full before
+orchestrating, a Peer never does — the Lead extracts the relevant constraints
+into the Peer's V3 brief — and the Supervisor reads it only under a governance
+mandate to create, audit or update it.
 
 ```text
 WORKSPACE_PROTOCOL_VERSION: 1
