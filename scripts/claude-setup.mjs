@@ -50,7 +50,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isEntrypoint } from "./lib-common.mjs";
+import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
 // The SAME merge `pteam seats apply` uses. Reused rather than reimplemented: a
 // second merge would be a second ownership rule to keep in step with the first.
 import { applySeatsToPaseoConfig } from "./seat-profiles.mjs";
@@ -539,8 +539,11 @@ export function parseConfigObject(text) {
 }
 
 export function claudeProviderLedgerPath(env = process.env) {
-	const dir = env.PST_TEAM_CONFIG_DIR?.trim() || join(homedir(), ".paseo-pi-team");
-	return join(dir, "claude-provider-ledger.json");
+	// Delegated like every other consumer: this used to honour only
+	// PST_TEAM_CONFIG_DIR, so on a PASEO_TEAM_HOME-only host the ledger landed
+	// outside the directory the rest of the pack uses — and the ledger is what
+	// tells an uninstall which providers were ours to remove.
+	return join(teamConfigDir(env), "claude-provider-ledger.json");
 }
 
 /**

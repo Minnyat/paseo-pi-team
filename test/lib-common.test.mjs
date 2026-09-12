@@ -325,4 +325,41 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
 	}
 }
 
+// --- Paseo's own home is one answer too --------------------------------------
+//
+// `paseoHome()` honoured Paseo's documented PASEO_HOME while
+// `paseoConfigPath()` did not, so a machine that moved its daemon home had the
+// pack reading agent STATE from the new tree and the daemon CONFIG from the old
+// one — and preflight could pass `paseo-browser-tools` on a host whose real
+// config has the browser disabled.
+{
+	const cw = await import("../cli/lib/config-walker.mjs");
+	const prevHome = process.env.PASEO_HOME;
+	const prevJson = process.env.PASEO_CONFIG_JSON;
+	try {
+		delete process.env.PASEO_CONFIG_JSON;
+		process.env.PASEO_HOME = "/tmp/paseo-elsewhere";
+		assert.equal(cw.paseoHome(), "/tmp/paseo-elsewhere");
+		assert.equal(
+			cw.paseoConfigPath(),
+			join("/tmp/paseo-elsewhere", "config.json"),
+			"the config must come from the same tree as the state",
+		);
+		assert.equal(cw.paseoAgentsDir(), join("/tmp/paseo-elsewhere", "agents"));
+
+		// The explicit file override still wins — it is the narrower statement.
+		process.env.PASEO_CONFIG_JSON = "/tmp/exact-config.json";
+		assert.equal(cw.paseoConfigPath(), "/tmp/exact-config.json");
+
+		delete process.env.PASEO_HOME;
+		delete process.env.PASEO_CONFIG_JSON;
+		assert.match(cw.paseoConfigPath(), /\.paseo[\/\\]config\.json$/);
+	} finally {
+		if (prevHome === undefined) delete process.env.PASEO_HOME;
+		else process.env.PASEO_HOME = prevHome;
+		if (prevJson === undefined) delete process.env.PASEO_CONFIG_JSON;
+		else process.env.PASEO_CONFIG_JSON = prevJson;
+	}
+}
+
 console.log("lib-common tests passed");

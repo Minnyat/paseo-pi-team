@@ -740,15 +740,73 @@ test("hosts-config: a stale hosts.local.json is called out, not ignored", { skip
 	// while nothing read it.
 	const legacy = join(home, "hosts.local.json");
 	writeFileSync(legacy, JSON.stringify({ hosts: {} }));
-	const check = preflight().of("hosts-config");
+	const check = preflight().of("hosts-config:legacy-file");
 	assert.equal(check.status, "warn");
 	assert.match(check.detail, /REMOVED legacy format/);
-	rmSync(legacy, { force: true });
 
-	// And the flag that used to read it.
-	const flagged = preflight(["--hosts", join(home, "whatever.json")]).of("hosts-config");
-	assert.equal(flagged.status, "warn");
-	assert.match(flagged.detail, /--cluster/);
+	// And the flag that used to read it. Both conditions can hold at once, so
+	// they carry DISTINCT ids: two checks sharing one would break every
+	// consumer that keys the report by id — this file's own uniqueness test
+	// included, which is how a shared id gets noticed.
+	const both = preflight(["--hosts", join(home, "whatever.json")]);
+	assert.equal(both.of("hosts-config:legacy-file").status, "warn");
+	assert.equal(both.of("hosts-config:removed-flag").status, "warn");
+	assert.match(both.of("hosts-config:removed-flag").detail, /--cluster/);
+	const ids = both.checks.map((c) => c.id);
+	assert.equal([...new Set(ids)].length, ids.length, "still one id per check");
+
+	rmSync(legacy, { force: true });
+});
+
+// --- the config-directory migration ------------------------------------------
+//
+// Unifying the two variable names MOVES the directory every reader follows on
+// a host that set the override while leaving routing where earlier releases
+// read it. No precedence order avoids that, so the migration is reported.
+
+test("team-config-dir: files stranded in the old default are named", { skip: !POSIX }, () => {
+	// HOME is pointed at a scratch directory so ~/.paseo-pi-team is OURS: the
+	// check compares the resolved directory against that historical default,
+	// and a test that could not create it could not exercise the finding.
+	const fakeHome = mkdtempSync(join(tmpdir(), "paseo-teamdir-"));
+	const legacyDefault = join(fakeHome, ".paseo-pi-team");
+	const override = join(fakeHome, "elsewhere");
+	mkdirSync(legacyDefault, { recursive: true });
+	mkdirSync(override, { recursive: true });
+	const base = { HOME: fakeHome, PST_TEAM_CONFIG_DIR: override, PASEO_TEAM_HOME: "" };
+	try {
+		// Nothing stranded yet: the old default exists but holds no pack files.
+		assert.equal(preflight([], base).of("team-config-dir").status, "pass");
+
+		// Routing left where earlier releases read it, while the override is set.
+		// This is the whole migration hazard the unification created.
+		writeFileSync(join(legacyDefault, "model-routing.local.json"), "{}");
+		mkdirSync(join(legacyDefault, "claude-sessions"), { recursive: true });
+		const stranded = preflight([], base).of("team-config-dir");
+		assert.equal(stranded.status, "warn");
+		assert.match(stranded.detail, /model-routing\.local\.json/);
+		assert.match(stranded.detail, /claude-sessions/);
+		assert.match(stranded.detail, /fail-closed/, "a left-behind brief goes read-only, not unrestricted");
+
+		// Once the file is across, there is nothing to say — the check must not
+		// nag forever about a directory that merely still exists.
+		writeFileSync(join(override, "model-routing.local.json"), "{}");
+		mkdirSync(join(override, "claude-sessions"), { recursive: true });
+		assert.equal(preflight([], base).of("team-config-dir").status, "pass");
+
+		// The legacy alias reaches the same resolved directory as the documented
+		// name, so the same migration is reported either way.
+		rmSync(join(override, "model-routing.local.json"));
+		const viaAlias = preflight([], {
+			HOME: fakeHome,
+			PST_TEAM_CONFIG_DIR: "",
+			PASEO_TEAM_HOME: override,
+		}).of("team-config-dir");
+		assert.equal(viaAlias.status, "warn");
+		assert.match(viaAlias.detail, /model-routing\.local\.json/);
+	} finally {
+		rmSync(fakeHome, { recursive: true, force: true });
+	}
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));

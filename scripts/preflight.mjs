@@ -19,6 +19,9 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+// Only for the ONE path that is a historical constant rather than a resolved
+// location: the pre-unification default of the pack's config directory.
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -340,7 +343,7 @@ if (wantPi) {
 	if (browserToolsOff)
 		fail(
 			"paseo-browser-tools",
-			'daemon.browserTools.enabled is false in ~/.paseo/config.json — no seat has a browser on either runtime. Set it to true (`pteam config write paseo`) or accept that BROWSER_MCP_AUTHORITY grants nothing.',
+			`daemon.browserTools.enabled is false in ${cw.paseoConfigPath()} — no seat has a browser on either runtime. Set it to true (\`pteam config write paseo\`) or accept that BROWSER_MCP_AUTHORITY grants nothing.`,
 		);
 	else pass("paseo-browser-tools", "daemon.browserTools enabled (default)");
 }
@@ -413,9 +416,7 @@ if (wantClaude) {
 }
 {
 	const promptsDir = cw.promptsDir();
-	const missing = ["lead", "peer", "supervisor"].filter(
-		(r) => !existsSync(join(promptsDir, `${r}.md`)),
-	);
+	const missing = cw.ROLE_PROMPTS.filter((r) => !existsSync(cw.rolePromptPath(r)));
 	if (missing.length === 0) pass("role-prompts", promptsDir);
 	else fail("role-prompts", `missing prompts: ${missing.join(", ")}`);
 }
@@ -659,7 +660,7 @@ if (routing && daemonUp && !skipModels) {
 			if (clamped) {
 				strictCheck(
 					`route:${modelClass}`,
-					`model ${route.model} has thinkingLevelMap.${route.thinking}=null in ~/.pi/agent/models.json — pi will CLAMP the level silently; pick a supported level or another model`,
+					`model ${route.model} has thinkingLevelMap.${route.thinking}=null in ${join(cw.agentDir(), "models.json")} — pi will CLAMP the level silently; pick a supported level or another model`,
 				);
 			} else {
 				pass(
@@ -684,13 +685,16 @@ if (routing && daemonUp && !skipModels) {
 
 if (existsSync(legacyHostsPath)) {
 	warn(
-		"hosts-config",
+		"hosts-config:legacy-file",
 		`${legacyHostsPath} is a REMOVED legacy format and is ignored — move its entries into ${clusterPath} (see docs/multi-host.md) and delete the file`,
 	);
 }
 if (process.argv.includes("--hosts")) {
 	warn(
-		"hosts-config",
+		// A distinct id: both conditions can hold at once, and two checks
+		// sharing one id breaks every consumer that keys the report by id —
+		// including this file's own uniqueness test.
+		"hosts-config:removed-flag",
 		"--hosts was removed with the legacy host registry; pass --cluster <path> instead",
 	);
 }
@@ -1072,6 +1076,42 @@ if (cluster) {
 }
 
 // --- repository state (if run inside a repo) ------------------------------------
+
+// --- the pack's config directory, after the two-variable unification ---------
+//
+// The pack used to resolve this directory twice under two different variable
+// names, and unifying it necessarily MOVES one side: a host that set
+// PST_TEAM_CONFIG_DIR for the CLI while leaving routing and Claude session
+// state in the default ~/.paseo-pi-team now has every reader following the
+// override. No precedence order avoids that — the whole point is that the two
+// halves stop disagreeing — so the migration is reported instead of guessed
+// at, the same way the removed hosts.local.json format is.
+//
+// Reported only when there is something to move: the resolved directory is not
+// the default AND the default still holds pack files the resolved one does not.
+{
+	const resolved = cw.teamConfigDir();
+	const legacyDefault = join(homedir(), ".paseo-pi-team");
+	const PACK_FILES = [
+		"model-routing.local.json",
+		"cluster-routing.local.json",
+		"seat-providers.json",
+		"claude-provider-ledger.json",
+		"claude-sessions",
+	];
+	if (resolved !== legacyDefault && existsSync(legacyDefault)) {
+		const stranded = PACK_FILES.filter(
+			(name) =>
+				existsSync(join(legacyDefault, name)) && !existsSync(join(resolved, name)),
+		);
+		if (stranded.length > 0) {
+			warn(
+				"team-config-dir",
+				`${resolved} is the pack's config directory (PST_TEAM_CONFIG_DIR / PASEO_TEAM_HOME), but ${legacyDefault} still holds ${stranded.join(", ")} and the resolved directory does not. Earlier releases read routing and Claude session state from the default even when the override was set; move those files across. Session state is fail-closed, so a Peer whose brief is left behind goes read-only rather than unrestricted.`,
+			);
+		} else pass("team-config-dir", resolved);
+	} else pass("team-config-dir", resolved);
+}
 
 // --- the repository tactics layer --------------------------------------------
 //

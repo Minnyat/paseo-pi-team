@@ -1014,5 +1014,32 @@ function applySandbox(tag) {
 	rmSync(skillsHome, { recursive: true, force: true });
 }
 
+// --- the provider ledger lives where the rest of the pack's config does ------
+//
+// It used to resolve the directory itself, honouring only PST_TEAM_CONFIG_DIR,
+// so on a PASEO_TEAM_HOME-only host the ledger landed outside the directory
+// every other consumer now uses — and this ledger is what tells an uninstall
+// which providers were ours to remove. A ledger nobody finds is providers
+// nobody cleans up.
+{
+	const dirA = join(home, "cfg-a");
+	const dirB = join(home, "cfg-b");
+	assert.equal(
+		claudeProviderLedgerPath({ PST_TEAM_CONFIG_DIR: dirA }),
+		join(dirA, "claude-provider-ledger.json"),
+	);
+	assert.equal(
+		claudeProviderLedgerPath({ PASEO_TEAM_HOME: dirB }),
+		join(dirB, "claude-provider-ledger.json"),
+		"the legacy alias must reach the same directory as everything else",
+	);
+	assert.equal(
+		claudeProviderLedgerPath({ PST_TEAM_CONFIG_DIR: dirA, PASEO_TEAM_HOME: dirB }),
+		join(dirA, "claude-provider-ledger.json"),
+		"the documented name wins, exactly as it does in lib-common",
+	);
+	assert.match(claudeProviderLedgerPath({}), /\.paseo-pi-team[\/\\]claude-provider-ledger\.json$/);
+}
+
 rmSync(home, { recursive: true, force: true });
 console.log("claude setup tests passed");

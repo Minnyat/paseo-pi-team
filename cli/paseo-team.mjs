@@ -395,6 +395,8 @@ const DOC_ENV = [
 	{ key: "PASEO_PI_ROLE", scope: "per-provider", where: "Paseo config agents.providers.<name>.env", purpose: "role selection (supervisor|lead|peer)" },
 	{ key: "PASEO_TEAM_LEAD_WRITE", scope: "host", where: "machine env", purpose: "grant Lead write/edit tools ('1' to enable)" },
 	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated extra tools per profile" },
+	{ key: "PST_TEAM_CONFIG_DIR", scope: "host", where: "machine env", purpose: "override the pack's config directory (routing files, seat ledger, permit log, Claude session state). Default ~/.paseo-pi-team; PASEO_TEAM_HOME is honoured as a legacy alias and loses to this one" },
+	{ key: "PASEO_TEAM_HOME", scope: "host", where: "machine env", purpose: "legacy alias for PST_TEAM_CONFIG_DIR — still read, and only used when PST_TEAM_CONFIG_DIR is unset" },
 	{ key: "PASEO_TEAM_PROMPTS_DIR", scope: "host", where: "machine env", purpose: "override prompts directory" },
 	{ key: "PASEO_TEAM_SCRIPTS_DIR", scope: "host", where: "machine env", purpose: "override support-scripts directory" },
 	{ key: "PASEO_TEAM_TOPOLOGY", scope: "per-agent", where: "paseo run --env / provider env", purpose: "single (default) | multi — 'multi' turns on the several-Supervisor governance rules: DOMAIN on supervisor blocks, recovery_for inside the supervisor's own domain, and the send_agent_prompt ownership wall. Any unrecognized value resolves to 'multi' (the side that only denies)" },

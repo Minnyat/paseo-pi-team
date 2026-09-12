@@ -41,7 +41,12 @@ export function teamConfigDir() {
 }
 
 export function paseoConfigPath() {
-	return process.env.PASEO_CONFIG_JSON || join(homedir(), ".paseo", "config.json");
+	// Layered, not just the test override: `paseoHome()` below honours Paseo's
+	// own PASEO_HOME and this did not, so a machine that moved its daemon home
+	// had the pack reading agent state from the new tree and the daemon CONFIG
+	// from the old one. Preflight could then pass `paseo-browser-tools` on a
+	// host whose real config has the browser disabled.
+	return process.env.PASEO_CONFIG_JSON || join(paseoHome(), "config.json");
 }
 
 /**
