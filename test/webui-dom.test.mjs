@@ -27,4 +27,31 @@ for (const [, tab] of html.matchAll(/data-tab="([^"]+)"/g)) {
 	assert.ok(declared.has(`tab-${tab}`), `a tab button targets "${tab}" but #tab-${tab} does not exist`);
 }
 
+// The section dropdown is hand-written markup while the sections themselves
+// live in two other files. A new section that nobody added an <option> for is
+// reachable by URL and by the CLI but invisible in the browser — which is how
+// "Kho model Pi" shipped unreachable the first time.
+{
+	const { CONFIG_SECTIONS } = await import("../webui/server.mjs");
+	const { schemaForSection } = await import("../cli/lib/config-schema.mjs");
+
+	// Scope to THIS select: the roles dropdown has its own options, and a
+	// document-wide scan would compare "supervisor" against config sections.
+	const block = /<select id="config-section"[\s\S]*?<\/select>/.exec(html);
+	assert.ok(block, "the config section dropdown still exists");
+	const offered = [...block[0].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+	assert.ok(offered.length > 0, "and it still offers sections");
+	for (const value of offered) {
+		assert.ok(CONFIG_SECTIONS.includes(value), `the form offers section "${value}", which the server would 400`);
+	}
+
+	// "paseo" is deliberately absent: it is the same file as "providers", and
+	// offering both would put one document behind two entries.
+	const ALIASED = new Set(["paseo"]);
+	for (const section of CONFIG_SECTIONS) {
+		if (ALIASED.has(section) || !schemaForSection(section)) continue;
+		assert.ok(offered.includes(section), `section "${section}" has a form schema but no <option> to reach it`);
+	}
+}
+
 console.log("webui-dom tests passed");

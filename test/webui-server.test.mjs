@@ -273,7 +273,7 @@ assert.equal(bearerToken({ headers: {} }), null);
 
 // --- every route is a real CLI subcommand ---------------------------------
 {
-	const known = new Set(["status", "preflight", "config", "prompts", "skills", "env", "install", "agents", "agent", "permits", "graph", "watchdog", "web", "seats"]);
+	const known = new Set(["status", "preflight", "config", "prompts", "skills", "env", "install", "agents", "agent", "permits", "graph", "watchdog", "web", "seats", "models"]);
 	for (const [key, route] of Object.entries(ROUTES)) {
 		const { args } = route.build(
 			{ section: "providers", role: "lead", id: "aaaa1111-2222-3333-4444-555555555555", name: "paseo-team-lead", room: "team" },

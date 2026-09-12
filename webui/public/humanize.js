@@ -83,6 +83,30 @@ export function permitSentence(permit, agentName) {
 }
 
 const ERROR_ADVICE = [
+	// The model-endpoint codes come FIRST: their text contains words like
+	// "unreachable" and "connect" that the Paseo rule below would swallow,
+	// and telling someone to start Paseo when their model endpoint is down
+	// sends them to fix the wrong machine.
+	{
+		match: /ENDPOINT_UNREACHABLE|ENDPOINT_LIST_FAILED/,
+		title: "Không gọi được tới điểm cuối",
+		advice: "Kiểm tra địa chỉ endpoint và khoá API của điểm cuối này. Các điểm cuối khác vẫn được cập nhật bình thường.",
+	},
+	{
+		match: /ENDPOINT_LIST_EMPTY|ENDPOINT_LIST_UNREADABLE/,
+		title: "Điểm cuối không trả về model nào",
+		advice: "Địa chỉ có thể thiếu /v1 ở cuối, hoặc khoá API không có quyền xem danh sách model.",
+	},
+	{
+		match: /ALL_MODELS_DEAD/,
+		title: "Không model nào còn trả lời",
+		advice: "Danh sách cũ được giữ nguyên, không bị xoá. Thử lại sau, hoặc kiểm tra khoá API.",
+	},
+	{
+		match: /API_KEY_MISSING/,
+		title: "Chưa tìm thấy khoá API",
+		advice: "Tạo file chứa khoá mà điểm cuối này trỏ tới, với nội dung dạng TÊN_BIẾN=khoá.",
+	},
 	{
 		match: /daemon|econnrefused|not running|unreachable|connect/i,
 		title: "Chưa kết nối được với Paseo",

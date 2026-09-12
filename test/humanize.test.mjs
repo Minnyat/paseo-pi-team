@@ -125,4 +125,17 @@ assert.match(degradedSentence([{ reason: "TIMEOUT" }, { reason: "INSPECT_FAILED"
 assert.match(degradedSentence([{ reason: "PERMIT_SHAPE_UNRECOGNIZED" }], 0), /không đọc được nội dung/);
 assert.match(degradedSentence([], 5), /còn 5 agent chưa xếp xong/);
 
+// A model endpoint being down is not Paseo being down. The generic rule
+// matches "unreachable"/"connect" too, so the specific codes have to win —
+// otherwise the page tells someone to start Paseo when Paseo is running fine
+// and it is their upstream that is broken.
+{
+	assert.equal(humanizeError({ code: "ENDPOINT_UNREACHABLE", message: "fetch failed" }).title, "Không gọi được tới điểm cuối");
+	assert.equal(humanizeError({ code: "ENDPOINT_LIST_FAILED", message: "GET .../models -> 403" }).title, "Không gọi được tới điểm cuối");
+	assert.match(humanizeError({ code: "ALL_MODELS_DEAD", message: "no model answered" }).advice, /được giữ nguyên/);
+	assert.equal(humanizeError({ code: "API_KEY_MISSING" }).title, "Chưa tìm thấy khoá API");
+	// ...while a genuine daemon fault still reads as one.
+	assert.equal(humanizeError({ code: "DAEMON_UNREACHABLE", message: "ECONNREFUSED" }).title, "Chưa kết nối được với Paseo");
+}
+
 console.log("humanize tests passed");
