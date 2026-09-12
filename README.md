@@ -117,6 +117,9 @@ paseo-pi-team/
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
 │   ├── instruction-budget.test.mjs # standing-instruction size ratchet
+│   ├── preflight.test.mjs          # which checks run, and at what severity
+│   ├── uninstall.test.mjs          # removes what install wrote, and nothing else
+│   ├── tools/mutate.mjs            # mutation harness: would these tests catch the bug?
 │   ├── workspace-protocol.test.mjs # protocol admission states + digest
 │   ├── install-drift.test.mjs      # installed copies vs this release
 │   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity

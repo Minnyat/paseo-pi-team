@@ -138,6 +138,42 @@ rmSync(join(scriptsDir, "lease-ledger.mjs"));
 assert.deepEqual(verdicts(drift(), "support-script"), ["lease-ledger.mjs:missing"]);
 assert.equal(report().installed, true, "one missing file is not an absent install");
 
+// Even the pi adapter alone going missing is a STALE install, not an absent
+// one. The distinction decides which message the caller prints, and the
+// "not installed" one suppresses the filename that would fix it.
+rmSync(join(extDir, "paseo-team-policy.ts"));
+assert.equal(report().installed, true, "one absent artifact is not an absent install");
+assert.deepEqual(verdicts(drift(), "extension"), ["paseo-team-policy.ts:missing"]);
+install();
+
+// An installer list that PARSES BUT IS EMPTY must not read as "the installers
+// ship nothing": that walks every correctly-installed script into `unexpected`
+// and hands a healthy host a page of findings whose remedy fixes none of them.
+// Both ways of failing to read the list — unreadable, and readable but empty —
+// have to reach the same `null`.
+assert.equal(installerSupportFiles("/nonexistent-root"), null, "unreadable installer");
+{
+	const emptyList = mkdtempSync(join(tmpdir(), "paseo-drift-emptylist-"));
+	mkdirSync(join(emptyList, "scripts"), { recursive: true });
+	writeFileSync(join(emptyList, "scripts", "install.sh"), "TEAM_SUPPORT_FILES=(\n)\n");
+	assert.equal(installerSupportFiles(emptyList), null, "parsed but empty is also unknown");
+	rmSync(emptyList, { recursive: true, force: true });
+}
+{
+	install();
+	const bogus = installDrift({ root: "/nonexistent-root", env: { ...process.env } });
+	assert.deepEqual(
+		bogus.drift.filter((item) => item.kind === "support-script"),
+		[],
+		"an unknown support list reports nothing about support scripts",
+	);
+	assert.ok(
+		bogus.unchecked.some((line) => line.startsWith("support-script:")),
+		"and says so — a check that cannot run must not pass silently",
+	);
+	assert.equal(bogus.ok, false, "an unchecked comparison is not a clean result");
+}
+
 // A file in scripts/ that the installers do not ship is not expected to be
 // installed, and its absence is not drift.
 install();
