@@ -174,3 +174,16 @@
   Một ghi nhận về chính mình đáng để lại: hai block test ở vòng sửa trước **không hề được thêm vào file** — lệnh `s.replace(old, new, 1)` không khớp anchor nên no-op, suite vẫn xanh nên không ai biết, và tôi đã báo cáo với user là đã thêm. Đúng một hình dạng với những lỗi đang đi sửa: *một thay đổi không xảy ra, cộng một tín hiệu xanh khẳng định là có*. Từ giờ mọi edit bằng script phải `assert old in s`.
 
   Còn nợ (đã đo, chưa sửa): 33/37 file test là script assert phẳng, không dùng `node:test`, nên **failure đầu tiên là abort cả file** — chỉ thấy một lỗi mỗi lần và code dọn dẹp cuối file không chạy. "157 tests" thực chất là ~4 file có subtest thật cộng 33 file mỗi file tính là 1. Không convert hàng loạt ở lần này (churn lớn, rủi ro cao); file test mới đều dùng `node:test` subtest.
+
+- (2026-09-12) **Trả lời "lỗi do đâu" bằng coverage + mutation, rồi bịt ba lỗ đang sống trong Pi adapter.** Chạy `node --test --experimental-test-coverage` toàn repo, con số tách làm hai nhóm không thể rõ hơn: **module luật 94–99%** (`policy-core.ts` 98.12, `claude-policy.ts` 99.25, `install-drift.mjs` 98.00, `workspace-protocol.mjs` 94.68, `graph.mjs` 98.97) — **tầng wiring 0–48%** (`paseo-team-policy.ts` 47.97, `preflight.mjs` 0 lệnh nào chạy, `uninstall.mjs` 0). Cả 9 lỗi của vòng trước đều là lỗi **wiring**, không phải lỗi **luật**: một rule tồn tại, đúng, có unit test, và **không ai gọi** — hoặc gọi ở sai mức nghiêm trọng.
+
+  Kiểm chứng trên Pi adapter bằng 6 mutation chỉ đục vào *call site* (không đụng hàm): **3 sống sót**, đều là lỗ thật đang tồn tại chứ không giả định:
+  - **role prompt không hề được inject** — nghĩa là seat pi chạy không có role contract, và nó trông y hệt seat khoẻ mạnh: cùng tool, cùng log, cùng version, cho tới lúc nó làm một việc không role nào được phép. Đây là thứ tệ nhất pack này có thể hỏng, và không gì bắt được.
+  - gate skill ở read path **chưa được nối** (hàm `skillBlockReason` đúng 100%, `tool_call` không gọi nó).
+  - guard bash chặn Peer gọi Paseo CLI **chưa được nối** — đường vòng qua toàn bộ tool policy.
+
+  Bịt bằng cách drive **factory thật** qua `makePiStub`/`loadFreshExtension` đã có sẵn trong `policy.test.mts` (rẻ, không phải dựng harness mới). Role prompt assert theo **bytes thật của `prompts/<role>.md`** thay vì stub dir — vừa mạnh hơn, vừa vì `loadRolePrompt` memo hoá promptsDir lúc import policy-core nên stub env không kịp tác dụng. Sau đó **6/6 mutation chết**.
+
+  Thêm `npm run coverage` và `npm run mutate` + mục "Testing the tests" trong README, kèm **một cái bẫy phải ghi lại**: coverage của `paseo-team-policy.ts` báo dòng 609-612 uncovered trong khi mutation ở đúng dòng đó chết — vì `policy.test.mts` import adapter qua specifier có query-string (`...policy.ts?tag`) để lấy module mới mỗi scenario, và reporter không quy về file gốc. Coverage ở đây là **sàng lọc**, mutation mới là **phán quyết**; đừng đặt coverage floor lên file đó.
+
+  Ưu tiên còn lại theo đúng thứ tự bằng chứng: `preflight.mjs` vẫn 42% (mới phủ 2 check mới, còn ~20 check cũ) → `cli/paseo-team.mjs` 82% line / **62% branch** → 33 file test phẳng (thấp nhất: mutation data cho thấy nó không phải nguyên nhân của lỗi nào).

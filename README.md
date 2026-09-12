@@ -976,6 +976,41 @@ Lead skill (LOCAL_CREATE_CYCLE vs REMOTE_CREATE_CYCLE).
 | pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool names prefixed `paseo_` |
 | Node | ≥ 22.18 | type stripping on by default; CI runs 22.18 and 24 on ubuntu/windows/macos |
 
+### Testing the tests
+
+`npm test` answers "do the tests pass?". It cannot answer "would these tests
+have caught the bug?", and on this repo the two came apart badly: a review of
+one branch found nine real defects while all 139 tests were green.
+
+```bash
+npm run coverage    # which files does the suite never execute?
+npm run mutate <mutations.json>   # break the code on purpose; does the suite notice?
+```
+
+Measured with both, the shape of the gap was consistent and is worth knowing
+before adding a test here:
+
+| Layer | Coverage | Mutations killed |
+|---|---|---|
+| Rule modules (`policy-core`, `claude-policy`, `install-drift`, `workspace-protocol`) | 94–99% | 14 / 14 |
+| Wiring (`paseo-team-policy.ts`, `preflight.mjs`, `uninstall.mjs`) | 0–48% | 6 / 12 |
+
+Every one of the nine defects was a **wiring** defect: a rule that exists, is
+correct, is unit-tested, and is never called — or is called at the wrong
+severity. Deleting preflight's whole workspace-protocol block, deleting its
+whole install-drift block, and stopping the Pi adapter from injecting the role
+prompt at all each passed the entire suite.
+
+So when you add an enforcement rule here, the unit test for the rule is the
+easy half. The half that has actually failed in this repo is the call site:
+drive the real adapter or the real script, and assert the rule fires.
+
+`npm run coverage` is a screen, not a verdict. `policy.test.mts` loads the Pi
+adapter through a query-string specifier to get a fresh module per scenario,
+and the reporter does not attribute that back to the base file — so lines that
+demonstrably execute are still listed as uncovered there. Confirm with
+`npm run mutate`, and do not put a coverage floor on that file.
+
 ### Preflight
 
 ```bash

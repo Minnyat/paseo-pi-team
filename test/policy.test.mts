@@ -2183,3 +2183,122 @@ console.log("[paseo-team] policy tests passed");
 }
 
 console.log("[paseo-team] skill admission tests passed");
+
+// --- the Pi adapter's WIRING, not just its rules -----------------------------
+//
+// Coverage put a number on a gap the mutation harness then proved: the rule
+// modules sit at ~98%, while extensions/paseo-team-policy.ts — the file that
+// decides which rule runs, on which argument — sat at 48%, and three mutations
+// to its wiring passed the entire suite. All of them are the same failure: a
+// rule that exists, is correct, is unit-tested, and is never called.
+//
+// These drive the REAL extension factory through the stub, so deleting a call
+// site fails here even when the function it calls is perfect.
+
+{
+	const prevRole = process.env.PASEO_PI_ROLE;
+
+	// Asserted against the REAL prompt bytes rather than a stub directory.
+	// `loadRolePrompt` resolves and memoises the prompts directory when
+	// policy-core is first imported, which is long before any test could point
+	// it somewhere else — and the stronger claim is the one worth making
+	// anyway: the contract this release actually ships is the contract the
+	// model receives, byte for byte.
+	const shippedPrompt = (role: string) =>
+		readFileSync(new URL(`../prompts/${role}.md`, import.meta.url), "utf8");
+
+	try {
+		// 1. The role prompt reaches the system prompt.
+		//
+		// This is the single most consequential thing the adapter does, and the
+		// most silent when it stops: a seat with no role contract looks exactly
+		// like a healthy one — same tools, same logs, same version — right up
+		// until it does something no role is allowed to do.
+		for (const role of ["lead", "peer", "supervisor"] as const) {
+			process.env.PASEO_PI_ROLE = role;
+			const { piStub, handlers } = makePiStub(["read", "bash"]);
+			(await loadFreshExtension(`wiring-prompt-${role}`))(piStub);
+			const result = (await requireHandler(handlers, "before_agent_start")({
+				prompt: "do the thing",
+				systemPrompt: "BASE PROMPT",
+			})) as { systemPrompt?: string } | undefined;
+			assert.ok(result?.systemPrompt, `${role}: before_agent_start returned no system prompt`);
+			assert.ok(
+				result.systemPrompt.includes(shippedPrompt(role)),
+				`${role}: the shipped role contract never reached the system prompt`,
+			);
+			assert.match(result.systemPrompt, /BASE PROMPT/, `${role}: the base prompt was dropped`);
+			assert.match(result.systemPrompt, /## Paseo Team Role/, `${role}: contract not labelled`);
+		}
+
+		// 2. The skill admission gate is wired to the read path.
+		//
+		// pi has no `skill` tool: reading the installed SKILL.md IS loading it.
+		// skillBlockReason being correct buys nothing if tool_call never asks it.
+		{
+			const prevHome = process.env.HOME;
+			const fakeHome = mkdtempSync(join(tmpdir(), "pst-wiring-home-"));
+			process.env.HOME = fakeHome;
+			process.env.PASEO_PI_ROLE = "peer";
+			try {
+				const { piStub, handlers } = makePiStub(["read", "bash"]);
+				(await loadFreshExtension("wiring-skill"))(piStub);
+				const toolCall = requireHandler(handlers, "tool_call");
+
+				const installedLeadSkill = join(
+					fakeHome, ".pi", "agent", "skills", "paseo-team-lead", "SKILL.md",
+				);
+				const blocked = (await toolCall({
+					toolName: "read",
+					input: { path: installedLeadSkill },
+				})) as { block?: boolean; reason?: string } | undefined;
+				assert.equal(blocked?.block, true, "a Peer must not load the Lead procedure");
+				assert.match(String(blocked?.reason), /not admitted for the peer/);
+
+				// The same file in a repository checkout is ordinary work, and every
+				// other read stays untouched — a gate that eats normal reads would
+				// be found immediately, which is why it has to be asserted here.
+				for (const path of ["skills/paseo-team-lead/SKILL.md", "README.md"]) {
+					assert.equal(
+						await toolCall({ toolName: "read", input: { path } }),
+						undefined,
+						`read of ${path} must not be blocked`,
+					);
+				}
+			} finally {
+				if (prevHome === undefined) delete process.env.HOME;
+				else process.env.HOME = prevHome;
+				rmSync(fakeHome, { recursive: true, force: true });
+			}
+		}
+
+		// 3. The Peer bash guard is wired.
+		//
+		// Driving Paseo from the shell is the way around the whole tool policy,
+		// so callsPaseoCli not being CALLED is worth more than callsPaseoCli
+		// being wrong.
+		{
+			process.env.PASEO_PI_ROLE = "peer";
+			const { piStub, handlers } = makePiStub(["read", "bash"]);
+			(await loadFreshExtension("wiring-bash"))(piStub);
+			const toolCall = requireHandler(handlers, "tool_call");
+			const blocked = (await toolCall({
+				toolName: "bash",
+				input: { command: "paseo agent create --role peer" },
+			})) as { block?: boolean; reason?: string } | undefined;
+			assert.equal(blocked?.block, true, "a Peer must not drive the Paseo CLI from bash");
+			assert.match(String(blocked?.reason), /DEPENDENCY_REQUEST/);
+			assert.equal(
+				await toolCall({ toolName: "bash", input: { command: "npm test" } }),
+				undefined,
+				"an ordinary command must still run",
+			);
+		}
+	} finally {
+		if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+		else process.env.PASEO_PI_ROLE = prevRole;
+	}
+}
+
+console.log("[paseo-team] pi adapter wiring tests passed");
+

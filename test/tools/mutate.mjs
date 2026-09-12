@@ -27,6 +27,15 @@
  * every time, because nothing executed those files at all. Coverage of a
  * module's functions says nothing about coverage of the file that calls them.
  *
+ * Use `node --test --experimental-test-coverage` to SCREEN for that (it is what
+ * pointed at the Pi adapter), but verify with this tool, not with the
+ * percentage. The percentage lies in at least one place here: policy.test.mts
+ * loads the Pi adapter through `import("../extensions/paseo-team-policy.ts?tag")`
+ * to get a fresh module per scenario, and the coverage reporter does not
+ * attribute a query-string specifier back to the base file — so lines that
+ * demonstrably execute (break one and a test fails) are still listed as
+ * uncovered. A coverage FLOOR on that file would be a number nobody can move.
+ *
  * The file is restored in a `finally`, and a .ts mutation rebuilds before and
  * after, so an interrupted run leaves the tree buildable.
  */
