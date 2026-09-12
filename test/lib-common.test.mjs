@@ -2,10 +2,10 @@
 // six near-identical private copies; the behaviours pinned here are the ones
 // that differed between those copies and are therefore easy to regress.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   PASEO_CONVENTIONAL_ENTRIES,
@@ -288,9 +288,12 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
       '@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe" "%~dp0\\node_modules\\@getpaseo\\cli\\dist\\index.js" %*\r\n)\r\n',
     );
     process.env.PATH = binDir;
+    // Compare real paths on both sides: the resolver realpaths what it found,
+    // and on macOS the temp dir sits behind a symlink (/var -> /private/var),
+    // so the literal strings differ while pointing at the same file.
     assert.equal(
-      resolvePaseoClientModule(),
-      pathToFileURL(client).href,
+      realpathSync(fileURLToPath(resolvePaseoClientModule())),
+      realpathSync(client),
       "a .cmd shim must be read for its JS entry before the package root is derived",
     );
 
