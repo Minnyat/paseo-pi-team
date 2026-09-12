@@ -841,9 +841,6 @@ loaders.graph = async () => {
 
 $("graph-refresh").addEventListener("click", () => refreshGraph());
 $("graph-all").addEventListener("change", () => refreshGraph());
-// A room read costs a round trip, so it fires on commit (blur/Enter), not on
-// every keystroke.
-$("graph-rooms").addEventListener("change", () => refreshGraph());
 // The domain filter is a local view change: no request, just a redraw.
 $("graph-domain").addEventListener("change", () => {
 	teamRenderedSig = "";
