@@ -159,6 +159,61 @@ export const PASEO_CONVENTIONAL_ENTRIES = [
 ];
 
 /**
+ * Locate Paseo's client SDK module, the one the `paseo` CLI itself imports.
+ *
+ * Why this exists: a handful of daemon operations have never been exposed as
+ * `paseo` subcommands — refreshing the provider snapshot is the one this pack
+ * needs. Spawning the CLI cannot reach them, so for those the pack imports the
+ * same module the CLI does and speaks the protocol directly.
+ *
+ * The path is derived from wherever `paseo` actually lives (`<root>/bin/paseo`
+ * -> `<root>/dist/utils/client.js`) rather than hard-coded: npm -g, mise, nvm
+ * and Homebrew each put it somewhere different, and a checkout puts it under
+ * node_modules. PASEO_TEAM_PASEO_CLIENT overrides everything, which is also
+ * how the tests substitute a fake daemon.
+ *
+ * @param {(reason: string, tried: string[]) => never} [onMissing]
+ * @returns {string} a file:// URL ready for dynamic import
+ */
+export function resolvePaseoClientModule(onMissing) {
+	const override = process.env.PASEO_TEAM_PASEO_CLIENT?.trim();
+	if (override) {
+		return override.startsWith("file:") ? override : pathToFileURL(override).href;
+	}
+	const tried = [];
+	const bin = findOnPath(["paseo", "paseo.exe", "paseo.cmd", "paseo.bat"]);
+	if (bin) {
+		// realpath first: ~/.local/bin/paseo is usually a symlink into the
+		// package, and the relative layout only holds at the real location.
+		let real;
+		try {
+			real = realpathSync(bin);
+		} catch {
+			real = bin;
+		}
+		const root = dirname(dirname(real));
+		const candidate = join(root, "dist", "utils", "client.js");
+		tried.push(candidate);
+		if (existsSync(candidate)) return pathToFileURL(candidate).href;
+	}
+	for (const segments of PASEO_CLIENT_CONVENTIONAL_ENTRIES) {
+		const candidate = join(process.cwd(), ...segments);
+		tried.push(candidate);
+		if (existsSync(candidate)) return pathToFileURL(candidate).href;
+	}
+	const reason = bin
+		? "found the paseo CLI but not its client SDK next to it"
+		: "could not find the paseo CLI on PATH";
+	if (onMissing) onMissing(reason, tried);
+	throw new Error(`${reason} (tried: ${tried.join(", ") || "nothing"})`);
+}
+
+// Checkout layout, for a repo that has @getpaseo/cli as a dependency.
+export const PASEO_CLIENT_CONVENTIONAL_ENTRIES = [
+	["node_modules", "@getpaseo", "cli", "dist", "utils", "client.js"],
+];
+
+/**
  * Resolve `[bin, ...prefixArgs]` for the paseo CLI.
  *
  * Windows `.cmd` shims cannot be spawned with argv (EINVAL), so the shim's

@@ -152,6 +152,7 @@ echo "     (agents.providers.pi-* + claude-* + daemon.mcp.injectIntoAgents: true
 echo "     Regenerate the claude-* block any time with:"
 echo "       node \"$ROLE_PACK_ROOT/scripts/claude-setup.mjs\" --print-providers"
 echo "  5. Copy config/model-routing.example.json to ~/.paseo-pi-team/model-routing.local.json"
+echo "     (routing to pi? also copy config/pi-models.example.json there, then: pteam models sync)"
 echo "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
 echo "     Cross-host controller: also copy config/cluster-routing.example.json to"
 echo "     ~/.paseo-pi-team/cluster-routing.local.json (endpoint values live in env)"

@@ -11,6 +11,10 @@ Pi 0.83.0 + pi-mcp-adapter 2.19.0 (Windows host `desktop-m1a2r16`,
 Lớp 1  Pi model inventory (per host, KHÔNG commit)
          pi install, ~/.pi/agent/auth.json, credential env,
          ~/.pi/agent/models.json (custom provider/model), extension/package
+         → với endpoint OpenAI-compatible: `pteam models sync` dựng lại file này
+           (probe thật từng model; cờ `reasoning` suy từ câu trả lời, không đoán
+           theo tên — đoán sai là Paseo báo thinkingOptions "none" và chặn mọi
+           route trên mức off). Cấu hình ở ~/.paseo-pi-team/pi-models.local.json.
               │
 Lớp 2  Paseo role profiles (commit template) — ĐÚNG 6 profile,
        một cho mỗi (family, vai trò):
