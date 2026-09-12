@@ -33,6 +33,7 @@ import { orchestrationPreferencesNotice } from "./lib-common.mjs";
 // directory, so this relative path always resolves to the package it shipped in
 // — which is the whole point: one side of the comparison must BE this release.
 import { installDrift, summarizeDrift } from "../cli/lib/install-drift.mjs";
+import { describeProtocolState, protocolState } from "../cli/lib/workspace-protocol.mjs";
 import {
 	RoutingError,
 	buildProviderInventory,
@@ -1051,6 +1052,28 @@ if (cluster) {
 }
 
 // --- repository state (if run inside a repo) ------------------------------------
+
+// --- the repository tactics layer --------------------------------------------
+//
+// Only meaningful inside a repository, so it rides along with the repo checks
+// below rather than running on a bare host. `invalid` is the case worth the
+// code: a Lead reading a protocol with an unresolved merge conflict in it does
+// not get "no protocol", it gets both sides of the conflict as rules — and
+// until now nothing in the pack ever opened the file to notice.
+{
+	const inRepo = tryExec("git", ["rev-parse", "--is-inside-work-tree"]);
+	const top = tryExec("git", ["rev-parse", "--show-toplevel"]);
+	if (inRepo.ok && inRepo.stdout.trim() === "true" && top.ok) {
+		const state = protocolState(top.stdout.trim());
+		const detail = describeProtocolState(state);
+		if (state.state === "valid" && !state.legacy) pass("workspace-protocol", detail);
+		// Present but unusable is the one that must not read as "absent": the
+		// file is there, the Lead will open it, and what it finds is wrong.
+		else if (state.state === "invalid" || state.state === "unreadable") {
+			fail("workspace-protocol", detail);
+		} else warn("workspace-protocol", detail);
+	}
+}
 
 {
 	const repo = tryExec("git", ["rev-parse", "--is-inside-work-tree"]);

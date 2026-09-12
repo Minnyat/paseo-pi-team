@@ -85,6 +85,7 @@ paseo-pi-team/
 │       ├── paseo-bridge.mjs        # the only place that spawns `paseo` (argv, timeouts, fan-out)
 │       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
 │       ├── install-drift.mjs       # installed copies vs THIS release, byte for byte
+│       ├── workspace-protocol.mjs  # grade a target repo's WORKSPACE_PROTOCOL.md
 │       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
 ├── webui/
 │   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
@@ -116,6 +117,7 @@ paseo-pi-team/
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
 │   ├── instruction-budget.test.mjs # standing-instruction size ratchet
+│   ├── workspace-protocol.test.mjs # protocol admission states + digest
 │   ├── install-drift.test.mjs      # installed copies vs this release
 │   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity
 │   ├── patch-paseo-mcp.test.mjs    # the MCP protocol-header patch for Paseo's bundled SDK
@@ -559,6 +561,52 @@ source agent. `verify` reads `runtimeInfo` (never the stale creation-time
 Peers stay with the source: there is no reparent API, and `detach` is a Human
 action that leaves a Peer unable to escalate.
 
+## The workspace protocol
+
+`WORKSPACE_PROTOCOL.md` in the **root** of the repository being orchestrated is
+the repository tactics layer — the instruction source between the role contract
+(which this pack owns) and the assignment (which the Lead writes per task).
+`prompts/lead.md` makes reading it invariant 1. Readership is part of the
+contract: the Lead reads it in full before orchestrating, a Peer never does (the
+Lead extracts the relevant constraints into the V3 brief), and the Supervisor
+reads it only under a governance mandate to create, audit or update it.
+
+Copy [`templates/WORKSPACE_PROTOCOL.example.md`](templates/WORKSPACE_PROTOCOL.example.md)
+to get started, then:
+
+```bash
+pteam protocol status                  # grade the repo in the current directory
+pteam protocol status --path /some/repo
+```
+
+Four states, not a boolean:
+
+| State | Meaning |
+|---|---|
+| `valid` | present, versioned, no unresolved conflict — reported with a sha256 digest and any still-blank keys |
+| `missing` | no protocol; the Lead has no tactics layer |
+| `invalid` | present but not usable: blank, NUL bytes, unresolved merge-conflict markers, or no `WORKSPACE_PROTOCOL_VERSION` |
+| `unreadable` | the path exists and cannot be read as a file |
+
+`invalid` is the state that earns the module. `missing` a Lead can act on; a
+protocol carrying an unresolved merge conflict is *worse* than absent, because
+the Lead opens it and reads both sides of the conflict as rules. Preflight fails
+on `invalid` and `unreadable` for that reason, and warns on `missing`.
+
+Blank recommended keys are reported, never fatal — the deep dive is explicit
+that a tight repo and a loose side project both get to write one, and a prose
+protocol is a legitimate protocol. The digest is recorded because it is what
+makes "did the protocol change since the Lead read it?" answerable at all.
+
+A protocol at the legacy `.orchestration/WORKSPACE_PROTOCOL.md` (where an older
+version of the template pointed) is still found, and reported AS legacy — the
+Lead reads the repository root, so telling someone their protocol is "missing"
+while it sits on disk is the least useful true statement available.
+
+This reports; it does not gate. Turning a missing protocol into a delegation
+blocker is a decision for whoever operates a fleet, not something a release
+should switch on underneath them.
+
 ## Skill admission
 
 The pack ships two skills, and both land in a directory every seat on the
@@ -943,8 +991,9 @@ runtime in scope, **each healthy provider's model inventory**, routing config
 (single-host + cluster contract), each route against the real inventory,
 provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
 `null` level means the level gets clamped), endpoint env vars, **whether every
-installed copy still matches this release** (`install-drift`), and repository
-state (a writer host must be clean in strict mode). No secret is ever printed.
+installed copy still matches this release** (`install-drift`), **the target
+repository's protocol** (`workspace-protocol`), and repository state (a writer
+host must be clean in strict mode). No secret is ever printed.
 
 **Upgrading the package is only half an upgrade.** The policy core, the role
 prompts and the Lead skill are COPIED into `~/.pi/agent/` at install time, and

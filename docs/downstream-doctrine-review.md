@@ -161,10 +161,21 @@ a binding receipt, and role-specific readership, and it fails closed on
 earns its keep: an unresolved merge conflict or a truncated protocol is not "no
 protocol", it is a protocol the Lead must not act on.
 
-We have none of this. The protocol is a template we hand the Human; nothing reads it,
-validates it, or notices it changed. A `pteam protocol status --json` reporting the four
-states plus a digest, wired into preflight as a warning, would cost little and would
-catch the failure mode in §1.1 as a side effect.
+We had none of this. The protocol was a template we handed the Human; nothing read it,
+validated it, or noticed it changed.
+
+**Adopted, reporting only.** `cli/lib/workspace-protocol.mjs` grades a repo into the
+same four states with a sha256 digest, exposed as `pteam protocol status` and as the
+`workspace-protocol` preflight check. Preflight fails on `invalid`/`unreadable` and warns
+on `missing`, which is the split that matters: `missing` a Lead can act on, while a
+protocol carrying an unresolved merge conflict is worse than absent. The legacy
+`.orchestration/` path from §1.1 is still resolved, and reported as legacy.
+
+What we did NOT take is the enforcement: they fail a launch closed on a missing protocol
+and admit only a bounded Human-issued bootstrap exception. They can — they own the
+daemon and the launch. We could only express it as a tool-call deny, and turning a
+missing protocol into a delegation blocker for existing fleets is a decision for whoever
+operates one, not something a release switches on underneath them.
 
 Note the readership rule is doctrine we already carry and should keep visible when we
 implement this: Lead reads it in full, Peer does not (the Lead extracts the relevant

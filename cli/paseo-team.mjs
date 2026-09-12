@@ -46,6 +46,7 @@ import {
 	SEAT_CAPABILITIES,
 } from "../scripts/seat-profiles.mjs";
 import { runPaseoJson, runPaseoText, mapWithConcurrency, PaseoError } from "./lib/paseo-bridge.mjs";
+import { describeProtocolState, protocolState } from "./lib/workspace-protocol.mjs";
 import {
 	ROLE_PROVIDERS,
 	RUNTIME_FAMILIES,
@@ -1191,6 +1192,7 @@ usage:
   pteam skills list
   pteam skills read <name>
   pteam skills write <name>                (markdown body on stdin)
+  pteam protocol status [--path <repo>]    (grade a repo's WORKSPACE_PROTOCOL.md)
   pteam env list
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
@@ -1272,6 +1274,7 @@ async function main() {
 		case "config": return dispatchTwo("config", argv, { read: cmdConfigRead, write: cmdConfigWrite });
 		case "prompts": return dispatchTwo("prompts", argv, { read: cmdPromptsRead, write: cmdPromptsWrite });
 		case "skills": return dispatchSkills(argv);
+		case "protocol": return dispatchProtocol(argv);
 		case "env": return dispatchEnv(argv[0]);
 		case "install": return cmdInstall(argv);
 		case "claude-setup": return cmdClaudeSetup(argv);
@@ -1329,6 +1332,30 @@ function dispatchTwo(parent, argv, handlers) {
 	// Trailing flags reach the handler; each one declares what it accepts and
 	// rejects the rest, so a typo can never be silently dropped here.
 	return fn(arg, argv.slice(2));
+}
+
+// ---------------------------------------------------------------------------
+// workspace protocol
+//
+// The repository tactics layer the Lead is told to read before orchestrating.
+// Reported, never enforced here: `missing` and `invalid` are facts a Human acts
+// on, and turning either into a delegation blocker is a fleet-operator decision
+// rather than something a release switches on underneath them.
+// ---------------------------------------------------------------------------
+
+function cmdProtocolStatus(argv) {
+	const i = argv.indexOf("--path");
+	const repoRoot = i >= 0 && argv[i + 1] ? argv[i + 1] : process.cwd();
+	const state = protocolState(repoRoot);
+	json({ repoRoot, ...state, summary: describeProtocolState(state) });
+}
+
+function dispatchProtocol(argv) {
+	const sub = argv[0];
+	switch (sub) {
+		case "status": return cmdProtocolStatus(argv.slice(1));
+		default: fail(`protocol: unknown subcommand '${sub ?? ""}' (expected status)`);
+	}
 }
 
 function dispatchSkills(argv) {
