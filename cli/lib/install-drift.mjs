@@ -113,19 +113,28 @@ function compareDir({ kind, sourceDir, installedDir, owned, sourceFilter = () =>
  * One source of truth on purpose. A second copy of this list here would be a
  * list that drifts, and a drift checker whose own expectations have drifted is
  * worse than none — it reports confidently about the wrong thing.
+ *
+ * Returns `null`, never `[]`, when the list cannot be read. The difference
+ * matters: an empty list means "the installers ship nothing", which would walk
+ * every correctly-installed support script into `unexpected` and hand a healthy
+ * host fourteen findings with a remedy that cannot fix any of them. `null` means
+ * "unknown", and the caller skips the comparison instead of inventing one.
  */
 export function installerSupportFiles(root = ROOT) {
 	let text;
 	try {
 		text = readFileSync(join(root, "scripts", "install.sh"), "utf8");
 	} catch {
-		return [];
+		return null;
 	}
 	const start = text.indexOf("TEAM_SUPPORT_FILES=(");
-	if (start < 0) return [];
+	if (start < 0) return null;
 	const end = text.indexOf("\n)", start);
-	if (end < 0) return [];
-	return [...text.slice(start, end).matchAll(/^\s*([a-z0-9-]+\.mjs)\s*$/gm)].map((m) => m[1]);
+	if (end < 0) return null;
+	const files = [...text.slice(start, end).matchAll(/^\s*([a-z0-9-]+\.mjs)\s*$/gm)].map(
+		(m) => m[1],
+	);
+	return files.length > 0 ? files : null;
 }
 
 /** Where Claude Code keeps the user's skills; mirrors claude-setup.mjs. */
@@ -143,6 +152,8 @@ function claudeSkillsDir(env = process.env) {
 export function installDrift({ root = ROOT, env = process.env } = {}) {
 	const extDir = cw.extensionsDir();
 	const groups = [];
+	/** Comparisons this run could not make. Reported, never silently skipped. */
+	const unchecked = [];
 
 	// 1. The pi adapter itself.
 	const policySource = join(root, "extensions", "paseo-team-policy.ts");
@@ -216,6 +227,10 @@ export function installDrift({ root = ROOT, env = process.env } = {}) {
 	const shippedScripts = installerSupportFiles(root);
 	if (!existsSync(scriptsDir)) {
 		groups.push({ kind: "support-script", file: "paseo-team-scripts/", verdict: "missing", path: scriptsDir });
+	} else if (shippedScripts === null) {
+		// The installer's list did not parse. Saying nothing about the support
+		// scripts is the only honest option — see installerSupportFiles.
+		unchecked.push("support-script: scripts/install.sh did not yield a support-file list");
 	} else {
 		for (const name of shippedScripts) {
 			const installed = join(scriptsDir, name);
@@ -240,13 +255,18 @@ export function installDrift({ root = ROOT, env = process.env } = {}) {
 
 	return {
 		root,
-		// "Was the pack ever installed here at all?" — the pi adapter is the
-		// first thing every installer writes, so its absence separates a host
-		// that never ran the installer from one whose install has gone stale.
-		// The caller needs that distinction: the two have completely different
-		// remedies, and reporting a one-file gap as "not installed" hides the
-		// filename that would fix it.
-		installed: existsSync(policyInstalled),
+		// "Was the pack ever installed here at all?" — true when ANY artifact is
+		// present, so a stale install missing one file is never reported as no
+		// install. The caller needs that distinction: the two have completely
+		// different remedies, and calling a one-file gap "not installed" hides
+		// the filename that would fix it.
+		installed:
+			existsSync(policyInstalled) ||
+			existsSync(join(extDir, POLICY_CORE_DIR)) ||
+			existsSync(scriptsDir) ||
+			cw.ROLE_PROMPTS.some((role) => existsSync(cw.rolePromptPath(role))) ||
+			cw.PACK_SKILLS.some((name) => existsSync(cw.skillDirPath(name))),
+		unchecked,
 		checked: {
 			extension: policyInstalled,
 			policyCore: join(extDir, POLICY_CORE_DIR),
@@ -255,7 +275,7 @@ export function installDrift({ root = ROOT, env = process.env } = {}) {
 			supportScripts: scriptsDir,
 		},
 		drift: groups,
-		ok: groups.length === 0,
+		ok: groups.length === 0 && unchecked.length === 0,
 	};
 }
 

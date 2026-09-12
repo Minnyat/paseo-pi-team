@@ -585,7 +585,7 @@ Four states, not a boolean:
 |---|---|
 | `valid` | present, versioned, no unresolved conflict — reported with a sha256 digest and any still-blank keys |
 | `missing` | no protocol; the Lead has no tactics layer |
-| `invalid` | present but not usable: blank, NUL bytes, an unresolved merge conflict (BOTH `<<<<<<<` and `>>>>>>>`, so a Markdown setext underline is not one), or no `WORKSPACE_PROTOCOL_VERSION` |
+| `invalid` | present but not usable: blank, NUL bytes, an unresolved merge conflict (`<<<<<<<` or `>>>>>>>`; the ambiguous `=======` is deliberately not matched, since it is also a Markdown setext underline), or no `WORKSPACE_PROTOCOL_VERSION` |
 | `unreadable` | the path exists and cannot be read as a file |
 
 `invalid` is the state that earns the module. `missing` a Lead can act on; a
@@ -1028,9 +1028,10 @@ It has to be a byte comparison. The `policy-core` check above proves the
 installed module loads and exports the policy API — which a core from three
 releases ago does just as well, which is exactly how a half-upgraded host looks
 healthy. `pteam prompts write` and `pteam skills write` deliberately edit the
-installed copies, so a difference there is reported as a fact with both causes
-named: re-running `pteam install` overwrites the customization, and a check that
-tells someone to destroy their own edit is worse than one that says nothing.
+installed copies; a difference there is still drift — the rules a running agent
+enforces are not this release's — but the remedy line says that `pteam install`
+will overwrite the edit, because a check that tells someone to destroy their own
+customization without saying so is worse than one that says nothing.
 
 Drift is a warning by default and a failure under `--strict`, because
 "the rules a running agent enforces are not the rules this CLI reports" is the

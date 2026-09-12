@@ -35,6 +35,7 @@ const { installDrift, installerSupportFiles, summarizeDrift } = await import(
 	"../cli/lib/install-drift.mjs"
 );
 
+
 const extDir = join(piHome, "agent", "extensions");
 const skillsDir = join(piHome, "agent", "skills");
 const coreDir = join(extDir, "paseo-team-core");
@@ -93,7 +94,8 @@ function install() {
  */
 function supportFiles() {
 	const files = installerSupportFiles(root);
-	assert.ok(files.length >= 4, "install.sh support-file list did not parse");
+	assert.ok(files, "install.sh support-file list did not parse");
+	assert.ok(files.length >= 4, "install.sh support-file list looks truncated");
 	assert.ok(files.includes("lib-common.mjs"), "every other support script imports it");
 	for (const name of files) {
 		assert.ok(

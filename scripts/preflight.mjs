@@ -451,18 +451,21 @@ if (wantClaude) {
 		} else {
 			// A prompt or skill can differ because the operator ran
 			// `pteam prompts write` / `pteam skills write`, both of which
-			// deliberately edit the installed copy. So the finding is stated as a
-			// fact and the remedy names both causes: re-running `pteam install`
-			// OVERWRITES a local customization, and a check that tells someone to
-			// destroy their own edit is worse than one that says nothing.
-			const customizable = state.drift.every(
+			// deliberately edit the installed copy. It is still drift — the rules
+			// a running agent enforces are not this release's — so --strict still
+			// rejects it, which is the point of a mode that gates routing. What
+			// changes is the remedy: `pteam install` OVERWRITES that edit, and a
+			// check that tells someone to destroy their own customization without
+			// saying so is worse than one that says nothing.
+			const onlyCustomizable = state.drift.every(
 				(d) => (d.kind === "prompt" || d.kind === "skill") && d.verdict === "changed",
 			);
+			const parts = [...summarizeDrift(state.drift), ...state.unchecked];
 			strictCheck(
 				"install-drift",
-				`${state.drift.length} file(s) differ from this release: ${summarizeDrift(state.drift).join(" | ")} — ${
-					customizable
-						? "expected if you ran `pteam prompts write` / `pteam skills write`; otherwise re-run `pteam install` (which overwrites those edits)"
+				`${state.drift.length} file(s) differ from this release: ${parts.join(" | ")} — ${
+					onlyCustomizable
+						? "re-run `pteam install` to match the release, which OVERWRITES a local `pteam prompts write` / `pteam skills write` edit"
 						: "re-run `pteam install`"
 				}`,
 			);

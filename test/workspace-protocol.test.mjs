@@ -99,10 +99,10 @@ const FULL = [
 	assert.equal(unversioned.state, "invalid");
 	assert.match(unversioned.issues.join("; "), /WORKSPACE_PROTOCOL_VERSION/);
 
-	// A row of equals signs on its own line is a Markdown setext underline, and
-	// seven characters is a perfectly normal width for one. Hard-failing a valid
-	// protocol because it was written in plain Markdown would be the check
-	// costing more than it catches, so a conflict needs BOTH markers.
+	// Only the SEPARATOR is ambiguous. `=======` on its own line is a Markdown
+	// setext underline, and seven characters is a perfectly normal width for
+	// one, so hard-failing on it would reject a protocol written in ordinary
+	// Markdown.
 	write(`Protocol\n${"=".repeat(7)}\n\nWORKSPACE_PROTOCOL_VERSION: 1\n`);
 	assert.equal(
 		protocolState(repo).state,
@@ -111,11 +111,27 @@ const FULL = [
 	);
 	write(`Protocol\n${"-".repeat(20)}\n\nWORKSPACE_PROTOCOL_VERSION: 1\n${"=".repeat(40)}\n`);
 	assert.equal(protocolState(repo).state, "valid", "a horizontal rule is not a conflict either");
-	// An opening marker with no closing one is a truncated paste, not a
-	// conflict; it is caught by the version check when it takes the version
-	// line with it, and is not this rule's business.
+
+	// `<<<<<<<` and `>>>>>>>` are ambiguous with nothing, so EITHER alone is a
+	// conflict. A half-resolved one — opening marker and one side deleted, tail
+	// left behind — is exactly the shape that reads as a finished document and
+	// is not one, and requiring both markers would grade it valid.
 	write(`WORKSPACE_PROTOCOL_VERSION: 1\n<<<<<<< HEAD\nPROJECT_ID: demo\n`);
-	assert.equal(protocolState(repo).state, "valid", "one marker alone is not a conflict");
+	assert.equal(protocolState(repo).state, "invalid", "an opening marker alone is a conflict");
+	write(
+		[
+			"WORKSPACE_PROTOCOL_VERSION: 1",
+			"PROJECT_ID: a",
+			"=======",
+			"PROJECT_ID: b",
+			">>>>>>> feature/x",
+		].join("\n"),
+	);
+	assert.equal(
+		protocolState(repo).state,
+		"invalid",
+		"a half-resolved conflict is the case this rule is for",
+	);
 }
 
 // --- a version marker written as an HTML comment, the way the downstream does --
