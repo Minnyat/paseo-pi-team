@@ -2131,24 +2131,55 @@ console.log("[paseo-team] policy tests passed");
 		/no DISPOSITION/,
 	);
 
-	// packSkillFromPath: the handle the pi adapter gets.
+	// packSkillFromPath: the handle the pi adapter gets. Only the INSTALLED
+	// copies count — see below for why that distinction is load-bearing.
+	const posix = { cwd: "/work/repo", env: { HOME: "/home/u" } };
+	const at = (path: string, opts = posix) => packSkillFromPath(path, opts);
+
+	assert.equal(at("/home/u/.pi/agent/skills/paseo-team-lead/SKILL.md"), "paseo-team-lead");
+	assert.equal(at("/home/u/.claude/skills/paseo-team-lead/SKILL.md"), "paseo-team-lead");
+	// pi also discovers the cross-harness ~/.agents/skills, and a reference file
+	// inside the package is part of loading it.
 	assert.equal(
-		packSkillFromPath("/home/u/.pi/agent/skills/paseo-team-lead/SKILL.md"),
-		"paseo-team-lead",
-	);
-	assert.equal(
-		packSkillFromPath("C:\\Users\\u\\.claude\\skills\\paseo-team-lead\\SKILL.md"),
-		"paseo-team-lead",
-	);
-	assert.equal(
-		packSkillFromPath("skills/paseo-ocr-reviewer/reference/rules.md"),
+		at("/home/u/.agents/skills/paseo-ocr-reviewer/reference/rules.md"),
 		"paseo-ocr-reviewer",
 	);
+	// Env overrides move the roots, exactly as the installers do.
+	assert.equal(
+		packSkillFromPath("/opt/pi/agent/skills/paseo-team-lead/SKILL.md", {
+			cwd: "/work/repo",
+			env: { HOME: "/home/u", PI_HOME: "/opt/pi" },
+		}),
+		"paseo-team-lead",
+	);
+	// Windows: backslashes, and USERPROFILE rather than HOME.
+	assert.equal(
+		packSkillFromPath("C:\\Users\\u\\.claude\\skills\\paseo-team-lead\\SKILL.md", {
+			cwd: "C:\\work",
+			env: { USERPROFILE: "C:\\Users\\u" },
+		}),
+		"paseo-team-lead",
+	);
+
+	// THE case this must not get wrong: a Peer assigned to edit the Lead skill
+	// in a repository checkout — this repo is one, and editing that file is
+	// ordinary work — has to be able to read it. What the gate withholds is
+	// loading the INSTALLED copy as a procedure to follow.
+	assert.equal(at("skills/paseo-team-lead/SKILL.md"), null, "a repo checkout is not an install");
+	assert.equal(at("/work/repo/skills/paseo-team-lead/SKILL.md"), null);
+	assert.equal(
+		skillBlockReason("peer", at("skills/paseo-team-lead/SKILL.md")),
+		null,
+		"editing the skill in a checkout is never blocked",
+	);
+
 	// A directory, not a file inside the package: listing is not loading.
-	assert.equal(packSkillFromPath("/home/u/.pi/agent/skills/paseo-team-lead"), null);
-	assert.equal(packSkillFromPath("/home/u/.pi/agent/skills"), null);
-	assert.equal(packSkillFromPath("docs/claude-runtime.md"), null);
-	assert.equal(packSkillFromPath(undefined), null);
+	assert.equal(at("/home/u/.pi/agent/skills/paseo-team-lead"), null);
+	assert.equal(at("/home/u/.pi/agent/skills"), null);
+	// Somebody else's skill in the same installed directory.
+	assert.equal(at("/home/u/.pi/agent/skills/my-own-skill/SKILL.md"), null);
+	assert.equal(at("docs/claude-runtime.md"), null);
+	assert.equal(at(undefined as unknown as string), null);
 }
 
 console.log("[paseo-team] skill admission tests passed");

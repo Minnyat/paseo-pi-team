@@ -424,25 +424,64 @@ function normalizeSkillName(raw: unknown): string {
 }
 
 /**
- * The pack skill a filesystem path names, or null.
+ * Directories a role skill is INSTALLED into, lowercased and slash-normalised.
+ *
+ * The distinction this draws is load-bearing. A Peer assigned to edit
+ * `skills/paseo-team-lead/SKILL.md` **in a repository checkout** — this repo is
+ * one, and editing that file is ordinary work — must be able to read it. What
+ * is gated is loading the INSTALLED copy as a procedure to follow, which is a
+ * different act on a different path, and the only one the admission table is
+ * about.
+ */
+function installedSkillRoots(
+	env: Record<string, string | undefined> = process.env,
+): string[] {
+	const home = env.HOME?.trim() || env.USERPROFILE?.trim() || "";
+	const piAgent =
+		env.PI_CODING_AGENT_DIR?.trim() ||
+		join(env.PI_HOME?.trim() || join(home, ".pi"), "agent");
+	const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude");
+	return [
+		join(piAgent, "skills"),
+		join(claudeHome, "skills"),
+		// pi also discovers ~/.agents/skills, the cross-harness location.
+		join(home, ".agents", "skills"),
+	].map(normalizePathForMatch);
+}
+
+function normalizePathForMatch(path: string): string {
+	return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * The pack skill an INSTALLED filesystem path names, or null.
  *
  * pi has no `skill` tool: the agent loads a skill by READING its SKILL.md
- * (pi's own docs describe exactly that), so the path is the only handle the
- * Pi adapter gets. Matching on the directory name rather than an absolute
- * prefix is deliberate — the same skill is installed under `~/.pi/agent/skills`
- * and `~/.claude/skills`, may be reached through a symlink or a relative path,
- * and on Windows arrives with backslashes.
+ * (pi's own docs describe exactly that), so the path is the only handle the Pi
+ * adapter gets. A relative path is resolved against `cwd` first, which is what
+ * keeps a repository checkout out of this: `skills/paseo-team-lead/SKILL.md`
+ * under a workspace resolves under that workspace and is not an installed copy.
  */
-export function packSkillFromPath(path: unknown): string | null {
+export function packSkillFromPath(
+	path: unknown,
+	{
+		cwd = process.cwd(),
+		env = process.env,
+	}: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): string | null {
 	if (typeof path !== "string" || path.trim() === "") return null;
-	const segments = path.toLowerCase().split(/[\\/]+/);
-	// Only a SKILL.md (or a file inside the skill directory) is a load; a
-	// directory listing of ~/.pi/agent/skills is not.
-	const skillIndex = segments.findIndex((segment) =>
-		PACK_SKILL_NAMES.includes(segment),
+	const absolute = /^(?:[a-z]:[\\/]|[\\/])/i.test(path) ? path : join(cwd, path);
+	const normalized = normalizePathForMatch(absolute);
+	const root = installedSkillRoots(env).find(
+		(candidate) => candidate !== "" && normalized.startsWith(`${candidate}/`),
 	);
-	if (skillIndex < 0 || skillIndex === segments.length - 1) return null;
-	return segments[skillIndex] ?? null;
+	if (!root) return null;
+	const segments = normalized.slice(root.length + 1).split("/");
+	// The first segment under the skills root is the package; a bare directory
+	// listing of the root itself is not a load.
+	const name = segments[0] ?? "";
+	if (!PACK_SKILL_NAMES.includes(name) || segments.length < 2) return null;
+	return name;
 }
 
 /**

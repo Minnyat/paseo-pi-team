@@ -636,7 +636,10 @@ enforcement points:
 - **pi** has no `skill` tool: its agent loads a skill by *reading* the full
   `SKILL.md`, so the `tool_call` guard matches the read path instead. The skill
   still appears in pi's listing for every seat; what the gate withholds is the
-  procedure itself.
+  procedure itself. Only the **installed** copies are gated — under
+  `~/.pi/agent/skills`, `~/.claude/skills` or `~/.agents/skills`. A Peer
+  assigned to edit `skills/paseo-team-lead/SKILL.md` in a repository checkout
+  (this repo is one, and editing that file is ordinary work) reads it normally.
 
 Two deliberate leniencies, because this gate protects attention rather than
 authority and being wrong in the closed direction costs more than it saves: a
