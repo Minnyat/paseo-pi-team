@@ -115,6 +115,8 @@ paseo-pi-team/
 │   ├── watchdog.test.mjs           # stale-agent classification
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
+│   ├── instruction-budget.test.mjs # standing-instruction size ratchet
+│   ├── install-drift.test.mjs      # installed copies vs this release
 │   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity
 │   ├── patch-paseo-mcp.test.mjs    # the MCP protocol-header patch for Paseo's bundled SDK
 │   ├── installer-contract.test.mjs # shipped files must exist and carry their dependencies

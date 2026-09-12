@@ -181,9 +181,19 @@ silently**, so a rule pushed past the cap simply stops existing. The same file a
 rules cannot fork.
 
 Our three role prompts are 319 / 294 / 442 lines and are injected as durable instruction
-on every turn (Pi) or once as turn context (Claude). Nothing bounds them. A test that
-fails when a prompt crosses a budget is cheap insurance against a quiet truncation whose
-only symptom is a role that stops obeying its last invariant.
+on every turn (Pi) or once as turn context (Claude). Nothing bounded them.
+
+**Adopted, with a different justification.** We cannot honestly claim their reason: no
+runtime this pack targets documents a cap on an *appended* system prompt, and inventing a
+number and calling it a cap would be worse than having none. What is verifiable is the
+cost — `extensions/paseo-team-policy.ts` re-appends the whole role prompt on every
+`before_agent_start`, so a 22 KB Supervisor contract is a per-turn tax — and the ratchet:
+every incident adds a paragraph and none removes one, because appending is always the
+smaller edit. So `test/instruction-budget.test.mjs` sets each budget a little above
+today's largest file. Crossing one is then a decision somebody makes on purpose, in the
+same commit, rather than something that happens over six months of reasonable diffs. It
+also fails if a fourth role prompt appears without a budget, and if either adapter stops
+injecting the prompt the budgets are about.
 
 ### 2.5 A managed block in the target repo's entrypoint (medium value)
 
