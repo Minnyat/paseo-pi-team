@@ -84,6 +84,7 @@ paseo-pi-team/
 │       ├── config-walker.mjs       # path resolution + atomic write with backup
 │       ├── paseo-bridge.mjs        # the only place that spawns `paseo` (argv, timeouts, fan-out)
 │       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
+│       ├── install-drift.mjs       # installed copies vs THIS release, byte for byte
 │       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
 ├── webui/
 │   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
@@ -939,7 +940,8 @@ extension, the shared policy modules, role prompts, the role providers of every
 runtime in scope, **each healthy provider's model inventory**, routing config
 (single-host + cluster contract), each route against the real inventory,
 provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
-`null` level means the level gets clamped), endpoint env vars, and repository
+`null` level means the level gets clamped), endpoint env vars, **whether every
+installed copy still matches this release** (`install-drift`), and repository
 state (a writer host must be clean in strict mode). No secret is ever printed.
 
 **Upgrading the package is only half an upgrade.** The policy core, the role
@@ -956,6 +958,29 @@ pteam preflight   # confirm they match this version
 ```
 
 `pteam update` says this in its `nextSteps`, and on stderr when it upgrades.
+
+The second line is a real check, not a hope. `install-drift` hashes every
+installed artifact — the pi adapter, the shared policy core, the three role
+prompts, both skills on both runtimes, and the support scripts — against the
+package preflight is running from, and reports each file as `changed`,
+`missing` or `unexpected`. That last one is the leftover case: a support script
+or a built `.js` from an older release, still sitting in a directory this pack
+replaces wholesale.
+
+It has to be a byte comparison. The `policy-core` check above proves the
+installed module loads and exports the policy API — which a core from three
+releases ago does just as well, which is exactly how a half-upgraded host looks
+healthy. Drift is a warning by default and a failure under `--strict`, because
+"the rules a running agent enforces are not the rules this CLI reports" is the
+unverifiable state `--strict` exists to reject. Two things are deliberately not
+drift: an unknown file in `~/.pi/agent/extensions/prompts/`, which is a shared
+directory, and a CRLF copy of otherwise identical content.
+
+No manifest is written at install time. Upstream Paseo ships one
+(`foundation/manifest.json`, a sha256 per distributed file) because the source
+bytes are not on the target host; ours are, since preflight runs from the
+package itself — so a manifest would be a third copy that can go stale on its
+own.
 
 The Claude half registers an ABSOLUTE node path in `~/.claude/settings.json`
 (hooks) and `~/.claude.json` (MCP), because a hook may run without the user's

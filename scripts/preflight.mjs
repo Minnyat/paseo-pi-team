@@ -28,6 +28,11 @@ import {
 	verify as verifyClaudeSetup,
 } from "./claude-setup.mjs";
 import { orchestrationPreferencesNotice } from "./lib-common.mjs";
+// Lives in cli/lib because that is where the pack's path knowledge lives
+// (config-walker.mjs). preflight.mjs is never copied into the installed support
+// directory, so this relative path always resolves to the package it shipped in
+// — which is the whole point: one side of the comparison must BE this release.
+import { installDrift, summarizeDrift } from "../cli/lib/install-drift.mjs";
 import {
 	RoutingError,
 	buildProviderInventory,
@@ -413,6 +418,42 @@ if (wantClaude) {
 	);
 	if (missing.length === 0) pass("role-prompts", promptsDir);
 	else fail("role-prompts", `missing prompts: ${missing.join(", ")}`);
+}
+
+// --- installed copies vs THIS release ----------------------------------------
+//
+// Every check above asks whether an artifact is present and usable. None of
+// them asks whether it is the CURRENT one, and a policy core from three
+// releases ago is present, loads, and exports the same API. `pteam update`
+// already tells the user to run this command "to confirm the installed copies
+// match this version"; this is the check that makes that true.
+//
+// A warning, not a failure, except in --strict: drift means the rules a running
+// agent enforces are not the rules this CLI reports, which is exactly the
+// unverifiable state --strict exists to reject.
+{
+	try {
+		const state = installDrift();
+		if (state.ok) {
+			pass("install-drift", "installed copies match this release");
+		} else {
+			// A host that never ran the installer is already reported by the
+			// extension/prompt/policy-core checks above; saying it again in four
+			// more lines helps nobody, so name the remedy once.
+			const everythingMissing = state.drift.every((d) => d.verdict === "missing");
+			warn(
+				"install-drift",
+				everythingMissing
+					? "the pack is not installed for this user → run scripts/install.{sh,ps1} (or `pteam install`)"
+					: `${state.drift.length} file(s) differ from this release → re-run \`pteam install\`; ${summarizeDrift(state.drift).join(" | ")}`,
+			);
+		}
+	} catch (error) {
+		warn(
+			"install-drift",
+			`could not compare installed copies: ${String(error?.message ?? error).slice(0, 160)}`,
+		);
+	}
 }
 
 // --- role providers + model inventory -----------------------------------------
