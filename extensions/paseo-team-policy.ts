@@ -62,7 +62,9 @@ import {
 	peerGitAuthority,
 	peerMcpBlockReason,
 	policyWithAuthority,
+	packSkillFromPath,
 	resolvePeerMode,
+	skillBlockReason,
 	teamToolBlockReason,
 	PEER_COMMUNICATION_TOOL,
 	TEAM_WATCHDOG_TOOL,
@@ -599,6 +601,15 @@ export default function (pi: ExtensionAPI) {
 		}
 		const teamBlockReason = teamToolBlockReason(r, event.toolName, currentBrief);
 		if (teamBlockReason) return { block: true, reason: teamBlockReason };
+		// Skill admission, pi dialect. pi has no `skill` tool: its own docs say
+		// the agent loads a skill by READING the full SKILL.md after seeing it
+		// listed in the system prompt, so the read IS the load and the path is
+		// the only handle. Same table as the Claude `Skill` gate.
+		if (isToolCallEventType("read", event)) {
+			const skill = packSkillFromPath(event.input.path);
+			const skillReason = skill && skillBlockReason(r, skill, currentBrief);
+			if (skillReason) return { block: true, reason: skillReason };
+		}
 		if (policy.deny.includes(event.toolName)) {
 			if (
 				r === "peer" &&

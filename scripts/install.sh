@@ -121,7 +121,7 @@ if command -v claude >/dev/null 2>&1; then
     PASEO_TEAM_MCP_SCRIPT="$TEAM_SCRIPTS_DIR/claude-team-mcp.mjs" \
     PASEO_TEAM_POLICY_DIR="$EXT_DIR/$POLICY_CORE_DIR" \
     node "$ROLE_PACK_ROOT/scripts/claude-setup.mjs" "${CLAUDE_SETUP_ARGS[@]}"; then
-    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server)"
+    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server + role skills)"
   else
     echo "[paseo-team] claude setup failed" >&2
     exit 1

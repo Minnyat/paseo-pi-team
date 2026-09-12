@@ -158,6 +158,7 @@ The notice is context, not a deny: nothing here blocks a tool.
 | `mcp__paseo__browser_*` (Browser Control) and `mcp__claude-in-chrome__*` | no | yes | yes, unless the brief says `BROWSER_MCP_AUTHORITY: denied` |
 | `Task` (Claude subagents) | no | no | no |
 | `AskUserQuestion` | yes | no | no |
+| `Skill` | yes, minus the pack's own packages | yes, `paseo-team-lead` included | yes, `paseo-ocr-reviewer` under a reviewer brief |
 
 `Task` is denied for every role on purpose: a Claude subagent runs outside
 Paseo, so it carries no role prompt, no brief authority, and never appears in
@@ -171,6 +172,17 @@ authority asymmetry — a rule denied on one runtime denied on the other is the
 whole point of the shared core. It removes the interrupt, not the voice: a
 Lead's own turn output still reaches the Human it is talking to, which is where
 the irreversible actions `lead.md` reserves for them belong.
+
+`Skill` stays available to every role, because the user's own skills go through
+it and a pack that ate them would be a worse neighbour than the drift it is
+preventing. What is gated is the PACKAGE, per call, against the admission table
+in `policy-core.ts` — see [Skill admission](../README.md#skill-admission) for
+the table and for how the same rule is enforced on pi, which has no `Skill`
+tool. Until the installer wrote `~/.claude/skills/`, this was moot in the worst
+way: the Lead prompt's invariant 1 says to load `paseo-team-lead`, the tool call
+was allowed, and the skill was only ever copied to `~/.pi/agent/skills/`, which
+Claude Code does not read. The Lead orchestrated without the procedure and
+nothing said so.
 
 Browser Control (`browser_*`) is registered by Paseo on the SAME MCP server as
 `create_agent`. It is classified by tool family rather than by server, or the
@@ -462,6 +474,9 @@ extension, the three hooks plus the MCP server registration, and the
 
 `pteam uninstall` removes the pi extension, the shared policy modules, the
 prompts, the skills, the support scripts, and — through
-`scripts/claude-setup.mjs --uninstall` — the tagged hooks and the `paseo-team`
-MCP entry. Removal never creates a file it was asked to clean, and other
-tools' entries always survive.
+`scripts/claude-setup.mjs --uninstall` — the tagged hooks, the `paseo-team`
+MCP entry and the pack's packages under `~/.claude/skills/`. Removal never
+creates a file it was asked to clean, and other tools' entries always survive:
+a skill directory is removed only when it carries the name this pack ships AND
+still looks like a skill package, so a same-named skill the user wrote is left
+alone.

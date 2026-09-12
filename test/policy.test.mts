@@ -23,6 +23,10 @@ import {
 	isBrowserMcpTarget,
 	isPaseoBrowserTool,
 	resolvePeerMode,
+	packSkillFromPath,
+	skillAdmission,
+	skillBlockReason,
+	PACK_SKILL_NAMES,
 } from "../extensions/paseo-team-policy.ts";
 
 // --- parseTaskBrief ----------------------------------------------------------
@@ -2045,3 +2049,106 @@ import {
 }
 
 console.log("[paseo-team] policy tests passed");
+
+// --- Skill admission: a shared table, enforced on the path pi actually uses ---
+//
+// pi has no `skill` tool. Its docs say the agent loads a skill by reading the
+// full SKILL.md after seeing it listed, so the read is the load and these tests
+// pin the path handle rather than a tool name.
+{
+	// The installer ships whatever skills/ contains; the admission table names
+	// them one by one. A new skill that nobody classified would default to
+	// "active" for all three roles, which is the silent-global failure the table
+	// exists to prevent — so the two lists must agree.
+	const shipped = readdirSync(new URL("../skills", import.meta.url), {
+		withFileTypes: true,
+	})
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => entry.name)
+		.sort();
+	assert.deepEqual(
+		[...PACK_SKILL_NAMES].sort(),
+		shipped,
+		"every skill under skills/ must be classified in SKILL_ADMISSION",
+	);
+
+	assert.equal(skillAdmission("lead", "paseo-team-lead"), "active");
+	assert.equal(skillAdmission("peer", "paseo-team-lead"), "packaged-disabled");
+	assert.equal(skillAdmission("supervisor", "paseo-team-lead"), "packaged-disabled");
+	assert.equal(skillAdmission("peer", "paseo-ocr-reviewer"), "active");
+	assert.equal(skillAdmission("lead", "paseo-ocr-reviewer"), "packaged-disabled");
+
+	// A skill this pack does not ship is never ours to block: the user's own
+	// skills sit in the same directory.
+	assert.equal(skillAdmission("peer", "some-user-skill"), "active");
+	assert.equal(skillBlockReason("peer", "some-user-skill"), null);
+	assert.equal(skillBlockReason("peer", undefined), null);
+	assert.equal(skillBlockReason("peer", ""), null);
+
+	// Name normalisation: namespace prefix, wrapper, case, stray slash.
+	assert.ok(skillBlockReason("peer", "PASEO-TEAM-LEAD"));
+	assert.ok(skillBlockReason("peer", "somepack:paseo-team-lead"));
+	assert.ok(skillBlockReason("peer", "Skill(paseo-team-lead)"));
+	assert.ok(skillBlockReason("peer", "/paseo-team-lead"));
+
+	// The Lead keeps its own procedure.
+	assert.equal(skillBlockReason("lead", "paseo-team-lead"), null);
+
+	// The deny says what to do instead, not just that it was denied.
+	const peerDenial = skillBlockReason("peer", "paseo-team-lead")!;
+	assert.match(peerDenial, /DEPENDENCY_REQUEST/);
+	assert.match(skillBlockReason("supervisor", "paseo-team-lead")!, /observe/i);
+
+	// The OCR harness is admitted for a reviewer Peer and nobody else. Substring
+	// match on the disposition, like the fork guard: real briefs spell it
+	// several ways.
+	const reviewerBrief = parseTaskBrief(
+		[
+			"PASEO_TEAM_TASK_V3_BEGIN",
+			"TASK_ID: T-900",
+			"MODE: read-only",
+			"DISPOSITION: independent-reviewer",
+			"PASEO_TEAM_TASK_V3_END",
+		].join("\n"),
+	);
+	const engineerBrief = parseTaskBrief(
+		[
+			"PASEO_TEAM_TASK_V3_BEGIN",
+			"TASK_ID: T-901",
+			"MODE: write",
+			"DISPOSITION: engineer",
+			"PASEO_TEAM_TASK_V3_END",
+		].join("\n"),
+	);
+	assert.equal(skillBlockReason("peer", "paseo-ocr-reviewer", reviewerBrief), null);
+	assert.match(
+		skillBlockReason("peer", "paseo-ocr-reviewer", engineerBrief)!,
+		/independent reviewer/i,
+	);
+	// No brief at all is fail-closed: an unbriefed Peer is not a reviewer.
+	assert.match(
+		skillBlockReason("peer", "paseo-ocr-reviewer", null)!,
+		/no DISPOSITION/,
+	);
+
+	// packSkillFromPath: the handle the pi adapter gets.
+	assert.equal(
+		packSkillFromPath("/home/u/.pi/agent/skills/paseo-team-lead/SKILL.md"),
+		"paseo-team-lead",
+	);
+	assert.equal(
+		packSkillFromPath("C:\\Users\\u\\.claude\\skills\\paseo-team-lead\\SKILL.md"),
+		"paseo-team-lead",
+	);
+	assert.equal(
+		packSkillFromPath("skills/paseo-ocr-reviewer/reference/rules.md"),
+		"paseo-ocr-reviewer",
+	);
+	// A directory, not a file inside the package: listing is not loading.
+	assert.equal(packSkillFromPath("/home/u/.pi/agent/skills/paseo-team-lead"), null);
+	assert.equal(packSkillFromPath("/home/u/.pi/agent/skills"), null);
+	assert.equal(packSkillFromPath("docs/claude-runtime.md"), null);
+	assert.equal(packSkillFromPath(undefined), null);
+}
+
+console.log("[paseo-team] skill admission tests passed");

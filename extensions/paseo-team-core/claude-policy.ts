@@ -48,6 +48,7 @@ import {
 	peerAuthority,
 	peerGitAuthority,
 	resolvePeerMode,
+	skillBlockReason,
 	leadCreateSupervisorArgsBlockReason,
 	supervisorCreateAgentArgsBlockReason,
 	teamToolBlockReason,
@@ -121,6 +122,27 @@ const CLAUDE_NEUTRAL_TOOLS = [
  * channel for the irreversible actions lead.md reserves for them.
  */
 const CLAUDE_HUMAN_QUESTION_TOOL = "AskUserQuestion";
+
+/** The skill loader. Allowed for every role; the PACKAGE is what gets gated. */
+const CLAUDE_SKILL_TOOL = "Skill";
+
+/**
+ * The package name out of a `Skill` call.
+ *
+ * `skill` is the documented field; `name` and `skill_name` are accepted because
+ * an unreadable name is treated as "not ours" and allowed (see
+ * skillBlockReason), so the cost of a field rename landing here is a gate that
+ * quietly stops gating — the failure a couple of extra keys buys off cheaply.
+ */
+export function claudeSkillName(toolInput: unknown): string {
+	if (typeof toolInput !== "object" || toolInput === null) return "";
+	const args = toolInput as Record<string, unknown>;
+	for (const key of ["skill", "name", "skill_name"]) {
+		const value = args[key];
+		if (typeof value === "string" && value.trim() !== "") return value;
+	}
+	return "";
+}
 
 export function classifyClaudeTool(name: string): ClaudeToolClass {
 	const tool = name.trim();
@@ -274,6 +296,14 @@ export function claudeToolBlockReason(
 		return role === "lead"
 			? "A Lead does not put questions to the Human directly — the Supervisor decides them. Call lead_ask_supervisor with the question, the options and your recommendation. Reach the Human yourself only for something irreversible (merge, deploy, delete, external comms, spend), when the Supervisor answered HUMAN_DECISION_REQUIRED: yes, or when the consult reported NO_SUPERVISOR_SEAT — and then say in your own reply which of those it was, rather than opening a question box."
 			: "A Peer does not put questions to the Human. Send the question to your own Lead with peer_ask_lead (KIND: question | dependency | blocker); the Lead answers it or escalates to the Supervisor.";
+	}
+
+	// Skill admission. `Skill` stays in CLAUDE_NEUTRAL_TOOLS — the tool itself is
+	// harmless and the user's own skills go through it — so the gate is per call,
+	// on the package name, using the same table the Pi adapter reads.
+	if (toolName === CLAUDE_SKILL_TOOL) {
+		const reason = skillBlockReason(role, claudeSkillName(input.toolInput), brief);
+		if (reason) return reason;
 	}
 
 	if (classified.kind === "team") {

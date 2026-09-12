@@ -556,6 +556,46 @@ source agent. `verify` reads `runtimeInfo` (never the stale creation-time
 Peers stay with the source: there is no reparent API, and `detach` is a Human
 action that leaves a Peer unable to escalate.
 
+## Skill admission
+
+The pack ships two skills, and both land in a directory every seat on the
+machine can see. Role is a property of the **seat** — an environment variable
+Paseo sets on the agent process — not of the directory, so there is no per-role
+folder to install into: a Peer could open the Lead's orchestration procedure,
+and a Supervisor the review harness, purely because both were on disk.
+
+That is not an authority hole. Every tool those procedures need is already
+denied to the wrong role by the tool policy. It is an **attention** hole, and
+the expensive kind: a Peer that has read the orchestration procedure starts
+reasoning about topology and delegation instead of its own bounded task, and
+nothing in its output says where the drift came from.
+
+So the admission table is the third thing the two runtimes share, next to the
+tool policy and the brief parser — one table in `policy-core.ts`, two
+enforcement points:
+
+| Skill | Lead | Peer | Supervisor |
+|---|---|---|---|
+| `paseo-team-lead` | active | disabled | disabled |
+| `paseo-ocr-reviewer` | disabled | active under an independent-reviewer `DISPOSITION` | disabled |
+
+- **Claude Code** gates the `Skill` tool per call in the PreToolUse hook. The
+  tool itself stays available to every role — the user's own skills go through
+  it — and only the pack's own package names are checked.
+- **pi** has no `skill` tool: its agent loads a skill by *reading* the full
+  `SKILL.md`, so the `tool_call` guard matches the read path instead. The skill
+  still appears in pi's listing for every seat; what the gate withholds is the
+  procedure itself.
+
+Two deliberate leniencies, because this gate protects attention rather than
+authority and being wrong in the closed direction costs more than it saves: a
+skill this pack does not ship is never blocked, and neither is a call whose
+skill name cannot be read.
+
+`test/policy.test.mts` asserts that every directory under `skills/` is
+classified in the table — a new skill nobody classified would default to
+visible-for-everyone, which is exactly the failure the table exists to prevent.
+
 ## OpenCodeReview delegation (Phase 1)
 
 `paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill.
@@ -614,9 +654,16 @@ What the installers copy:
 | `extensions/paseo-team-policy.ts` | `~/.pi/agent/extensions/` |
 | `extensions/paseo-team-core/` | `~/.pi/agent/extensions/paseo-team-core/` |
 | `prompts/*.md` | `~/.pi/agent/extensions/prompts/` |
-| `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` |
-| `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` |
+| `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` and `~/.claude/skills/paseo-team-lead/` |
+| `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` and `~/.claude/skills/paseo-ocr-reviewer/` |
 | support scripts (see below) | `~/.pi/agent/extensions/paseo-team-scripts/` |
+
+The Claude copies are installed by `scripts/claude-setup.mjs --install` and only
+when the `claude` CLI is present. They matter: `prompts/lead.md` makes loading
+the orchestration procedure invariant 1, and until the pack installed them a
+Claude Lead's `Skill(paseo-team-lead)` call was allowed and simply found
+nothing. Which role may load which package is decided per call — see
+[Skill admission](#skill-admission).
 
 It installs no browser: both runtimes use one they already have — see
 [The browser surface](#the-browser-surface). An earlier version registered an

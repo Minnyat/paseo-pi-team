@@ -110,7 +110,7 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
   if ($LASTEXITCODE -ne 0) {
     throw "claude setup failed with exit code $LASTEXITCODE"
   }
-  $claudeSetupStatus = "installed (hooks + paseo-team MCP server)"
+  $claudeSetupStatus = "installed (hooks + paseo-team MCP server + role skills)"
 }
 
 Write-Host ""

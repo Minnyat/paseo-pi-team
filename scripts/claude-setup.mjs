@@ -11,6 +11,13 @@
 //                            → scripts/claude-team-mcp.mjs (peer_ask_lead,
 //                              lead_ask_supervisor, team_watchdog, …)
 //
+// and one directory:
+//
+//   ~/.claude/skills/        the pack's role skills, so a Claude Lead can load
+//                            the orchestration procedure its prompt requires.
+//                            Which role may load which package is decided per
+//                            call by the admission table in policy-core.
+//
 // The browser is NOT among them any more. This installer used to register an
 // `agent-browser` stdio server here; both runtimes now use a browser they
 // already have — Paseo Browser Control, which the daemon injects into every
@@ -29,9 +36,11 @@
 //   node scripts/claude-setup.mjs --print-providers [--json]
 
 import {
+	cpSync,
 	existsSync,
 	mkdirSync,
 	copyFileSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -983,6 +992,101 @@ export function pendingStateNote() {
 }
 
 // ---------------------------------------------------------------------------
+// Skills
+//
+// Until this existed, a Claude Lead was told by invariant 1 of its own role
+// prompt to "load the paseo-team-lead skill" — and that skill was only ever
+// copied to ~/.pi/agent/skills/, which Claude Code does not read. The tool call
+// was allowed and simply found nothing, so the Lead orchestrated without the
+// procedure its prompt assumes it has read, and nothing anywhere said so.
+//
+// Installing them here closes that, and the per-role admission table in
+// policy-core decides who may actually load which one: a shared directory plus
+// a per-call gate, because role is a property of the SEAT (an environment
+// variable) and not of the machine, so there is no per-role directory to
+// install into.
+// ---------------------------------------------------------------------------
+
+/** Where Claude Code looks for the user's own skills. */
+export function claudeSkillsDir(env = process.env) {
+	return join(claudeHome(env), "skills");
+}
+
+/** The pack's skill directories in THIS checkout, by name. */
+export function packSkillSources(root = join(HERE, "..", "skills")) {
+	if (!existsSync(root)) return [];
+	return readdirSync(root, { withFileTypes: true })
+		.filter(
+			(entry) =>
+				entry.isDirectory() && existsSync(join(root, entry.name, "SKILL.md")),
+		)
+		.map((entry) => ({ name: entry.name, path: join(root, entry.name) }));
+}
+
+/**
+ * Copy the pack's skills into ~/.claude/skills/<name>/.
+ *
+ * Replace rather than merge: a skill directory is one package, and a file left
+ * behind by an older release is a half-version of a procedure, which reads as
+ * current. Only directories this pack ships are touched; everything else in
+ * the user's skills directory is left exactly as it was.
+ */
+export function installSkills(env = process.env) {
+	const target = claudeSkillsDir(env);
+	const sources = packSkillSources();
+	if (sources.length === 0) {
+		return { path: target, status: "failed", error: "no skills found in this checkout", skills: [] };
+	}
+	try {
+		mkdirSync(target, { recursive: true });
+		for (const source of sources) {
+			const destination = join(target, source.name);
+			rmSync(destination, { recursive: true, force: true });
+			cpSync(source.path, destination, { recursive: true });
+		}
+	} catch (error) {
+		return {
+			path: target,
+			status: "failed",
+			error: String(error?.message ?? error),
+			skills: sources.map((source) => source.name),
+		};
+	}
+	return { path: target, status: "updated", skills: sources.map((source) => source.name) };
+}
+
+/**
+ * Remove only the skill directories this pack installs, and only when they
+ * still look like a skill package. A name collision with something the user
+ * wrote is unlikely, but deleting a directory on a name match alone is the kind
+ * of uninstall that gets a tool uninstalled.
+ */
+export function removeSkills(env = process.env) {
+	const target = claudeSkillsDir(env);
+	if (!existsSync(target)) return { path: target, status: "missing", skills: [] };
+	const removed = [];
+	try {
+		for (const { name } of packSkillSources()) {
+			const destination = join(target, name);
+			if (!existsSync(join(destination, "SKILL.md"))) continue;
+			rmSync(destination, { recursive: true, force: true });
+			removed.push(name);
+		}
+	} catch (error) {
+		return { path: target, status: "failed", error: String(error?.message ?? error), skills: removed };
+	}
+	return { path: target, status: removed.length > 0 ? "updated" : "unchanged", skills: removed };
+}
+
+/** Pack skills this checkout ships that are NOT installed for Claude. */
+export function missingSkills(env = process.env) {
+	const target = claudeSkillsDir(env);
+	return packSkillSources()
+		.map(({ name }) => name)
+		.filter((name) => !existsSync(join(target, name, "SKILL.md")));
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -1001,6 +1105,7 @@ export async function install(env = process.env) {
 			(current) => removeBrowserMcpServer(mergeMcpServer(current, env)),
 			{ label: "~/.claude.json" },
 		),
+		skills: installSkills(env),
 	};
 	return {
 		action: "install",
@@ -1008,7 +1113,10 @@ export async function install(env = process.env) {
 		mcpScript: mcpScriptPath(env),
 		...results,
 		providers: await buildProviderSnippet(env),
-		ok: results.hooks.status !== "failed" && results.mcp.status !== "failed",
+		ok:
+			results.hooks.status !== "failed" &&
+			results.mcp.status !== "failed" &&
+			results.skills.status !== "failed",
 	};
 }
 
@@ -1032,6 +1140,7 @@ export function uninstall(env = process.env) {
 		// ~/.paseo/config.json. No ledger means we never applied, and this is a
 		// no-op — it never touches a config this pack did not write to.
 		providers: removeProviders(env),
+		skills: removeSkills(env),
 	};
 	return {
 		action: "uninstall",
@@ -1039,7 +1148,8 @@ export function uninstall(env = process.env) {
 		ok:
 			results.hooks.status !== "failed" &&
 			results.mcp.status !== "failed" &&
-			results.providers.status !== "failed",
+			results.providers.status !== "failed" &&
+			results.skills.status !== "failed",
 	};
 }
 
@@ -1119,6 +1229,11 @@ export function verify(env = process.env) {
 		(candidate) => !existsSync(candidate),
 	);
 
+	// A missing skill is a real incomplete install, not a cosmetic one: the Lead
+	// prompt makes loading the orchestration procedure invariant 1, so a Claude
+	// Lead without it is a Lead running on half its contract.
+	const skillsAbsent = missingSkills(env);
+
 	const missing = [
 		...Object.entries(hookState)
 			.filter(([, installed]) => !installed)
@@ -1126,6 +1241,7 @@ export function verify(env = process.env) {
 		...(mcpPresent ? [] : [`mcp:${TEAM_MCP_SERVER_NAME}`]),
 		...missingScripts.map((script) => `script:${script}`),
 		...missingInterpreters.map((node) => `interpreter:${node}`),
+		...skillsAbsent.map((name) => `skill:${name}`),
 	];
 	return {
 		action: "verify",
@@ -1133,6 +1249,8 @@ export function verify(env = process.env) {
 		userConfigPath: claudeUserConfigPath(env),
 		hooks: hookState,
 		mcpServer: mcpPresent,
+		skillsDir: claudeSkillsDir(env),
+		missingSkills: skillsAbsent,
 		hookScript: scriptPresent ? checkedScripts[0] : null,
 		hookScripts: checkedScripts,
 		interpreters: [...new Set(checkedInterpreters)],

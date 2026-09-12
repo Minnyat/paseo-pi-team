@@ -13,9 +13,13 @@ import {
 	classifyClaudeTool,
 	describeClaudePolicy,
 	teamToolName,
+	claudeSkillName,
 	CLAUDE_PASEO_TOOL_NAMES,
 } from "../extensions/paseo-team-core/claude-policy.ts";
-import { parseTaskBrief } from "../extensions/paseo-team-core/policy-core.ts";
+import {
+	parseTaskBrief,
+	skillBlockReason,
+} from "../extensions/paseo-team-core/policy-core.ts";
 
 const brief = (lines) => parseTaskBrief(lines.join("\n"));
 
@@ -710,6 +714,69 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 		),
 		/Peer cannot orchestrate/,
 	);
+}
+
+// --- Skill admission, Claude dialect -----------------------------------------
+//
+// `Skill` itself stays allowed for every role — the user's own skills go
+// through it — so what is pinned here is the package-level gate and the fact
+// that it reads the same table the Pi adapter does.
+{
+	const skillCall = (role, skill, brief = null) =>
+		claudeToolBlockReason({ role, toolName: "Skill", toolInput: { skill }, brief });
+
+	assert.ok(claudeBaseTools("peer").includes("Skill"), "the tool stays available");
+	assert.ok(!claudeDisallowedTools("peer").includes("Skill"));
+
+	assert.equal(skillCall("lead", "paseo-team-lead"), null);
+	assert.match(String(skillCall("peer", "paseo-team-lead")), /not admitted for the peer/);
+	assert.match(
+		String(skillCall("supervisor", "paseo-team-lead")),
+		/not admitted for the supervisor/,
+	);
+
+	// The user's own skills are untouched, and so is a call whose name we
+	// cannot read — see the leniency note on skillBlockReason.
+	assert.equal(skillCall("peer", "anthropic-skills:pdf"), null);
+	assert.equal(
+		claudeToolBlockReason({ role: "peer", toolName: "Skill", toolInput: {}, brief: null }),
+		null,
+	);
+	assert.equal(
+		claudeToolBlockReason({ role: "peer", toolName: "Skill", toolInput: null, brief: null }),
+		null,
+	);
+
+	// The reviewer harness follows the brief, exactly as on Pi.
+	const reviewerBrief = brief([
+		"PASEO_TEAM_TASK_V3_BEGIN",
+		"TASK_ID: T-900",
+		"MODE: read-only",
+		"DISPOSITION: independent-reviewer",
+		"PASEO_TEAM_TASK_V3_END",
+	]);
+	assert.equal(skillCall("peer", "paseo-ocr-reviewer", reviewerBrief), null);
+	assert.match(String(skillCall("peer", "paseo-ocr-reviewer", readOnlyBrief)), /reviewer/i);
+	assert.match(String(skillCall("lead", "paseo-ocr-reviewer")), /Reviewer Peer/);
+
+	// Same verdict on both runtimes, for every role and both pack skills. This
+	// is the asymmetry guard the shared core exists for.
+	for (const role of ["lead", "peer", "supervisor"]) {
+		for (const skill of ["paseo-team-lead", "paseo-ocr-reviewer"]) {
+			assert.equal(
+				skillCall(role, skill, reviewerBrief),
+				skillBlockReason(role, skill, reviewerBrief),
+				`${role} + ${skill} must resolve identically on both runtimes`,
+			);
+		}
+	}
+
+	// The field the name is read from, and the wrapper spellings.
+	assert.equal(claudeSkillName({ skill: "a" }), "a");
+	assert.equal(claudeSkillName({ name: "b" }), "b");
+	assert.equal(claudeSkillName({ skill_name: "c" }), "c");
+	assert.equal(claudeSkillName({ skill: "   " }), "");
+	assert.equal(claudeSkillName("paseo-team-lead"), "");
 }
 
 console.log("claude policy tests passed");

@@ -32,6 +32,11 @@ import {
 	removeMcpServer,
 	uninstall,
 	verify,
+	claudeSkillsDir,
+	installSkills,
+	missingSkills,
+	packSkillSources,
+	removeSkills,
 	LEGACY_BROWSER_MCP_SERVER,
 	isOwnBrowserMcpServer,
 	removeBrowserMcpServer,
@@ -936,6 +941,77 @@ function applySandbox(tag) {
 			`${label}: must never spell out the restart invocation`,
 		);
 	}
+}
+
+// --- Skills: the Claude Lead can finally load the procedure its prompt names --
+//
+// Before this, skills were copied only to ~/.pi/agent/skills/, which Claude
+// Code does not read: `Skill(paseo-team-lead)` was allowed and found nothing.
+{
+	const skillsHome = mkdtempSync(join(tmpdir(), "paseo-claude-skills-"));
+	const skillEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: join(skillsHome, ".claude"),
+		PASEO_TEAM_CLAUDE_USER_CONFIG: join(skillsHome, ".claude.json"),
+		PASEO_CONFIG_JSON: join(skillsHome, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: skillsHome,
+	};
+	const skillsDir = claudeSkillsDir(skillEnv);
+	assert.equal(skillsDir, join(skillsHome, ".claude", "skills"));
+
+	const shipped = packSkillSources().map((source) => source.name).sort();
+	assert.deepEqual(shipped, ["paseo-ocr-reviewer", "paseo-team-lead"]);
+
+	// Before install, verify must call this out — a Lead without its procedure
+	// is an incomplete install, not a cosmetic gap.
+	assert.deepEqual(missingSkills(skillEnv).sort(), shipped);
+
+	const installed = installSkills(skillEnv);
+	assert.equal(installed.status, "updated");
+	for (const name of shipped) {
+		assert.ok(
+			existsSync(join(skillsDir, name, "SKILL.md")),
+			`${name}/SKILL.md must land where Claude Code reads skills`,
+		);
+	}
+	assert.deepEqual(missingSkills(skillEnv), []);
+
+	// Re-install replaces the package rather than merging into it: a file from
+	// an older release is a half-version of a procedure that reads as current.
+	writeFileSync(join(skillsDir, "paseo-team-lead", "STALE.md"), "old");
+	installSkills(skillEnv);
+	assert.ok(!existsSync(join(skillsDir, "paseo-team-lead", "STALE.md")));
+
+	// A skill the user owns is never touched, on install or on uninstall.
+	mkdirSync(join(skillsDir, "my-own-skill"), { recursive: true });
+	writeFileSync(join(skillsDir, "my-own-skill", "SKILL.md"), "mine");
+	installSkills(skillEnv);
+	assert.ok(existsSync(join(skillsDir, "my-own-skill", "SKILL.md")));
+
+	const removed = removeSkills(skillEnv);
+	assert.equal(removed.status, "updated");
+	assert.deepEqual(removed.skills.sort(), shipped);
+	for (const name of shipped) assert.ok(!existsSync(join(skillsDir, name)));
+	assert.ok(
+		existsSync(join(skillsDir, "my-own-skill", "SKILL.md")),
+		"uninstall removes only the packages this pack ships",
+	);
+
+	// Idempotent, and never creates the directory it was asked to clean.
+	assert.equal(removeSkills(skillEnv).status, "unchanged");
+	const neverInstalled = {
+		...skillEnv,
+		CLAUDE_CONFIG_DIR: join(skillsHome, "absent"),
+	};
+	assert.equal(removeSkills(neverInstalled).status, "missing");
+	assert.ok(!existsSync(claudeSkillsDir(neverInstalled)));
+
+	// verify reports a missing skill as missing, and stops once installed.
+	assert.ok(verify(skillEnv).missing.some((item) => item.startsWith("skill:")));
+	installSkills(skillEnv);
+	assert.deepEqual(verify(skillEnv).missingSkills, []);
+
+	rmSync(skillsHome, { recursive: true, force: true });
 }
 
 rmSync(home, { recursive: true, force: true });

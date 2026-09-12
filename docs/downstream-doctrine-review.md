@@ -66,6 +66,11 @@ instruction (`docs/skill-system.md`, "daemon đồng thời embed exact active
 `beads-issue-tracker` package vào immutable RoleBinding cho mọi provider, nên mandatory
 checkpoint không phụ thuộc provider-native skill loader").
 
+**Fixed.** `scripts/claude-setup.mjs` now installs the pack's skills into
+`~/.claude/skills/` on `--install`, removes them on `--uninstall`, and reports a missing
+one from `--verify` as an incomplete install. See §2.1 for the gate that had to land in
+the same change.
+
 ### 1.3 `pteam preflight` does not check what its own message promises
 
 `cli/paseo-team.mjs:964` tells the user to run `pteam preflight` "to confirm the installed
@@ -111,9 +116,16 @@ loadable only by a Peer with `DISPOSITION: independent-reviewer`,
 The Pi side has no `skill` tool to gate; the equivalent there is a `read` deny on a
 non-admitted skill directory.
 
-This pairs naturally with fixing §1.2: install the skills into `~/.claude/skills/` *and*
-gate them per role in the same change, so adding the capability does not also hand it to
-every seat.
+**Adopted**, paired with the §1.2 fix so that adding the capability did not also hand it
+to every seat. Two states rather than three: `explicit-only` is a label neither runtime
+gives us a signal to enforce ("the Human named this skill"), and an unenforceable state
+in an enforcement table is theatre. `SKILL_ADMISSION` in `policy-core.ts` is the one
+table; Claude gates the `Skill` tool per call, and pi — which has no `skill` tool, and
+loads a skill by *reading* its `SKILL.md` — gates the read path. `paseo-ocr-reviewer`
+additionally follows the brief: admitted for a Peer whose `DISPOSITION` names a reviewer,
+which is what the skill's own first paragraph already claimed. `test/policy.test.mts`
+fails if a directory under `skills/` is not classified, so the next skill cannot default
+to visible-for-everyone.
 
 ### 2.2 An install manifest with per-file digests (high value, ~half a day)
 
