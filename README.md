@@ -990,10 +990,19 @@ npm run mutate <mutations.json>   # break the code on purpose; does the suite no
 Measured with both, the shape of the gap was consistent and is worth knowing
 before adding a test here:
 
-| Layer | Coverage | Mutations killed |
+| Layer | Coverage when measured | Mutations killed |
 |---|---|---|
 | Rule modules (`policy-core`, `claude-policy`, `install-drift`, `workspace-protocol`) | 94–99% | 14 / 14 |
 | Wiring (`paseo-team-policy.ts`, `preflight.mjs`, `uninstall.mjs`) | 0–48% | 6 / 12 |
+
+Both wiring layers are covered now — `preflight.mjs` went from *never executed*
+to 68%, `uninstall.mjs` from 0 to 94% — and 40 more defect-shaped mutations
+against them all die. Writing those tests turned up three more defects of the
+same family, each one a place where two parts of the pack answered the same
+question differently: preflight hardcoded `~/.pi/agent` while the installers
+honour `PI_HOME`/`PI_CODING_AGENT_DIR`; `config-walker` read
+`PST_TEAM_CONFIG_DIR` while `model-routing.mjs` read `PASEO_TEAM_HOME`; and the
+Pi adapter never asserted that the role prompt reaches the model.
 
 Every one of the nine defects was a **wiring** defect: a rule that exists, is
 correct, is unit-tested, and is never called — or is called at the wrong

@@ -246,6 +246,37 @@ export function paseoHomeDir(env = process.env) {
 }
 
 /**
+ * The pack's own config directory — routing files, the seat ledger, the permit
+ * audit log, the Claude session state.
+ *
+ * It lives here, at the bottom of the import graph, because it is the one
+ * directory BOTH halves of the pack need to agree on and neither half can
+ * import the other's resolver: `cli/lib/config-walker.mjs` is not shipped to
+ * the installed support directory, and the support scripts are not importable
+ * from the CLI's own layer. lib-common is.
+ *
+ * Two variable names, in a fixed order, because the pack shipped both and only
+ * one of them was ever documented. Before this existed, config-walker read
+ * `PST_TEAM_CONFIG_DIR` while model-routing.mjs and claude-hook.mjs read
+ * `PASEO_TEAM_HOME` — so an operator who set one got `pteam status` reporting
+ * the routing file as present at the configured path while `pteam preflight`
+ * reported it MISSING and named a different one. Same command family, same
+ * environment, two answers, and the honest-looking half was wrong.
+ *
+ * `PST_TEAM_CONFIG_DIR` wins because it is the name `config-walker`'s header
+ * and `seat-profiles.mjs` document; `PASEO_TEAM_HOME` is still honoured so a
+ * host configured the old way keeps working — everywhere, now, rather than in
+ * half the commands.
+ */
+export function teamConfigDir(env = process.env) {
+	return (
+		env.PST_TEAM_CONFIG_DIR?.trim() ||
+		env.PASEO_TEAM_HOME?.trim() ||
+		join(homedir(), ".paseo-pi-team")
+	);
+}
+
+/**
  * Warn only when Paseo's routing file actually exists: absent is the common
  * case and says nothing, so reporting it would be noise. Returns null when
  * there is nothing to say.

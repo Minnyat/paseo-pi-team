@@ -262,4 +262,67 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
   );
 }
 
+// --- one config directory, one resolver --------------------------------------
+//
+// The pack shipped TWO env var names for the same directory: config-walker
+// honoured PST_TEAM_CONFIG_DIR while model-routing.mjs and claude-hook.mjs
+// honoured PASEO_TEAM_HOME. An operator who set one got `pteam status`
+// reporting the routing file present at the configured path while
+// `pteam preflight` reported it MISSING and named a different one — same
+// command family, same environment, two answers.
+//
+// It cannot be fixed by one side importing the other: config-walker is not
+// shipped to the installed support directory, and the support scripts are not
+// importable from the CLI's layer. lib-common is the only file both can reach,
+// so the resolver lives there and everyone delegates — which is exactly what
+// this asserts, because a delegation that gets quietly re-inlined is how the
+// split came back.
+{
+	const { teamConfigDir } = await import("../scripts/lib-common.mjs");
+	const cw = await import("../cli/lib/config-walker.mjs");
+	const routing = await import("../scripts/model-routing.mjs");
+	const hook = await import("../scripts/claude-hook.mjs");
+
+	const prevPst = process.env.PST_TEAM_CONFIG_DIR;
+	const prevHome = process.env.PASEO_TEAM_HOME;
+	const set = (pst, teamHome) => {
+		if (pst === null) delete process.env.PST_TEAM_CONFIG_DIR;
+		else process.env.PST_TEAM_CONFIG_DIR = pst;
+		if (teamHome === null) delete process.env.PASEO_TEAM_HOME;
+		else process.env.PASEO_TEAM_HOME = teamHome;
+	};
+	try {
+		for (const [pst, teamHome, expected, why] of [
+			["/tmp/pst-a", null, "/tmp/pst-a", "the documented name is honoured"],
+			[null, "/tmp/pst-b", "/tmp/pst-b", "the legacy name still works"],
+			["/tmp/pst-a", "/tmp/pst-b", "/tmp/pst-a", "the documented name wins when both are set"],
+		]) {
+			set(pst, teamHome);
+			assert.equal(teamConfigDir(), expected, why);
+			// Every consumer must land on the same directory, or the two halves
+			// of one command disagree again.
+			assert.equal(cw.teamConfigDir(), expected, `config-walker: ${why}`);
+			assert.equal(routing.defaultRoutingDir(), expected, `model-routing: ${why}`);
+			assert.equal(hook.teamHome(process.env), expected, `claude-hook: ${why}`);
+			assert.equal(
+				routing.defaultClusterRoutingPath(),
+				join(expected, "cluster-routing.local.json"),
+				`cluster path: ${why}`,
+			);
+		}
+		// With neither set, all four fall back to the same default.
+		set(null, null);
+		const fallback = teamConfigDir();
+		assert.match(fallback, /\.paseo-pi-team$/);
+		assert.equal(cw.teamConfigDir(), fallback);
+		assert.equal(routing.defaultRoutingDir(), fallback);
+		assert.equal(hook.teamHome(process.env), fallback);
+		// A blank value is not a configured value.
+		set("   ", null);
+		assert.equal(teamConfigDir(), fallback, "whitespace is not a path");
+	} finally {
+		set(prevPst ?? null, prevHome ?? null);
+	}
+}
+
 console.log("lib-common tests passed");

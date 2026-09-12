@@ -8,10 +8,11 @@
  * and the WebUI can point at a throwaway HOME:
  *   PI_HOME               -> default ~/.pi
  *   PI_CODING_AGENT_DIR   -> default $PI_HOME/agent
- *   PST_TEAM_CONFIG_DIR   -> default ~/.paseo-pi-team
+ *   PST_TEAM_CONFIG_DIR   -> default ~/.paseo-pi-team (PASEO_TEAM_HOME also honoured)
  *   PASEO_CONFIG_JSON     -> default ~/.paseo/config.json
  */
 
+import { teamConfigDir as sharedTeamConfigDir } from "../../scripts/lib-common.mjs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import {
@@ -32,7 +33,11 @@ export function agentDir() {
 }
 
 export function teamConfigDir() {
-	return process.env.PST_TEAM_CONFIG_DIR || join(homedir(), ".paseo-pi-team");
+	// One resolver, shared with the support scripts through lib-common: this
+	// used to honour only PST_TEAM_CONFIG_DIR while model-routing.mjs honoured
+	// only PASEO_TEAM_HOME, so `pteam status` and `pteam preflight` could name
+	// different routing files on the same host.
+	return sharedTeamConfigDir(process.env);
 }
 
 export function paseoConfigPath() {

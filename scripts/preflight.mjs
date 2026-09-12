@@ -19,7 +19,6 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -33,6 +32,14 @@ import { orchestrationPreferencesNotice } from "./lib-common.mjs";
 // directory, so this relative path always resolves to the package it shipped in
 // — which is the whole point: one side of the comparison must BE this release.
 import { installDrift, summarizeDrift } from "../cli/lib/install-drift.mjs";
+// The SAME path resolution the installers use. Not `homedir()`: install.sh and
+// install.ps1 both honour PI_HOME and PI_CODING_AGENT_DIR, and preflight used
+// to hardcode ~/.pi/agent — so on a host with either override set it reported
+// `extension`, `policy-core` and `role-prompts` as missing on a correctly
+// installed pack, while `install-drift` (which already resolved through the
+// walker) reported the same host as fine. Two halves of one command
+// disagreeing, and the failing half naming a path the installer never wrote to.
+import * as cw from "../cli/lib/config-walker.mjs";
 import { describeProtocolState, protocolState } from "../cli/lib/workspace-protocol.mjs";
 import {
 	RoutingError,
@@ -292,9 +299,7 @@ if (wantPi) {
 		);
 	} else {
 		const pkgPath = join(
-			homedir(),
-			".pi",
-			"agent",
+			cw.agentDir(),
 			"npm",
 			"node_modules",
 			"pi-mcp-adapter",
@@ -329,7 +334,7 @@ if (wantPi) {
 	// readJsonOrNull returns null for "absent" and undefined for "present but
 	// unreadable"; neither is evidence that the browser is off, and the default
 	// when the key is missing is enabled.
-	const daemonConfig = readJsonOrNull(join(homedir(), ".paseo", "config.json"));
+	const daemonConfig = readJsonOrNull(cw.paseoConfigPath());
 	const browserToolsOff =
 		Boolean(daemonConfig) && daemonConfig?.daemon?.browserTools?.enabled === false;
 	if (browserToolsOff)
@@ -343,20 +348,14 @@ if (wantPi) {
 // --- role-pack installation ---------------------------------------------------
 
 if (wantPi) {
-	const extPath = join(
-		homedir(),
-		".pi",
-		"agent",
-		"extensions",
-		"paseo-team-policy.ts",
-	);
+	const extPath = cw.policyExtensionPath();
 	if (existsSync(extPath)) pass("extension", extPath);
 	else fail("extension", `${extPath} missing → run scripts/install.{sh,ps1}`);
 }
 {
 	// Both runtimes read the SAME policy core and the SAME role prompts, so
 	// these are checked regardless of family.
-	const coreDir = join(homedir(), ".pi", "agent", "extensions", "paseo-team-core");
+	const coreDir = join(cw.extensionsDir(), "paseo-team-core");
 	// Either extension satisfies the check: `.ts` is what pi loads, `.js` is the
 	// built sibling, and an install carrying only one of them is still complete.
 	const coreModule = (name) =>
@@ -413,7 +412,7 @@ if (wantClaude) {
 	}
 }
 {
-	const promptsDir = join(homedir(), ".pi", "agent", "extensions", "prompts");
+	const promptsDir = cw.promptsDir();
 	const missing = ["lead", "peer", "supervisor"].filter(
 		(r) => !existsSync(join(promptsDir, `${r}.md`)),
 	);
@@ -609,7 +608,7 @@ if (!existsSync(routesPath)) {
 
 // Per-model thinkingLevelMap from ~/.pi/agent/models.json (level null = unsupported).
 function piModelLevelUnreachable(piProvider, modelId, level) {
-	const modelsJsonPath = join(homedir(), ".pi", "agent", "models.json");
+	const modelsJsonPath = join(cw.agentDir(), "models.json");
 	if (!existsSync(modelsJsonPath)) return false;
 	try {
 		const data = JSON.parse(readFileSync(modelsJsonPath, "utf8"));
