@@ -994,6 +994,7 @@ before adding a test here:
 |---|---|---|
 | Rule modules (`policy-core`, `claude-policy`, `install-drift`, `workspace-protocol`) | 94–99% | 14 / 14 |
 | Wiring (`paseo-team-policy.ts`, `preflight.mjs`, `uninstall.mjs`) | 0–48% | 6 / 12 |
+| CLI error paths (`paseo-team.mjs`) | 82% line / **62% branch** | — |
 
 Both wiring layers are covered now — `preflight.mjs` went from *never executed*
 to ~80% including the whole N-host lane, `uninstall.mjs` from 0 to 94% — and 50
@@ -1013,6 +1014,17 @@ pack answered the same question differently:
   unreachable — `execFileSync` puts the whole command line in its error
   message. `scripts/remote-paseo.mjs` already redacted exactly this; the second
   place running the same command with the same secret had not inherited it.
+
+The CLI's own error paths were the last of it: 82% of lines but 62% of
+branches, and almost every uncovered region an error path. `pteam models` with
+the daemon down answered `{"ok": true}` and exit 0 — "unreachable" and "there
+are no models" were the same answer — while `pteam models --provider X` failed
+loudly on the same daemon. A bad role name printed a JavaScript stack trace. A
+usage error exited 1 from most dispatchers and 2 from the top level and
+`seats`. And the WebUI cache, which says it stores only successful answers,
+keyed that on the exit code alone — so a graph taken while the daemon was down
+was remembered for its whole window, which is the stale error the comment says
+it avoids.
 
 Every one of the nine defects was a **wiring** defect: a rule that exists, is
 correct, is unit-tested, and is never called — or is called at the wrong

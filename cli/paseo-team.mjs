@@ -69,6 +69,17 @@ function fail(msg, code = 1) {
 	process.exit(code);
 }
 
+/**
+ * Exit code for "you typed something this CLI does not accept".
+ *
+ * 2 is usage, 1 is an operation that ran and failed — the distinction a script
+ * keys on to tell a typo from a daemon that is down. The top-level dispatcher
+ * and `seats` already used 2 while every other subcommand dispatcher used 1,
+ * so one question had two answers depending on which noun you got wrong.
+ */
+const USAGE = 2;
+const usageFail = (msg) => fail(msg, USAGE);
+
 function json(obj) {
 	process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
 }
@@ -265,8 +276,14 @@ async function cmdModels(argv) {
 		return;
 	}
 	const { byProvider, degraded } = await discoverModels({ timeoutMs: 20000 });
+	// `ok` reports whether this answer is COMPLETE, not whether the command ran.
+	// A fan-out keeps exit 0 and a renderable body on purpose — same reason
+	// `graph` does — but claiming ok:true after reaching nothing made "the
+	// daemon is unreachable" indistinguishable from "there are no models", and
+	// disagreed with `models --provider X`, which fails loudly on the same
+	// daemon. Partial results stay ok:true with `degraded` listing the gaps.
 	json({
-		ok: true,
+		ok: Object.keys(byProvider).length > 0 || degraded.length === 0,
 		providers: byProvider,
 		count: Object.fromEntries(Object.entries(byProvider).map(([k, v]) => [k, v.length])),
 		degraded,
@@ -336,8 +353,23 @@ function cmdConfigWrite(section) {
 // prompts read/write
 // ---------------------------------------------------------------------------
 
+/**
+ * `cw.rolePromptPath` throws on an unknown role, and the top-level handler
+ * prints `error.stack` — so a plain typo answered with a JavaScript stack
+ * trace while every other bad-name path here printed one clean line. The
+ * message the walker raises is already the right one; only its framing and
+ * exit code were wrong.
+ */
+function rolePromptPathOrUsage(role) {
+	try {
+		return cw.rolePromptPath(role);
+	} catch (error) {
+		return usageFail(String(error?.message ?? error));
+	}
+}
+
 function cmdPromptsRead(role) {
-	const path = cw.rolePromptPath(role);
+	const path = rolePromptPathOrUsage(role);
 	if (!existsSync(path)) {
 		fail(`prompt not installed for role '${role}' at ${path} — run 'paseo-team install'`);
 	}
@@ -345,7 +377,7 @@ function cmdPromptsRead(role) {
 }
 
 function cmdPromptsWrite(role) {
-	const path = cw.rolePromptPath(role);
+	const path = rolePromptPathOrUsage(role);
 	const content = readStdin();
 	cw.atomicWrite(path, content);
 	json({ ok: true, wrote: true, role, path });
@@ -1309,9 +1341,11 @@ async function main() {
 function dispatchAgent(argv) {
 	const [sub, ref] = argv;
 	switch (sub) {
-		case "inspect": if (!ref) fail("agent inspect: missing agent reference"); return cmdAgentInspect(ref);
-		case "send": if (!ref) fail("agent send: missing agent reference"); return cmdAgentSend(ref);
-		default: fail(`agent: unknown subcommand '${sub}' (expected inspect|send)`);
+		case "inspect": if (!ref) usageFail("agent inspect: missing agent reference"); return cmdAgentInspect(ref);
+		case "send": if (!ref) usageFail("agent send: missing agent reference"); return cmdAgentSend(ref);
+		// `${sub}` alone printed the string "undefined" when the subcommand was
+		// simply absent, which reads as a JavaScript leak rather than a message.
+		default: usageFail(`agent: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected inspect|send)`);
 	}
 }
 
@@ -1321,16 +1355,16 @@ function dispatchPermits(argv) {
 		case "list": return cmdPermitsList();
 		case "allow":
 		case "deny": return cmdPermitDecision(sub, rest);
-		default: fail(`permits: unknown subcommand '${sub}' (expected list|allow|deny)`);
+		default: usageFail(`permits: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|allow|deny)`);
 	}
 }
 
 function dispatchTwo(parent, argv, handlers) {
 	const [sub, arg] = argv;
-	if (!sub) fail(`${parent}: missing subcommand (read|write)`);
+	if (!sub) usageFail(`${parent}: missing subcommand (${Object.keys(handlers).join("|")})`);
 	const fn = handlers[sub];
-	if (!fn) fail(`${parent}: unknown subcommand '${sub}' (expected ${Object.keys(handlers).join("|")})`);
-	if (!arg) fail(`${parent} ${sub}: missing argument`);
+	if (!fn) usageFail(`${parent}: unknown subcommand '${sub}' (expected ${Object.keys(handlers).join("|")})`);
+	if (!arg) usageFail(`${parent} ${sub}: missing argument`);
 	// Trailing flags reach the handler; each one declares what it accepts and
 	// rejects the rest, so a typo can never be silently dropped here.
 	return fn(arg, argv.slice(2));
@@ -1356,7 +1390,7 @@ function dispatchProtocol(argv) {
 	const sub = argv[0];
 	switch (sub) {
 		case "status": return cmdProtocolStatus(argv.slice(1));
-		default: fail(`protocol: unknown subcommand '${sub ?? ""}' (expected status)`);
+		default: usageFail(`protocol: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected status)`);
 	}
 }
 
@@ -1364,14 +1398,14 @@ function dispatchSkills(argv) {
 	const [sub, name] = argv;
 	switch (sub) {
 		case "list": return cmdSkillsList();
-		case "read": if (!name) fail("skills read: missing skill name"); return cmdSkillsRead(name);
-		case "write": if (!name) fail("skills write: missing skill name"); return cmdSkillsWrite(name);
-		default: fail(`skills: unknown subcommand '${sub}' (expected list|read|write)`);
+		case "read": if (!name) usageFail("skills read: missing skill name"); return cmdSkillsRead(name);
+		case "write": if (!name) usageFail("skills write: missing skill name"); return cmdSkillsWrite(name);
+		default: usageFail(`skills: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|read|write)`);
 	}
 }
 
 function dispatchEnv(sub) {
-	if (sub && sub !== "list") fail(`env: unknown subcommand '${sub}' (expected list)`);
+	if (sub && sub !== "list") usageFail(`env: unknown subcommand '${sub}' (expected list)`);
 	return cmdEnvList();
 }
 
