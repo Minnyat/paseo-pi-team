@@ -76,6 +76,15 @@ export function piSettingsPath() {
 	return join(agentDir(), "settings.json");
 }
 
+/**
+ * pi's hand-written model inventory (layer 1 of model routing). pi has no
+ * discovery, so this file IS the catalog; `pteam models sync` rewrites one
+ * provider entry in it.
+ */
+export function piModelsPath() {
+	return join(agentDir(), "models.json");
+}
+
 export function promptsDir() {
 	return join(agentDir(), "extensions", "prompts");
 }

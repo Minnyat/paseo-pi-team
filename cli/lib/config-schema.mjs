@@ -416,6 +416,86 @@ export const CONFIG_SCHEMAS = {
 		],
 	},
 
+	"pi-models": {
+		label: "Kho model Pi",
+		// Buttons the form offers above the fields. The whole reason this
+		// section exists is that keeping pi's catalog current used to mean a
+		// terminal; a form you can fill in but not act on would only move half
+		// the job into the browser.
+		actions: [
+			{
+				id: "models-sync",
+				api: "/api/models/sync",
+				label: "Cập nhật danh sách model",
+				hint: "Gọi thử từng model của mọi điểm cuối, rồi chỉ giữ lại những model còn trả lời. Mất vài phút.",
+				busy: "Đang gọi thử từng model…",
+				primary: true,
+			},
+			{
+				id: "models-refresh",
+				api: "/api/models/refresh",
+				label: "Nạp lại cho Paseo",
+				hint: "Dùng khi bạn tự sửa file model: Paseo giữ danh sách cũ tới khi được bảo đọc lại.",
+				busy: "Đang nạp lại…",
+			},
+		],
+		intro: "Mỗi thẻ là một nơi Pi lấy model về. Khoá API không lưu ở đây — chỉ lưu tên biến và đường dẫn file chứa khoá.",
+		seed: { version: 1, providers: {} },
+		groups: [
+			{
+				id: "providers",
+				label: "Điểm cuối",
+				fields: [
+					{
+						path: "providers",
+						type: "map",
+						keyLabel: "Tên provider",
+						addLabel: "+ Thêm điểm cuối",
+						hint: "Tên này đi vào model của Pi: <tên>/<model-id>. Không dùng dấu /.",
+						item: {
+							seed: {
+								api: "openai-completions",
+								keyEnv: "CODING_API_KEY",
+								keyFile: "~/.paseo-pi-team/pi-provider.env",
+								probe: true,
+								concurrency: 5,
+								contextWindow: 200000,
+								maxTokens: 32000,
+							},
+							fields: [
+								{ path: "baseUrl", type: "string", label: "Địa chỉ endpoint", hint: "Ví dụ: https://ten-mien/v1" },
+								{
+									path: "keyEnv",
+									type: "string",
+									default: "CODING_API_KEY",
+									label: "Biến môi trường chứa khoá",
+									hint: "Ghi tên biến, không ghi khoá.",
+								},
+								{
+									path: "keyFile",
+									type: "string",
+									label: "File chứa khoá",
+									hint: "Dùng khi biến môi trường trống.",
+								},
+								{
+									path: "probe",
+									type: "bool",
+									default: true,
+									label: "Gọi thử trước khi ghi",
+									hint: "Tắt thì model đã hỏng vẫn được ghi vào.",
+								},
+								{ path: "api", type: "enum", enum: ["openai-completions"], default: "openai-completions", label: "Giao thức" , advanced: true },
+								{ path: "concurrency", type: "number", default: 5, min: 1, max: 16, label: "Số model gọi thử cùng lúc" , advanced: true },
+								{ path: "contextWindow", type: "number", default: 200000, min: 1024, label: "Context window" , advanced: true },
+								{ path: "maxTokens", type: "number", default: 32000, min: 256, label: "Max output tokens" , advanced: true },
+							],
+						},
+					},
+				],
+			},
+		],
+	},
+
 	cluster: {
 		label: "Nhiều máy (cluster)",
 		intro:

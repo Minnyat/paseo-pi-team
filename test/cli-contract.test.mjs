@@ -493,6 +493,123 @@ try {
 		assert.match(envelope.json.degraded[0].message, /Connection timed out/);
 	}
 
+	// --- models refresh: the one command that is not a paseo spawn -----------
+	// Paseo caches the provider catalog for the daemon's whole lifetime, so
+	// editing models.json is invisible until the daemon is told. There is no
+	// `paseo` subcommand for it, hence the SDK path and a second fake.
+	{
+		const CLIENT = join(HERE, "fixtures", "fake-paseo-client.mjs");
+		const logPath = join(sandbox, "client-calls.log");
+		const clientRun = (args, extra = {}) => {
+			rmSync(logPath, { force: true });
+			const result = run(args, { PASEO_TEAM_PASEO_CLIENT: CLIENT, PST_FAKE_CLIENT_LOG: logPath, ...extra });
+			const calls = existsSync(logPath)
+				? readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+				: [];
+			return { ...result, calls };
+		};
+
+		const all = clientRun(["models", "refresh"]);
+		assert.equal(all.status, 0, all.stderr);
+		assert.equal(all.json.providers, "all");
+		const refreshAll = all.calls.find((c) => c.event === "refresh");
+		assert.deepEqual(refreshAll.payload, {}, "refreshing everything sends no provider filter");
+		assert.ok(all.calls.some((c) => c.event === "close"), "the socket is closed, not leaked");
+
+		const one = clientRun(["models", "refresh", "--provider", "pi-peer"]);
+		assert.equal(one.status, 0, one.stderr);
+		assert.deepEqual(one.json.providers, ["pi-peer"]);
+		assert.deepEqual(
+			one.calls.find((c) => c.event === "refresh").payload,
+			{ providers: ["pi-peer"] },
+			"a named provider reaches the daemon as a filter, not as a no-op",
+		);
+
+		// Same allowlist as `models --provider`: only the pack's role providers.
+		const notARole = clientRun(["models", "refresh", "--provider", "pi"]);
+		assert.notEqual(notARole.status, 0);
+		assert.match(notARole.stderr, /--provider must be one of/);
+		assert.equal(notARole.calls.length, 0, "a rejected argument never opens a connection");
+
+		assert.notEqual(clientRun(["models", "refresh", "--bogus"]).status, 0, "unknown flags are a usage error here too");
+
+		// Every failure must say the catalog is STILL STALE and name the cure.
+		// Reporting success on a refresh that did not happen is the one outcome
+		// that would quietly leave a dead model in the routing form.
+		for (const [mode, code] of [
+			["unreachable", "DAEMON_UNREACHABLE"],
+			["old-daemon", "REFRESH_UNSUPPORTED"],
+			["refresh-fails", "REFRESH_FAILED"],
+		]) {
+			const failed = clientRun(["models", "refresh"], { PST_FAKE_CLIENT_MODE: mode });
+			assert.equal(failed.status, 3, `${mode}: a failed refresh exits non-zero`);
+			assert.equal(failed.json.ok, false, `${mode}: and says so in the body`);
+			assert.equal(failed.json.code, code);
+			assert.match(failed.json.hint, /restart the daemon/, `${mode}: the hint names what actually fixes it`);
+		}
+
+		// A missing SDK is a configuration fault, not a crash.
+		const noSdk = run(["models", "refresh"], { PASEO_TEAM_PASEO_CLIENT: join(sandbox, "nope", "client.js") });
+		assert.equal(noSdk.status, 3, noSdk.stderr);
+		assert.equal(noSdk.json.ok, false);
+		assert.equal(noSdk.json.code, "PASEO_CLIENT_MISSING");
+	}
+
+	// --- models sync: fail closed before it can touch models.json ------------
+	{
+		const noConfig = run(["models", "sync", "--dry-run"]);
+		assert.equal(noConfig.status, 2, "no endpoint configured is a usage fault, not a crash");
+		assert.equal(noConfig.json.code, "CONFIG_MISSING");
+		assert.match(noConfig.json.hint, /pi-models\.example\.json/, "the hint names the file to copy");
+
+		const configPath = join(sandbox, "team", "pi-models.local.json");
+		mkdirSync(dirname(configPath), { recursive: true });
+
+		writeFileSync(configPath, JSON.stringify({ version: 1, providers: { testprov: {} } }));
+		const noBaseUrl = run(["models", "sync", "--dry-run"]);
+		assert.equal(noBaseUrl.status, 2);
+		assert.equal(noBaseUrl.json.code, "CONFIG_INVALID");
+		assert.match(noBaseUrl.json.problems.join(" "), /baseUrl/);
+
+		// Every key is resolved BEFORE any request: a half-synced run would
+		// rewrite one provider's catalog and leave the operator guessing about
+		// the rest.
+		writeFileSync(configPath, JSON.stringify({
+			version: 1,
+			providers: {
+				testprov: { baseUrl: "http://127.0.0.1:1/v1", keyEnv: "PST_TEST_KEY", keyFile: join(sandbox, "absent.env") },
+				second: { baseUrl: "http://127.0.0.1:1/v1", keyEnv: "PST_TEST_KEY_2", keyFile: join(sandbox, "absent.env") },
+			},
+		}));
+		const noKey = run(["models", "sync", "--dry-run"]);
+		assert.equal(noKey.status, 2);
+		assert.equal(noKey.json.code, "API_KEY_MISSING");
+		assert.equal(noKey.json.missing.length, 2, "every provider missing a key is named, not just the first");
+		assert.equal(noKey.json.missing[0].tried.length, 2, "and each one says both places it looked");
+
+		// --only addresses ONE endpoint; a name that is not configured must be
+		// a usage error rather than a silent no-op run over nothing.
+		const badOnly = run(["models", "sync", "--only", "khong-co"]);
+		assert.notEqual(badOnly.status, 0);
+		assert.match(badOnly.stderr, /is not configured \(have: /);
+
+		assert.notEqual(run(["models", "sync", "--provider", "pi-peer"]).status, 0, "sync takes --only, not --provider; a typo must not be ignored");
+
+		// The section is addressable by the config plumbing the WebUI uses.
+		const section = run(["config", "read", "pi-models"]);
+		assert.equal(section.status, 0, section.stderr);
+		assert.deepEqual(Object.keys(section.json.data.providers).sort(), ["second", "testprov"]);
+		assert.equal(section.json.schema.label, "Kho model Pi");
+		const map = section.json.schema.groups[0].fields[0];
+		assert.equal(map.type, "map", "the form adds endpoints rather than editing a single hard-coded one");
+		const itemFields = map.item.fields.map((f) => f.path);
+		assert.ok(itemFields.includes("keyEnv") && itemFields.includes("keyFile"), "the form offers the key's LOCATION...");
+		assert.ok(
+			!itemFields.some((path) => /^(apiKey|key|secret|token)$/i.test(path)),
+			"...and never a field to paste the secret into",
+		);
+	}
+
 	// --- config read folds that inventory into the routing schema ------------
 	{
 		const routing = run(["config", "read", "routing"]);

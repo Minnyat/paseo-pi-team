@@ -45,7 +45,7 @@ import {
 	baseRole,
 	SEAT_CAPABILITIES,
 } from "../scripts/seat-profiles.mjs";
-import { runPaseoJson, runPaseoText, mapWithConcurrency, PaseoError } from "./lib/paseo-bridge.mjs";
+import { runPaseoJson, runPaseoText, mapWithConcurrency, refreshProviderSnapshot, PaseoError } from "./lib/paseo-bridge.mjs";
 import { describeProtocolState, protocolState } from "./lib/workspace-protocol.mjs";
 import {
 	ROLE_PROVIDERS,
@@ -55,6 +55,7 @@ import {
 	normalizeModelEntry,
 	providerFamily,
 } from "../scripts/model-routing.mjs";
+import { configProblems, normalizeConfig, resolveApiKey, syncModels } from "../scripts/pi-models-sync.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, inferSeat, normalizePermits } from "./lib/graph.mjs";
 import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
@@ -258,7 +259,145 @@ async function discoverModels(options = {}) {
 	return { byProvider, degraded };
 }
 
+/**
+ * `models refresh` — tell the daemon to re-read its provider catalog.
+ *
+ * Editing ~/.pi/agent/models.json changes nothing the daemon can see until it
+ * is told: it caches the catalog for its whole process lifetime. Without this
+ * the only cure is a daemon restart, which drops every live agent connection
+ * for what is a read-only change.
+ */
+async function cmdModelsRefresh(argv) {
+	rejectUnknownFlags(argv, ["--provider", "--host"]);
+	const provider = flagValue(argv, "--provider");
+	const host = flagValue(argv, "--host");
+	if (provider !== undefined && !ROLE_PROVIDERS.includes(provider)) {
+		fail(`models refresh: --provider must be one of ${ROLE_PROVIDERS.join(", ")} (got '${provider}')`);
+	}
+	const targets = provider === undefined ? [] : [provider];
+	const result = await refreshProviderSnapshot(targets, { timeoutMs: 20000, ...(host ? { host } : {}) });
+	if (!result.ok) {
+		json({
+			ok: false,
+			command: "models refresh",
+			code: result.code,
+			message: result.message,
+			// The catalog is still whatever the daemon read at startup, so say
+			// what actually fixes it rather than leaving the user guessing.
+			hint: "restart the daemon to pick up catalog changes (systemd: systemctl --user restart paseo)",
+		});
+		process.exit(3);
+	}
+	json({
+		ok: true,
+		command: "models refresh",
+		providers: targets.length > 0 ? targets : "all",
+	});
+}
+
+/**
+ * `models sync` — rebuild pi's model catalogs from their endpoints, then tell
+ * the daemon about it.
+ *
+ * Two halves on purpose. scripts/pi-models-sync.mjs knows about endpoints and
+ * models.json and nothing about Paseo, so it still works on a host with no
+ * daemon; this function adds the one Paseo-specific step, because a catalog the
+ * daemon has not re-read is a catalog nobody can route to.
+ *
+ * A refresh that fails does NOT fail the sync: the file on disk is correct
+ * either way, and pi itself re-reads it on every start. It is reported, with
+ * the restart that would finish the job.
+ */
+async function cmdModelsSync(argv) {
+	rejectUnknownFlags(argv, ["--config", "--only", "--no-probe", "--all", "--no-refresh", "--dry-run"]);
+	const configPath = flagValue(argv, "--config") ?? resolveSection("pi-models");
+	const doc = cw.readJsonOrNull(configPath);
+	if (!doc) {
+		json({
+			ok: false,
+			command: "models sync",
+			code: "CONFIG_MISSING",
+			path: configPath,
+			message: `no endpoint configured at ${configPath}`,
+			hint: "copy config/pi-models.example.json there, or add one in the WebUI under Cấu hình → Kho model Pi",
+		});
+		process.exit(2);
+	}
+
+	const { entries: all, legacy } = normalizeConfig(doc);
+	const only = flagValue(argv, "--only");
+	const entries = only === undefined ? all : all.filter((entry) => entry.name === only);
+	if (only !== undefined && entries.length === 0) {
+		fail(`models sync: --only '${only}' is not configured (have: ${all.map((e) => e.name).join(", ") || "none"})`);
+	}
+	const problems = configProblems(entries);
+	if (problems.length > 0) {
+		json({ ok: false, command: "models sync", code: "CONFIG_INVALID", path: configPath, problems });
+		process.exit(2);
+	}
+
+	// Resolve every key BEFORE any request: a half-synced run would rewrite one
+	// provider's catalog and leave the operator guessing about the rest.
+	const keys = new Map();
+	const keySources = {};
+	const missing = [];
+	for (const entry of entries) {
+		const { key, source, tried } = resolveApiKey(entry);
+		if (!key) {
+			missing.push({ provider: entry.name, tried });
+			continue;
+		}
+		keys.set(entry.name, key);
+		keySources[entry.name] = source;
+	}
+	if (missing.length > 0) {
+		json({
+			ok: false,
+			command: "models sync",
+			code: "API_KEY_MISSING",
+			missing,
+			hint: "put each key in the keyFile that provider names; systemd hands the daemon the same file",
+		});
+		process.exit(2);
+	}
+
+	const dryRun = argv.includes("--dry-run");
+	const report = await syncModels({
+		entries,
+		keys,
+		modelsPath: cw.piModelsPath(),
+		probe: argv.includes("--no-probe") ? false : undefined,
+		keepAll: argv.includes("--all"),
+		dryRun,
+	});
+	if (report.code) {
+		json({ ok: false, command: "models sync", ...report });
+		process.exit(2);
+	}
+
+	// The daemon caches the catalog for its whole lifetime, so a write nobody
+	// told it about changes nothing it can route to.
+	let refresh = { skipped: true, reason: dryRun ? "--dry-run" : "--no-refresh" };
+	const wroteSomething = !dryRun && report.providers.some((p) => p.ok);
+	if (wroteSomething && !argv.includes("--no-refresh")) {
+		const refreshed = await refreshProviderSnapshot([], { timeoutMs: 20000 });
+		refresh = refreshed.ok
+			? { ok: true }
+			: {
+					ok: false,
+					code: refreshed.code,
+					message: refreshed.message,
+					hint: "the catalog on disk is correct; restart the daemon to make it visible (systemctl --user restart paseo)",
+				};
+	}
+	json({ ok: report.ok, command: "models sync", legacyConfigShape: legacy, keySources, ...report, refresh });
+	// A provider that failed must not read as success in a script.
+	if (!report.ok) process.exit(3);
+}
+
 async function cmdModels(argv) {
+	if (argv[0] === "refresh") return cmdModelsRefresh(argv.slice(1));
+	if (argv[0] === "sync") return cmdModelsSync(argv.slice(1));
 	rejectUnknownFlags(argv, ["--provider"]);
 	const provider = flagValue(argv, "--provider");
 	if (provider !== undefined) {
@@ -302,6 +441,7 @@ const CONFIG_SECTIONS = {
 	paseo: () => cw.paseoConfigPath(),
 	"pi-settings": () => cw.piSettingsPath(),
 	seats: () => seatsPath(cw.teamConfigDir()),
+	"pi-models": () => join(cw.teamConfigDir(), "pi-models.local.json"),
 };
 
 function resolveSection(section) {
@@ -1242,6 +1382,10 @@ live plane (talks to the Paseo daemon):
   pteam permits allow <agent> <reqId>
   pteam permits deny  <agent> <reqId>
   pteam models [--provider <role-provider>]
+  pteam models refresh [--provider <role-provider>] [--host <host>]
+                                           (daemon re-reads its model catalog; no restart)
+  pteam models sync [--only <pi-provider>] [--dry-run] [--no-probe] [--all] [--no-refresh]
+                                           (probe the pi endpoint, rewrite models.json, then refresh)
   pteam cost [--all] [--cluster <id>] [--concurrency <n>]
   pteam activity <ref> [--tail <n>] [--max-chars <n>] [--filter tools|text|errors|permissions]
   pteam graph [--all] [--max-inspect <n>] [--refresh]
