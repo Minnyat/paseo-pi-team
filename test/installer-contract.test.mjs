@@ -55,11 +55,23 @@ for (const installer of ["install.sh", "install.ps1"]) {
   const sh = readFileSync(join(root, "scripts", "install.sh"), "utf8");
   const assignment = /^TEAM_CONFIG_DIR=.*$/m.exec(sh)?.[0];
   assert.ok(assignment, "install.sh must resolve the config dir into TEAM_CONFIG_DIR");
+  // Executed on POSIX only. install.sh is the POSIX installer — Windows runs
+  // install.ps1 — and the env below is replaced rather than merged so the
+  // variables under test are the only ones set, which leaves no PATH for
+  // Windows to resolve `bash` through. The shape check on install.ps1 below is
+  // the cross-platform half.
+  const runnable = process.platform !== "win32";
   const resolve = (vars) =>
     execFileSync("bash", ["-c", `${assignment}; printf %s "$TEAM_CONFIG_DIR"`], {
       encoding: "utf8",
       env: { HOME: "/home/fake", PST_TEAM_CONFIG_DIR: "", PASEO_TEAM_HOME: "", ...vars },
     });
+  if (!runnable) {
+    // Still assert the assignment references both names, so a Windows-only run
+    // is not a run that checks nothing.
+    assert.match(assignment, /PST_TEAM_CONFIG_DIR/);
+    assert.match(assignment, /PASEO_TEAM_HOME/);
+  } else {
   assert.equal(resolve({ PST_TEAM_CONFIG_DIR: "/srv/team" }), "/srv/team");
   assert.equal(resolve({ PASEO_TEAM_HOME: "/srv/legacy" }), "/srv/legacy", "the alias still works");
   assert.equal(
@@ -68,6 +80,7 @@ for (const installer of ["install.sh", "install.ps1"]) {
     "the documented name wins, exactly as it does in lib-common",
   );
   assert.equal(resolve({}), "/home/fake/.paseo-pi-team");
+  }
 
   // Whatever it resolved is what gets created and advertised — not a literal.
   assert.match(sh, /mkdir -p "\$TEAM_CONFIG_DIR"/);
