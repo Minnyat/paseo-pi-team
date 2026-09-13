@@ -13,9 +13,8 @@
 // Paseo remains the only control plane; git SHA remains the artifact anchor.
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { isEntrypoint } from "./lib-common.mjs";
+import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
 
 export const MODEL_CLASSES = Object.freeze([
 	"MONITOR_ECONOMY",
@@ -144,7 +143,9 @@ export class RoutingError extends Error {
 }
 
 export function defaultRoutingDir() {
-	return process.env.PASEO_TEAM_HOME ?? join(homedir(), ".paseo-pi-team");
+	// Delegated so the CLI and the router cannot disagree about where routing
+	// lives — they used to, see teamConfigDir in lib-common.
+	return teamConfigDir();
 }
 
 export function defaultRoutingConfigPath() {

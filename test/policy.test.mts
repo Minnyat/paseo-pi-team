@@ -23,6 +23,10 @@ import {
 	isBrowserMcpTarget,
 	isPaseoBrowserTool,
 	resolvePeerMode,
+	packSkillFromPath,
+	skillAdmission,
+	skillBlockReason,
+	PACK_SKILL_NAMES,
 } from "../extensions/paseo-team-policy.ts";
 
 // --- parseTaskBrief ----------------------------------------------------------
@@ -2045,3 +2049,256 @@ import {
 }
 
 console.log("[paseo-team] policy tests passed");
+
+// --- Skill admission: a shared table, enforced on the path pi actually uses ---
+//
+// pi has no `skill` tool. Its docs say the agent loads a skill by reading the
+// full SKILL.md after seeing it listed, so the read is the load and these tests
+// pin the path handle rather than a tool name.
+{
+	// The installer ships whatever skills/ contains; the admission table names
+	// them one by one. A new skill that nobody classified would default to
+	// "active" for all three roles, which is the silent-global failure the table
+	// exists to prevent — so the two lists must agree.
+	const shipped = readdirSync(new URL("../skills", import.meta.url), {
+		withFileTypes: true,
+	})
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => entry.name)
+		.sort();
+	assert.deepEqual(
+		[...PACK_SKILL_NAMES].sort(),
+		shipped,
+		"every skill under skills/ must be classified in SKILL_ADMISSION",
+	);
+
+	assert.equal(skillAdmission("lead", "paseo-team-lead"), "active");
+	assert.equal(skillAdmission("peer", "paseo-team-lead"), "packaged-disabled");
+	assert.equal(skillAdmission("supervisor", "paseo-team-lead"), "packaged-disabled");
+	assert.equal(skillAdmission("peer", "paseo-ocr-reviewer"), "active");
+	assert.equal(skillAdmission("lead", "paseo-ocr-reviewer"), "packaged-disabled");
+
+	// A skill this pack does not ship is never ours to block: the user's own
+	// skills sit in the same directory.
+	assert.equal(skillAdmission("peer", "some-user-skill"), "active");
+	assert.equal(skillBlockReason("peer", "some-user-skill"), null);
+	assert.equal(skillBlockReason("peer", undefined), null);
+	assert.equal(skillBlockReason("peer", ""), null);
+
+	// Name normalisation: namespace prefix, wrapper, case, stray slash.
+	assert.ok(skillBlockReason("peer", "PASEO-TEAM-LEAD"));
+	assert.ok(skillBlockReason("peer", "somepack:paseo-team-lead"));
+	assert.ok(skillBlockReason("peer", "Skill(paseo-team-lead)"));
+	assert.ok(skillBlockReason("peer", "/paseo-team-lead"));
+
+	// The Lead keeps its own procedure.
+	assert.equal(skillBlockReason("lead", "paseo-team-lead"), null);
+
+	// The deny says what to do instead, not just that it was denied.
+	const peerDenial = skillBlockReason("peer", "paseo-team-lead")!;
+	assert.match(peerDenial, /DEPENDENCY_REQUEST/);
+	assert.match(skillBlockReason("supervisor", "paseo-team-lead")!, /observe/i);
+
+	// The OCR harness is admitted for a reviewer Peer and nobody else. Substring
+	// match on the disposition, like the fork guard: real briefs spell it
+	// several ways.
+	const reviewerBrief = parseTaskBrief(
+		[
+			"PASEO_TEAM_TASK_V3_BEGIN",
+			"TASK_ID: T-900",
+			"MODE: read-only",
+			"DISPOSITION: independent-reviewer",
+			"PASEO_TEAM_TASK_V3_END",
+		].join("\n"),
+	);
+	const engineerBrief = parseTaskBrief(
+		[
+			"PASEO_TEAM_TASK_V3_BEGIN",
+			"TASK_ID: T-901",
+			"MODE: write",
+			"DISPOSITION: engineer",
+			"PASEO_TEAM_TASK_V3_END",
+		].join("\n"),
+	);
+	assert.equal(skillBlockReason("peer", "paseo-ocr-reviewer", reviewerBrief), null);
+	assert.match(
+		skillBlockReason("peer", "paseo-ocr-reviewer", engineerBrief)!,
+		/independent reviewer/i,
+	);
+	// No brief at all is fail-closed: an unbriefed Peer is not a reviewer.
+	assert.match(
+		skillBlockReason("peer", "paseo-ocr-reviewer", null)!,
+		/no DISPOSITION/,
+	);
+
+	// packSkillFromPath: the handle the pi adapter gets. Only the INSTALLED
+	// copies count — see below for why that distinction is load-bearing.
+	const posix = { cwd: "/work/repo", env: { HOME: "/home/u" } };
+	const at = (path: string, opts = posix) => packSkillFromPath(path, opts);
+
+	assert.equal(at("/home/u/.pi/agent/skills/paseo-team-lead/SKILL.md"), "paseo-team-lead");
+	assert.equal(at("/home/u/.claude/skills/paseo-team-lead/SKILL.md"), "paseo-team-lead");
+	// pi also discovers the cross-harness ~/.agents/skills, and a reference file
+	// inside the package is part of loading it.
+	assert.equal(
+		at("/home/u/.agents/skills/paseo-ocr-reviewer/reference/rules.md"),
+		"paseo-ocr-reviewer",
+	);
+	// Env overrides move the roots, exactly as the installers do.
+	assert.equal(
+		packSkillFromPath("/opt/pi/agent/skills/paseo-team-lead/SKILL.md", {
+			cwd: "/work/repo",
+			env: { HOME: "/home/u", PI_HOME: "/opt/pi" },
+		}),
+		"paseo-team-lead",
+	);
+	// Windows: backslashes, and USERPROFILE rather than HOME.
+	assert.equal(
+		packSkillFromPath("C:\\Users\\u\\.claude\\skills\\paseo-team-lead\\SKILL.md", {
+			cwd: "C:\\work",
+			env: { USERPROFILE: "C:\\Users\\u" },
+		}),
+		"paseo-team-lead",
+	);
+
+	// THE case this must not get wrong: a Peer assigned to edit the Lead skill
+	// in a repository checkout — this repo is one, and editing that file is
+	// ordinary work — has to be able to read it. What the gate withholds is
+	// loading the INSTALLED copy as a procedure to follow.
+	assert.equal(at("skills/paseo-team-lead/SKILL.md"), null, "a repo checkout is not an install");
+	assert.equal(at("/work/repo/skills/paseo-team-lead/SKILL.md"), null);
+	assert.equal(
+		skillBlockReason("peer", at("skills/paseo-team-lead/SKILL.md")),
+		null,
+		"editing the skill in a checkout is never blocked",
+	);
+
+	// A directory, not a file inside the package: listing is not loading.
+	assert.equal(at("/home/u/.pi/agent/skills/paseo-team-lead"), null);
+	assert.equal(at("/home/u/.pi/agent/skills"), null);
+	// Somebody else's skill in the same installed directory.
+	assert.equal(at("/home/u/.pi/agent/skills/my-own-skill/SKILL.md"), null);
+	assert.equal(at("docs/claude-runtime.md"), null);
+	assert.equal(at(undefined as unknown as string), null);
+}
+
+console.log("[paseo-team] skill admission tests passed");
+
+// --- the Pi adapter's WIRING, not just its rules -----------------------------
+//
+// Coverage put a number on a gap the mutation harness then proved: the rule
+// modules sit at ~98%, while extensions/paseo-team-policy.ts — the file that
+// decides which rule runs, on which argument — sat at 48%, and three mutations
+// to its wiring passed the entire suite. All of them are the same failure: a
+// rule that exists, is correct, is unit-tested, and is never called.
+//
+// These drive the REAL extension factory through the stub, so deleting a call
+// site fails here even when the function it calls is perfect.
+
+{
+	const prevRole = process.env.PASEO_PI_ROLE;
+
+	// Asserted against the REAL prompt bytes rather than a stub directory.
+	// `loadRolePrompt` resolves and memoises the prompts directory when
+	// policy-core is first imported, which is long before any test could point
+	// it somewhere else — and the stronger claim is the one worth making
+	// anyway: the contract this release actually ships is the contract the
+	// model receives, byte for byte.
+	const shippedPrompt = (role: string) =>
+		readFileSync(new URL(`../prompts/${role}.md`, import.meta.url), "utf8");
+
+	try {
+		// 1. The role prompt reaches the system prompt.
+		//
+		// This is the single most consequential thing the adapter does, and the
+		// most silent when it stops: a seat with no role contract looks exactly
+		// like a healthy one — same tools, same logs, same version — right up
+		// until it does something no role is allowed to do.
+		for (const role of ["lead", "peer", "supervisor"] as const) {
+			process.env.PASEO_PI_ROLE = role;
+			const { piStub, handlers } = makePiStub(["read", "bash"]);
+			(await loadFreshExtension(`wiring-prompt-${role}`))(piStub);
+			const result = (await requireHandler(handlers, "before_agent_start")({
+				prompt: "do the thing",
+				systemPrompt: "BASE PROMPT",
+			})) as { systemPrompt?: string } | undefined;
+			assert.ok(result?.systemPrompt, `${role}: before_agent_start returned no system prompt`);
+			assert.ok(
+				result.systemPrompt.includes(shippedPrompt(role)),
+				`${role}: the shipped role contract never reached the system prompt`,
+			);
+			assert.match(result.systemPrompt, /BASE PROMPT/, `${role}: the base prompt was dropped`);
+			assert.match(result.systemPrompt, /## Paseo Team Role/, `${role}: contract not labelled`);
+		}
+
+		// 2. The skill admission gate is wired to the read path.
+		//
+		// pi has no `skill` tool: reading the installed SKILL.md IS loading it.
+		// skillBlockReason being correct buys nothing if tool_call never asks it.
+		{
+			const prevHome = process.env.HOME;
+			const fakeHome = mkdtempSync(join(tmpdir(), "pst-wiring-home-"));
+			process.env.HOME = fakeHome;
+			process.env.PASEO_PI_ROLE = "peer";
+			try {
+				const { piStub, handlers } = makePiStub(["read", "bash"]);
+				(await loadFreshExtension("wiring-skill"))(piStub);
+				const toolCall = requireHandler(handlers, "tool_call");
+
+				const installedLeadSkill = join(
+					fakeHome, ".pi", "agent", "skills", "paseo-team-lead", "SKILL.md",
+				);
+				const blocked = (await toolCall({
+					toolName: "read",
+					input: { path: installedLeadSkill },
+				})) as { block?: boolean; reason?: string } | undefined;
+				assert.equal(blocked?.block, true, "a Peer must not load the Lead procedure");
+				assert.match(String(blocked?.reason), /not admitted for the peer/);
+
+				// The same file in a repository checkout is ordinary work, and every
+				// other read stays untouched — a gate that eats normal reads would
+				// be found immediately, which is why it has to be asserted here.
+				for (const path of ["skills/paseo-team-lead/SKILL.md", "README.md"]) {
+					assert.equal(
+						await toolCall({ toolName: "read", input: { path } }),
+						undefined,
+						`read of ${path} must not be blocked`,
+					);
+				}
+			} finally {
+				if (prevHome === undefined) delete process.env.HOME;
+				else process.env.HOME = prevHome;
+				rmSync(fakeHome, { recursive: true, force: true });
+			}
+		}
+
+		// 3. The Peer bash guard is wired.
+		//
+		// Driving Paseo from the shell is the way around the whole tool policy,
+		// so callsPaseoCli not being CALLED is worth more than callsPaseoCli
+		// being wrong.
+		{
+			process.env.PASEO_PI_ROLE = "peer";
+			const { piStub, handlers } = makePiStub(["read", "bash"]);
+			(await loadFreshExtension("wiring-bash"))(piStub);
+			const toolCall = requireHandler(handlers, "tool_call");
+			const blocked = (await toolCall({
+				toolName: "bash",
+				input: { command: "paseo agent create --role peer" },
+			})) as { block?: boolean; reason?: string } | undefined;
+			assert.equal(blocked?.block, true, "a Peer must not drive the Paseo CLI from bash");
+			assert.match(String(blocked?.reason), /DEPENDENCY_REQUEST/);
+			assert.equal(
+				await toolCall({ toolName: "bash", input: { command: "npm test" } }),
+				undefined,
+				"an ordinary command must still run",
+			);
+		}
+	} finally {
+		if (prevRole === undefined) delete process.env.PASEO_PI_ROLE;
+		else process.env.PASEO_PI_ROLE = prevRole;
+	}
+}
+
+console.log("[paseo-team] pi adapter wiring tests passed");
+

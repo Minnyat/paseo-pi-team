@@ -1,0 +1,74 @@
+[
+ {
+  "id": "preflight: --strict no longer fails on drift (REAL defect #3)",
+  "file": "scripts/preflight.mjs",
+  "from": "\t\t\tstrictCheck(\n\t\t\t\t\"install-drift\",\n\t\t\t\t`${state.drift.length} file(s) differ",
+  "to": "\t\t\twarn(\n\t\t\t\t\"install-drift\",\n\t\t\t\t`${state.drift.length} file(s) differ"
+ },
+ {
+  "id": "preflight: invalid protocol downgraded to a warning",
+  "file": "scripts/preflight.mjs",
+  "from": "\t\telse if (state.state === \"invalid\" || state.state === \"unreadable\") {\n\t\t\tfail(\"workspace-protocol\", detail);",
+  "to": "\t\telse if (state.state === \"invalid\" || state.state === \"unreadable\") {\n\t\t\twarn(\"workspace-protocol\", detail);"
+ },
+ {
+  "id": "preflight: protocol check never runs at all",
+  "file": "scripts/preflight.mjs",
+  "from": "\tif (inRepo.ok && inRepo.stdout.trim() === \"true\" && top.ok) {",
+  "to": "\tif (false) {"
+ },
+ {
+  "id": "preflight: install-drift check never runs at all",
+  "file": "scripts/preflight.mjs",
+  "from": "\t\tconst state = installDrift();\n\t\tif (state.ok) {",
+  "to": "\t\tconst state = { ok: true, drift: [], unchecked: [], installed: true };\n\t\tif (state.ok) {"
+ },
+ {
+  "id": "drift: installerSupportFiles fails OPEN to [] (REAL defect)",
+  "file": "cli/lib/install-drift.mjs",
+  "from": "\treturn files.length > 0 ? files : null;",
+  "to": "\treturn files;"
+ },
+ {
+  "id": "drift: `installed` keyed on pi adapter only (REAL defect #5)",
+  "file": "cli/lib/install-drift.mjs",
+  "from": "\t\tinstalled:\n\t\t\texistsSync(policyInstalled) ||",
+  "to": "\t\tinstalled:\n\t\t\texistsSync(policyInstalled) && true ||"
+ },
+ {
+  "id": "protocol: conflict needs BOTH markers (REAL over-correction)",
+  "file": "cli/lib/workspace-protocol.mjs",
+  "from": "const CONFLICT_RE = /^(?:<{7}|>{7})(?:\\s|$)/m;",
+  "to": "const CONFLICT_RE = /^(?:<{7}[\\s\\S]*^>{7})/m;"
+ },
+ {
+  "id": "claude: Grep/Glob `path` key no longer read (bypass)",
+  "file": "extensions/paseo-team-core/claude-policy.ts",
+  "from": "\tfor (const key of [\"file_path\", \"path\", \"notebook_path\"]) {",
+  "to": "\tfor (const key of [\"file_path\"]) {"
+ },
+ {
+  "id": "skills: namespaced name bypasses the gate",
+  "file": "extensions/paseo-team-core/policy-core.ts",
+  "from": "\tconst colon = trimmed.lastIndexOf(\":\");\n\treturn colon < 0 ? trimmed : trimmed.slice(colon + 1);",
+  "to": "\treturn trimmed;"
+ },
+ {
+  "id": "drift: CRLF tolerance removed (Windows false positives)",
+  "file": "cli/lib/install-drift.mjs",
+  "from": "\tconst normalize = (path) => readFileSync(path, \"utf8\").replace(/\\r\\n/g, \"\\n\");",
+  "to": "\tconst normalize = (path) => readFileSync(path, \"utf8\");"
+ },
+ {
+  "id": "uninstall: claude skills never removed",
+  "file": "cli/lib/uninstall.mjs",
+  "from": "\t\t\tskills: result.skills,",
+  "to": "\t\t\tskills: { status: \"missing\", skills: [] },"
+ },
+ {
+  "id": "budget: every budget raised 10x (ratchet disabled)",
+  "file": "test/instruction-budget.test.mjs",
+  "from": "const ROLE_PROMPT_BUDGET = 24 * KIB;",
+  "to": "const ROLE_PROMPT_BUDGET = 240 * KIB;"
+ }
+]

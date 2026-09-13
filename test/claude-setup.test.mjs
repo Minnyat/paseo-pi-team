@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { installDrift } from "../cli/lib/install-drift.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,6 +33,13 @@ import {
 	removeMcpServer,
 	uninstall,
 	verify,
+	claudeSkillsDir,
+	installSkills,
+	missingSkills,
+	packSkillSources,
+	removeSkills,
+	skillIsOurs,
+	SKILL_OWNER_MARKER,
 	LEGACY_BROWSER_MCP_SERVER,
 	isOwnBrowserMcpServer,
 	removeBrowserMcpServer,
@@ -936,6 +944,210 @@ function applySandbox(tag) {
 			`${label}: must never spell out the restart invocation`,
 		);
 	}
+}
+
+// --- Skills: the Claude Lead can finally load the procedure its prompt names --
+//
+// Before this, skills were copied only to ~/.pi/agent/skills/, which Claude
+// Code does not read: `Skill(paseo-team-lead)` was allowed and found nothing.
+{
+	const skillsHome = mkdtempSync(join(tmpdir(), "paseo-claude-skills-"));
+	const skillEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: join(skillsHome, ".claude"),
+		PASEO_TEAM_CLAUDE_USER_CONFIG: join(skillsHome, ".claude.json"),
+		PASEO_CONFIG_JSON: join(skillsHome, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: skillsHome,
+	};
+	const skillsDir = claudeSkillsDir(skillEnv);
+	assert.equal(skillsDir, join(skillsHome, ".claude", "skills"));
+
+	const shipped = packSkillSources().map((source) => source.name).sort();
+	assert.deepEqual(shipped, ["paseo-ocr-reviewer", "paseo-team-lead"]);
+
+	// Before install, verify must call this out — a Lead without its procedure
+	// is an incomplete install, not a cosmetic gap.
+	assert.deepEqual(missingSkills(skillEnv).sort(), shipped);
+
+	const installed = installSkills(skillEnv);
+	assert.equal(installed.status, "updated");
+	for (const name of shipped) {
+		assert.ok(
+			existsSync(join(skillsDir, name, "SKILL.md")),
+			`${name}/SKILL.md must land where Claude Code reads skills`,
+		);
+	}
+	assert.deepEqual(missingSkills(skillEnv), []);
+
+	// Re-install replaces the package rather than merging into it: a file from
+	// an older release is a half-version of a procedure that reads as current.
+	writeFileSync(join(skillsDir, "paseo-team-lead", "STALE.md"), "old");
+	installSkills(skillEnv);
+	assert.ok(!existsSync(join(skillsDir, "paseo-team-lead", "STALE.md")));
+
+	// A skill the user owns under a DIFFERENT name is never touched. The
+	// same-named case is the one that matters and it gets its own block below —
+	// this assertion alone once stood for the broader claim, and the broader
+	// claim was false.
+	mkdirSync(join(skillsDir, "my-own-skill"), { recursive: true });
+	writeFileSync(join(skillsDir, "my-own-skill", "SKILL.md"), "mine");
+	installSkills(skillEnv);
+	assert.ok(existsSync(join(skillsDir, "my-own-skill", "SKILL.md")));
+
+	const removed = removeSkills(skillEnv);
+	assert.equal(removed.status, "updated");
+	assert.deepEqual(removed.skills.sort(), shipped);
+	for (const name of shipped) assert.ok(!existsSync(join(skillsDir, name)));
+	assert.ok(
+		existsSync(join(skillsDir, "my-own-skill", "SKILL.md")),
+		"uninstall removes only the packages this pack ships",
+	);
+
+	// Idempotent, and never creates the directory it was asked to clean.
+	assert.equal(removeSkills(skillEnv).status, "unchanged");
+	const neverInstalled = {
+		...skillEnv,
+		CLAUDE_CONFIG_DIR: join(skillsHome, "absent"),
+	};
+	assert.equal(removeSkills(neverInstalled).status, "missing");
+	assert.ok(!existsSync(claudeSkillsDir(neverInstalled)));
+
+	// verify reports a missing skill as missing, and stops once installed.
+	assert.ok(verify(skillEnv).missing.some((item) => item.startsWith("skill:")));
+	installSkills(skillEnv);
+	assert.deepEqual(verify(skillEnv).missingSkills, []);
+
+	rmSync(skillsHome, { recursive: true, force: true });
+}
+
+// --- A same-named skill the user wrote is theirs, not ours ------------------
+//
+// `~/.claude/skills/` is the user's directory and the names this pack ships are
+// ordinary English. Whoever created `paseo-team-lead/` there first owns it, and
+// nothing in a directory's contents says who that was: a user's own skill has a
+// SKILL.md exactly like ours. Install used to rmSync the destination and
+// uninstall used to delete anything with a SKILL.md in it, so both destroyed
+// that work silently. The marker is the only thing that authorises a delete.
+{
+	const squatHome = mkdtempSync(join(tmpdir(), "paseo-claude-skill-squat-"));
+	const squatEnv = {
+		...process.env,
+		CLAUDE_CONFIG_DIR: join(squatHome, ".claude"),
+		PASEO_TEAM_CLAUDE_USER_CONFIG: join(squatHome, ".claude.json"),
+		PASEO_CONFIG_JSON: join(squatHome, "paseo-config.json"),
+		PST_TEAM_CONFIG_DIR: squatHome,
+	};
+	const skillsDir = claudeSkillsDir(squatEnv);
+	const [taken, free] = packSkillSources()
+		.map((source) => source.name)
+		.sort();
+
+	// The user got there first, under a name this pack also ships.
+	mkdirSync(join(skillsDir, taken), { recursive: true });
+	writeFileSync(join(skillsDir, taken, "SKILL.md"), "my own procedure");
+	writeFileSync(join(skillsDir, taken, "notes.md"), "months of work");
+
+	const installed = installSkills(squatEnv);
+
+	// Install refuses that one by name and still does its job for the rest —
+	// a name collision is not a reason to leave the other skills uninstalled.
+	assert.equal(installed.status, "conflict");
+	assert.deepEqual(installed.conflicts, [taken]);
+	assert.deepEqual(installed.skills, [free]);
+	assert.equal(
+		readFileSync(join(skillsDir, taken, "SKILL.md"), "utf8"),
+		"my own procedure",
+		"install must not overwrite a same-named skill it did not create",
+	);
+	assert.ok(existsSync(join(skillsDir, taken, "notes.md")));
+	assert.ok(skillIsOurs(join(skillsDir, free)));
+	assert.ok(!skillIsOurs(join(skillsDir, taken)));
+
+	// And it is reported missing, because it IS missing: the role prompt sends
+	// the Lead to our procedure, and somebody else's file under that name is a
+	// wrong answer rather than a present one.
+	assert.deepEqual(missingSkills(squatEnv), [taken]);
+
+	// Uninstall takes back only what it wrote.
+	const removed = removeSkills(squatEnv);
+	assert.deepEqual(removed.skills, [free]);
+	assert.equal(
+		readFileSync(join(skillsDir, taken, "SKILL.md"), "utf8"),
+		"my own procedure",
+		"uninstall must not delete a same-named skill this pack did not install",
+	);
+	assert.ok(!existsSync(join(skillsDir, free)));
+
+	// An install from before the marker existed is still ours, proved by bytes:
+	// its SKILL.md is the copy this release ships. Marker-only ownership would
+	// have quietly stopped uninstalling the packages the pack itself put there
+	// on every host that upgraded into this version.
+	rmSync(join(skillsDir, taken), { recursive: true, force: true });
+	rmSync(join(skillsDir, free), { recursive: true, force: true });
+	const shippedLead = packSkillSources().find((source) => source.name === free);
+	mkdirSync(join(skillsDir, free), { recursive: true });
+	writeFileSync(
+		join(skillsDir, free, "SKILL.md"),
+		readFileSync(join(shippedLead.path, "SKILL.md")),
+	);
+	assert.ok(skillIsOurs(join(skillsDir, free)), "a byte-identical legacy install is ours");
+	assert.deepEqual(removeSkills(squatEnv).skills, [free]);
+	assert.ok(!existsSync(join(skillsDir, free)));
+
+	// Edit one byte and it is the user's again — an edited procedure is exactly
+	// the one worth not deleting.
+	mkdirSync(join(skillsDir, free), { recursive: true });
+	writeFileSync(join(skillsDir, free, "SKILL.md"), "installed by an older version");
+	assert.deepEqual(installSkills(squatEnv).conflicts, [free]);
+	assert.ok(
+		!removeSkills(squatEnv).skills.includes(free),
+		"a directory installed before the marker existed is not ours to delete",
+	);
+	assert.equal(
+		readFileSync(join(skillsDir, free, "SKILL.md"), "utf8"),
+		"installed by an older version",
+	);
+
+	// The marker is ours and must not be reported back to the user as drift.
+	rmSync(join(skillsDir, free), { recursive: true, force: true });
+	installSkills(squatEnv);
+	assert.ok(existsSync(join(skillsDir, free, SKILL_OWNER_MARKER)));
+	const drift = installDrift({ env: squatEnv });
+	assert.ok(
+		!drift.drift.some(
+			(item) => item.kind === "claude-skill" && item.verdict === "unexpected",
+		),
+		"the ownership marker is not drift",
+	);
+
+	rmSync(squatHome, { recursive: true, force: true });
+}
+
+// --- the provider ledger lives where the rest of the pack's config does ------
+//
+// It used to resolve the directory itself, honouring only PST_TEAM_CONFIG_DIR,
+// so on a PASEO_TEAM_HOME-only host the ledger landed outside the directory
+// every other consumer now uses — and this ledger is what tells an uninstall
+// which providers were ours to remove. A ledger nobody finds is providers
+// nobody cleans up.
+{
+	const dirA = join(home, "cfg-a");
+	const dirB = join(home, "cfg-b");
+	assert.equal(
+		claudeProviderLedgerPath({ PST_TEAM_CONFIG_DIR: dirA }),
+		join(dirA, "claude-provider-ledger.json"),
+	);
+	assert.equal(
+		claudeProviderLedgerPath({ PASEO_TEAM_HOME: dirB }),
+		join(dirB, "claude-provider-ledger.json"),
+		"the legacy alias must reach the same directory as everything else",
+	);
+	assert.equal(
+		claudeProviderLedgerPath({ PST_TEAM_CONFIG_DIR: dirA, PASEO_TEAM_HOME: dirB }),
+		join(dirA, "claude-provider-ledger.json"),
+		"the documented name wins, exactly as it does in lib-common",
+	);
+	assert.match(claudeProviderLedgerPath({}), /\.paseo-pi-team[\/\\]claude-provider-ledger\.json$/);
 }
 
 rmSync(home, { recursive: true, force: true });

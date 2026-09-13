@@ -3,6 +3,7 @@ import {
 	ROUTES,
 	bearerToken,
 	createCache,
+	isCacheable,
 	handleApi,
 	isAllowedHost,
 	startServer,
@@ -306,6 +307,55 @@ assert.equal(bearerToken({ headers: {} }), null);
 		(err) => err.code === "WEB_PORT_BUSY" && /already in use/.test(err.message) && /--port/.test(err.message),
 	);
 	await pinnedBlocker.close();
+}
+
+// --- a zero exit is not the same question as a successful answer -------------
+//
+// This cache says it stores only successful answers, "because caching a
+// failure would keep showing a stale error after the daemon came back". It
+// decided that on the exit code alone, and `graph` is where the two came
+// apart: collectGraph deliberately reports a fault AS DATA — ok:false with a
+// degraded list, exit 0 — so this server can still render a page that explains
+// itself. Making it exit non-zero instead would take the CLI_FAILED path, which
+// returns 502 and never parses the body, so the explaining page is exactly what
+// would be lost. The body therefore gets a say in what is worth remembering.
+{
+	const ok = (body) => ({ exitCode: 0, stdout: JSON.stringify(body), stderr: "" });
+
+	assert.equal(isCacheable(ok({ ok: true, agents: [] })), true);
+	assert.equal(isCacheable(ok({ ok: false, degraded: [{ reason: "LIST_FAILED" }] })), false);
+	// A body with no `ok` at all is not claiming failure — `status`, `config
+	// read` and the prompt/skill bodies have none.
+	assert.equal(isCacheable(ok({ paths: {} })), true);
+	assert.equal(isCacheable({ exitCode: 0, stdout: "", stderr: "" }), true);
+	// Non-zero still loses, whatever the body says.
+	assert.equal(isCacheable({ exitCode: 3, stdout: JSON.stringify({ ok: true }) }), false);
+	assert.equal(isCacheable({ exitCode: null, stdout: "" }), false);
+	// An unparseable body is heading for a 502 anyway; remembering it would
+	// serve that 502 from cache for the whole window.
+	assert.equal(isCacheable({ exitCode: 0, stdout: "<html>login</html>" }), false);
+
+	// And the cache honours it: a degraded graph is answered, then re-fetched.
+	const cache = createCache();
+	let calls = 0;
+	const failing = async () => {
+		calls += 1;
+		return ok({ ok: false, degraded: [{ reason: "LIST_FAILED" }] });
+	};
+	assert.equal((await cache.run("graph", 60_000, failing, "graph")).exitCode, 0);
+	await cache.run("graph", 60_000, failing, "graph");
+	assert.equal(calls, 2, "a body reporting its own failure must not be served from cache");
+
+	// A healthy one still caches, or this would have cost the cache its job.
+	let good = 0;
+	const healthy = async () => {
+		good += 1;
+		return ok({ ok: true, nodes: [] });
+	};
+	await cache.run("graph-ok", 60_000, healthy, "graph");
+	const second = await cache.run("graph-ok", 60_000, healthy, "graph");
+	assert.equal(good, 1, "a successful answer is still remembered");
+	assert.equal(second.cached, true);
 }
 
 console.log("webui-server tests passed");

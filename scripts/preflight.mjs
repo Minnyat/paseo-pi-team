@@ -19,6 +19,8 @@
 
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+// Only for the ONE path that is a historical constant rather than a resolved
+// location: the pre-unification default of the pack's config directory.
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +30,20 @@ import {
 	verify as verifyClaudeSetup,
 } from "./claude-setup.mjs";
 import { orchestrationPreferencesNotice } from "./lib-common.mjs";
+// Lives in cli/lib because that is where the pack's path knowledge lives
+// (config-walker.mjs). preflight.mjs is never copied into the installed support
+// directory, so this relative path always resolves to the package it shipped in
+// — which is the whole point: one side of the comparison must BE this release.
+import { installDrift, summarizeDrift } from "../cli/lib/install-drift.mjs";
+// The SAME path resolution the installers use. Not `homedir()`: install.sh and
+// install.ps1 both honour PI_HOME and PI_CODING_AGENT_DIR, and preflight used
+// to hardcode ~/.pi/agent — so on a host with either override set it reported
+// `extension`, `policy-core` and `role-prompts` as missing on a correctly
+// installed pack, while `install-drift` (which already resolved through the
+// walker) reported the same host as fine. Two halves of one command
+// disagreeing, and the failing half naming a path the installer never wrote to.
+import * as cw from "../cli/lib/config-walker.mjs";
+import { describeProtocolState, protocolState } from "../cli/lib/workspace-protocol.mjs";
 import {
 	RoutingError,
 	buildProviderInventory,
@@ -286,9 +302,7 @@ if (wantPi) {
 		);
 	} else {
 		const pkgPath = join(
-			homedir(),
-			".pi",
-			"agent",
+			cw.agentDir(),
 			"npm",
 			"node_modules",
 			"pi-mcp-adapter",
@@ -323,13 +337,13 @@ if (wantPi) {
 	// readJsonOrNull returns null for "absent" and undefined for "present but
 	// unreadable"; neither is evidence that the browser is off, and the default
 	// when the key is missing is enabled.
-	const daemonConfig = readJsonOrNull(join(homedir(), ".paseo", "config.json"));
+	const daemonConfig = readJsonOrNull(cw.paseoConfigPath());
 	const browserToolsOff =
 		Boolean(daemonConfig) && daemonConfig?.daemon?.browserTools?.enabled === false;
 	if (browserToolsOff)
 		fail(
 			"paseo-browser-tools",
-			'daemon.browserTools.enabled is false in ~/.paseo/config.json — no seat has a browser on either runtime. Set it to true (`pteam config write paseo`) or accept that BROWSER_MCP_AUTHORITY grants nothing.',
+			`daemon.browserTools.enabled is false in ${cw.paseoConfigPath()} — no seat has a browser on either runtime. Set it to true (\`pteam config write paseo\`) or accept that BROWSER_MCP_AUTHORITY grants nothing.`,
 		);
 	else pass("paseo-browser-tools", "daemon.browserTools enabled (default)");
 }
@@ -337,20 +351,14 @@ if (wantPi) {
 // --- role-pack installation ---------------------------------------------------
 
 if (wantPi) {
-	const extPath = join(
-		homedir(),
-		".pi",
-		"agent",
-		"extensions",
-		"paseo-team-policy.ts",
-	);
+	const extPath = cw.policyExtensionPath();
 	if (existsSync(extPath)) pass("extension", extPath);
 	else fail("extension", `${extPath} missing → run scripts/install.{sh,ps1}`);
 }
 {
 	// Both runtimes read the SAME policy core and the SAME role prompts, so
 	// these are checked regardless of family.
-	const coreDir = join(homedir(), ".pi", "agent", "extensions", "paseo-team-core");
+	const coreDir = join(cw.extensionsDir(), "paseo-team-core");
 	// Either extension satisfies the check: `.ts` is what pi loads, `.js` is the
 	// built sibling, and an install carrying only one of them is still complete.
 	const coreModule = (name) =>
@@ -407,12 +415,67 @@ if (wantClaude) {
 	}
 }
 {
-	const promptsDir = join(homedir(), ".pi", "agent", "extensions", "prompts");
-	const missing = ["lead", "peer", "supervisor"].filter(
-		(r) => !existsSync(join(promptsDir, `${r}.md`)),
-	);
+	const promptsDir = cw.promptsDir();
+	const missing = cw.ROLE_PROMPTS.filter((r) => !existsSync(cw.rolePromptPath(r)));
 	if (missing.length === 0) pass("role-prompts", promptsDir);
 	else fail("role-prompts", `missing prompts: ${missing.join(", ")}`);
+}
+
+// --- installed copies vs THIS release ----------------------------------------
+//
+// Every check above asks whether an artifact is present and usable. None of
+// them asks whether it is the CURRENT one, and a policy core from three
+// releases ago is present, loads, and exports the same API. `pteam update`
+// already tells the user to run this command "to confirm the installed copies
+// match this version"; this is the check that makes that true.
+//
+// A warning, not a failure, except in --strict: drift means the rules a running
+// agent enforces are not the rules this CLI reports, which is exactly the
+// unverifiable state --strict exists to reject.
+{
+	try {
+		const state = installDrift();
+		if (state.ok) {
+			pass("install-drift", "installed copies match this release");
+		} else if (!state.installed) {
+			// Never installed for this user. The extension/prompt/policy-core
+			// checks above already say so; repeating it as a file listing helps
+			// nobody, so name the remedy once. Keyed on the pi adapter's absence
+			// rather than on "every verdict is missing", or a complete install
+			// short one new file would be reported as no install at all — and the
+			// filename that would fix it suppressed.
+			warn(
+				"install-drift",
+				"the pack is not installed for this user → run scripts/install.{sh,ps1} (or `pteam install`)",
+			);
+		} else {
+			// A prompt or skill can differ because the operator ran
+			// `pteam prompts write` / `pteam skills write`, both of which
+			// deliberately edit the installed copy. It is still drift — the rules
+			// a running agent enforces are not this release's — so --strict still
+			// rejects it, which is the point of a mode that gates routing. What
+			// changes is the remedy: `pteam install` OVERWRITES that edit, and a
+			// check that tells someone to destroy their own customization without
+			// saying so is worse than one that says nothing.
+			const onlyCustomizable = state.drift.every(
+				(d) => (d.kind === "prompt" || d.kind === "skill") && d.verdict === "changed",
+			);
+			const parts = [...summarizeDrift(state.drift), ...state.unchecked];
+			strictCheck(
+				"install-drift",
+				`${state.drift.length} file(s) differ from this release: ${parts.join(" | ")} — ${
+					onlyCustomizable
+						? "re-run `pteam install` to match the release, which OVERWRITES a local `pteam prompts write` / `pteam skills write` edit"
+						: "re-run `pteam install`"
+				}`,
+			);
+		}
+	} catch (error) {
+		strictCheck(
+			"install-drift",
+			`could not compare installed copies: ${String(error?.message ?? error).slice(0, 160)}`,
+		);
+	}
 }
 
 // --- role providers + model inventory -----------------------------------------
@@ -546,7 +609,7 @@ if (!existsSync(routesPath)) {
 
 // Per-model thinkingLevelMap from ~/.pi/agent/models.json (level null = unsupported).
 function piModelLevelUnreachable(piProvider, modelId, level) {
-	const modelsJsonPath = join(homedir(), ".pi", "agent", "models.json");
+	const modelsJsonPath = join(cw.agentDir(), "models.json");
 	if (!existsSync(modelsJsonPath)) return false;
 	try {
 		const data = JSON.parse(readFileSync(modelsJsonPath, "utf8"));
@@ -597,7 +660,7 @@ if (routing && daemonUp && !skipModels) {
 			if (clamped) {
 				strictCheck(
 					`route:${modelClass}`,
-					`model ${route.model} has thinkingLevelMap.${route.thinking}=null in ~/.pi/agent/models.json — pi will CLAMP the level silently; pick a supported level or another model`,
+					`model ${route.model} has thinkingLevelMap.${route.thinking}=null in ${join(cw.agentDir(), "models.json")} — pi will CLAMP the level silently; pick a supported level or another model`,
 				);
 			} else {
 				pass(
@@ -622,13 +685,16 @@ if (routing && daemonUp && !skipModels) {
 
 if (existsSync(legacyHostsPath)) {
 	warn(
-		"hosts-config",
+		"hosts-config:legacy-file",
 		`${legacyHostsPath} is a REMOVED legacy format and is ignored — move its entries into ${clusterPath} (see docs/multi-host.md) and delete the file`,
 	);
 }
 if (process.argv.includes("--hosts")) {
 	warn(
-		"hosts-config",
+		// A distinct id: both conditions can hold at once, and two checks
+		// sharing one id breaks every consumer that keys the report by id —
+		// including this file's own uniqueness test.
+		"hosts-config:removed-flag",
 		"--hosts was removed with the legacy host registry; pass --cluster <path> instead",
 	);
 }
@@ -652,17 +718,40 @@ function cmdQuote(value) {
 	}
 	return `"${value}"`;
 }
-/** Run a paseo CLI command. On Windows (.cmd shims) every argv element is
- * quoted through cmdQuote; endpoint values carry secrets so they ONLY ever
- * travel inside argv — they are logged nowhere. */
+/**
+ * Run a paseo CLI command against a remote endpoint.
+ *
+ * On Windows (.cmd shims) every argv element is quoted through cmdQuote.
+ *
+ * The redaction is the load-bearing part, and it belongs HERE rather than at
+ * each call site. An endpoint is a pairing offer — a secret — and it travels
+ * inside argv, which is the safe channel. But a failing `execFileSync` puts the
+ * whole command line into `error.message` ("Command failed: paseo ls --host
+ * <secret> --json"), and preflight reported that verbatim when a remote daemon
+ * was unreachable. So the file that opens with "Never prints secret values"
+ * printed one on the single most likely failure of the remote lane, straight
+ * into output that gets pasted into issues and chat logs.
+ *
+ * scripts/remote-paseo.mjs already redacts exactly this, which is the point:
+ * the rule was known and implemented once, and the second place running the
+ * same command with the same secret did not inherit it. Doing it inside the
+ * helper makes every consumer safe by construction instead of by remembering.
+ */
 function remoteExec(argv, timeoutMs = 60000) {
-	if (NEEDS_SHELL) {
-		return tryExecRaw(
-			[argv[0], ...argv.slice(1).map(cmdQuote)].join(" "),
-			timeoutMs,
-		);
-	}
-	return tryExec(argv[0], argv.slice(1), timeoutMs);
+	const hostAt = argv.indexOf("--host");
+	const secret = hostAt >= 0 ? argv[hostAt + 1] : undefined;
+	const redact = (text) =>
+		secret && typeof text === "string"
+			? text.split(secret).join("<endpoint-value-redacted>")
+			: text;
+	const result = NEEDS_SHELL
+		? tryExecRaw([argv[0], ...argv.slice(1).map(cmdQuote)].join(" "), timeoutMs)
+		: tryExec(argv[0], argv.slice(1), timeoutMs);
+	return {
+		...result,
+		stdout: redact(result.stdout),
+		...(result.error === undefined ? {} : { error: redact(result.error) }),
+	};
 }
 
 function tryExecRaw(commandString, timeoutMs) {
@@ -1010,6 +1099,64 @@ if (cluster) {
 }
 
 // --- repository state (if run inside a repo) ------------------------------------
+
+// --- the pack's config directory, after the two-variable unification ---------
+//
+// The pack used to resolve this directory twice under two different variable
+// names, and unifying it necessarily MOVES one side: a host that set
+// PST_TEAM_CONFIG_DIR for the CLI while leaving routing and Claude session
+// state in the default ~/.paseo-pi-team now has every reader following the
+// override. No precedence order avoids that — the whole point is that the two
+// halves stop disagreeing — so the migration is reported instead of guessed
+// at, the same way the removed hosts.local.json format is.
+//
+// Reported only when there is something to move: the resolved directory is not
+// the default AND the default still holds pack files the resolved one does not.
+{
+	const resolved = cw.teamConfigDir();
+	const legacyDefault = join(homedir(), ".paseo-pi-team");
+	const PACK_FILES = [
+		"model-routing.local.json",
+		"cluster-routing.local.json",
+		"seat-providers.json",
+		"claude-provider-ledger.json",
+		"claude-sessions",
+	];
+	if (resolved !== legacyDefault && existsSync(legacyDefault)) {
+		const stranded = PACK_FILES.filter(
+			(name) =>
+				existsSync(join(legacyDefault, name)) && !existsSync(join(resolved, name)),
+		);
+		if (stranded.length > 0) {
+			warn(
+				"team-config-dir",
+				`${resolved} is the pack's config directory (PST_TEAM_CONFIG_DIR / PASEO_TEAM_HOME), but ${legacyDefault} still holds ${stranded.join(", ")} and the resolved directory does not. Earlier releases read routing and Claude session state from the default even when the override was set; move those files across. Session state is fail-closed, so a Peer whose brief is left behind goes read-only rather than unrestricted.`,
+			);
+		} else pass("team-config-dir", resolved);
+	} else pass("team-config-dir", resolved);
+}
+
+// --- the repository tactics layer --------------------------------------------
+//
+// Only meaningful inside a repository, so it rides along with the repo checks
+// below rather than running on a bare host. `invalid` is the case worth the
+// code: a Lead reading a protocol with an unresolved merge conflict in it does
+// not get "no protocol", it gets both sides of the conflict as rules — and
+// until now nothing in the pack ever opened the file to notice.
+{
+	const inRepo = tryExec("git", ["rev-parse", "--is-inside-work-tree"]);
+	const top = tryExec("git", ["rev-parse", "--show-toplevel"]);
+	if (inRepo.ok && inRepo.stdout.trim() === "true" && top.ok) {
+		const state = protocolState(top.stdout.trim());
+		const detail = describeProtocolState(state);
+		if (state.state === "valid" && !state.legacy) pass("workspace-protocol", detail);
+		// Present but unusable is the one that must not read as "absent": the
+		// file is there, the Lead will open it, and what it finds is wrong.
+		else if (state.state === "invalid" || state.state === "unreadable") {
+			fail("workspace-protocol", detail);
+		} else warn("workspace-protocol", detail);
+	}
+}
 
 {
 	const repo = tryExec("git", ["rev-parse", "--is-inside-work-tree"]);

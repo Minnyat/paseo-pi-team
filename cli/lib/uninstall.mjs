@@ -102,8 +102,11 @@ export function removeClaudeIntegration() {
 			kind: "claude-integration",
 			settings: result.hooks,
 			mcp: result.mcp,
+			skills: result.skills,
 			status: result.ok
-				? [result.hooks.status, result.mcp.status].includes("updated")
+				? [result.hooks.status, result.mcp.status, result.skills.status].includes(
+						"updated",
+					)
 					? "removed"
 					: "missing"
 				: "failed",

@@ -58,7 +58,7 @@ paseo-pi-team/
 │   └── cluster-routing.example.json   # controller-local N-host contract template
 ├── templates/
 │   ├── TASK_BRIEF_V3.md               # canonical V3 task brief + parser rules
-│   └── WORKSPACE_PROTOCOL.example.md  # .orchestration/WORKSPACE_PROTOCOL.md for the target repo
+│   └── WORKSPACE_PROTOCOL.example.md  # root WORKSPACE_PROTOCOL.md for the target repo
 ├── prompts/
 │   ├── supervisor.md               # Governance Supervisor
 │   ├── lead.md                     # Project Lead (orchestration owner)
@@ -85,6 +85,8 @@ paseo-pi-team/
 │       ├── config-walker.mjs       # path resolution + atomic write with backup
 │       ├── paseo-bridge.mjs        # the only place that spawns `paseo` (argv, timeouts, fan-out)
 │       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
+│       ├── install-drift.mjs       # installed copies vs THIS release, byte for byte
+│       ├── workspace-protocol.mjs  # grade a target repo's WORKSPACE_PROTOCOL.md
 │       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
 ├── webui/
 │   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
@@ -116,6 +118,12 @@ paseo-pi-team/
 │   ├── watchdog.test.mjs           # stale-agent classification
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
+│   ├── instruction-budget.test.mjs # standing-instruction size ratchet
+│   ├── preflight.test.mjs          # which checks run, and at what severity
+│   ├── uninstall.test.mjs          # removes what install wrote, and nothing else
+│   ├── tools/mutate.mjs            # mutation harness: would these tests catch the bug?
+│   ├── workspace-protocol.test.mjs # protocol admission states + digest
+│   ├── install-drift.test.mjs      # installed copies vs this release
 │   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity
 │   ├── patch-paseo-mcp.test.mjs    # the MCP protocol-header patch for Paseo's bundled SDK
 │   ├── installer-contract.test.mjs # shipped files must exist and carry their dependencies
@@ -127,8 +135,11 @@ paseo-pi-team/
 │   └── fixtures/                   # fake CLIs (paseo, ocr) + version-pinned OCR output
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # original design
+    ├── claude-runtime.md           # Claude Code as the second runtime: hooks, MCP, install
+    ├── downstream-doctrine-review.md   # what Paseo's own Foundation does that we don't
     ├── model-routing.md            # the 4 model-routing layers, verified commands
     ├── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-supervisor-topology.md    # domains, clusters, and who may seat whom
     ├── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
 ```
@@ -555,6 +566,98 @@ source agent. `verify` reads `runtimeInfo` (never the stale creation-time
 Peers stay with the source: there is no reparent API, and `detach` is a Human
 action that leaves a Peer unable to escalate.
 
+## The workspace protocol
+
+`WORKSPACE_PROTOCOL.md` in the **root** of the repository being orchestrated is
+the repository tactics layer — the instruction source between the role contract
+(which this pack owns) and the assignment (which the Lead writes per task).
+`prompts/lead.md` makes reading it invariant 1. Readership is part of the
+contract: the Lead reads it in full before orchestrating, a Peer never does (the
+Lead extracts the relevant constraints into the V3 brief), and the Supervisor
+reads it only under a governance mandate to create, audit or update it.
+
+Copy [`templates/WORKSPACE_PROTOCOL.example.md`](templates/WORKSPACE_PROTOCOL.example.md)
+to get started, then:
+
+```bash
+pteam protocol status                  # grade the repo in the current directory
+pteam protocol status --path /some/repo
+```
+
+Four states, not a boolean:
+
+| State | Meaning |
+|---|---|
+| `valid` | present, versioned, no unresolved conflict — reported with a sha256 digest and any still-blank keys |
+| `missing` | no protocol; the Lead has no tactics layer |
+| `invalid` | present but not usable: blank, NUL bytes, an unresolved merge conflict (`<<<<<<<` or `>>>>>>>`; the ambiguous `=======` is deliberately not matched, since it is also a Markdown setext underline), or no `WORKSPACE_PROTOCOL_VERSION` |
+| `unreadable` | the path exists and cannot be read as a file |
+
+`invalid` is the state that earns the module. `missing` a Lead can act on; a
+protocol carrying an unresolved merge conflict is *worse* than absent, because
+the Lead opens it and reads both sides of the conflict as rules. Preflight fails
+on `invalid` and `unreadable` for that reason, and warns on `missing`.
+
+Blank recommended keys are reported, never fatal — the deep dive is explicit
+that a tight repo and a loose side project both get to write one, and a prose
+protocol is a legitimate protocol. The digest is recorded because it is what
+makes "did the protocol change since the Lead read it?" answerable at all.
+
+A protocol at the legacy `.orchestration/WORKSPACE_PROTOCOL.md` (where an older
+version of the template pointed) is still found, and reported AS legacy — the
+Lead reads the repository root, so telling someone their protocol is "missing"
+while it sits on disk is the least useful true statement available.
+
+This reports; it does not gate. Turning a missing protocol into a delegation
+blocker is a decision for whoever operates a fleet, not something a release
+should switch on underneath them.
+
+## Skill admission
+
+The pack ships two skills, and both land in a directory every seat on the
+machine can see. Role is a property of the **seat** — an environment variable
+Paseo sets on the agent process — not of the directory, so there is no per-role
+folder to install into: a Peer could open the Lead's orchestration procedure,
+and a Supervisor the review harness, purely because both were on disk.
+
+That is not an authority hole. Every tool those procedures need is already
+denied to the wrong role by the tool policy. It is an **attention** hole, and
+the expensive kind: a Peer that has read the orchestration procedure starts
+reasoning about topology and delegation instead of its own bounded task, and
+nothing in its output says where the drift came from.
+
+So the admission table is the third thing the two runtimes share, next to the
+tool policy and the brief parser — one table in `policy-core.ts`, two
+enforcement points:
+
+| Skill | Lead | Peer | Supervisor |
+|---|---|---|---|
+| `paseo-team-lead` | active | disabled | disabled |
+| `paseo-ocr-reviewer` | disabled | active under an independent-reviewer `DISPOSITION` | disabled |
+
+- **Claude Code** gates the `Skill` tool per call in the PreToolUse hook. The
+  tool itself stays available to every role — the user's own skills go through
+  it — and only the pack's own package names are checked. It gates the `Read`
+  family on the same table too: a Peer refused `Skill(paseo-team-lead)` that
+  could still `Read ~/.claude/skills/paseo-team-lead/SKILL.md` would be exactly
+  the cross-runtime asymmetry the shared core exists to prevent.
+- **pi** has no `skill` tool: its agent loads a skill by *reading* the full
+  `SKILL.md`, so the `tool_call` guard matches the read path instead. The skill
+  still appears in pi's listing for every seat; what the gate withholds is the
+  procedure itself. Only the **installed** copies are gated — under
+  `~/.pi/agent/skills`, `~/.claude/skills` or `~/.agents/skills`. A Peer
+  assigned to edit `skills/paseo-team-lead/SKILL.md` in a repository checkout
+  (this repo is one, and editing that file is ordinary work) reads it normally.
+
+Two deliberate leniencies, because this gate protects attention rather than
+authority and being wrong in the closed direction costs more than it saves: a
+skill this pack does not ship is never blocked, and neither is a call whose
+skill name cannot be read.
+
+`test/policy.test.mts` asserts that every directory under `skills/` is
+classified in the table — a new skill nobody classified would default to
+visible-for-everyone, which is exactly the failure the table exists to prevent.
+
 ## OpenCodeReview delegation (Phase 1)
 
 `paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill.
@@ -613,9 +716,28 @@ What the installers copy:
 | `extensions/paseo-team-policy.ts` | `~/.pi/agent/extensions/` |
 | `extensions/paseo-team-core/` | `~/.pi/agent/extensions/paseo-team-core/` |
 | `prompts/*.md` | `~/.pi/agent/extensions/prompts/` |
-| `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` |
-| `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` |
+| `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` and `~/.claude/skills/paseo-team-lead/` |
+| `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` and `~/.claude/skills/paseo-ocr-reviewer/` |
 | support scripts (see below) | `~/.pi/agent/extensions/paseo-team-scripts/` |
+
+`~/.claude/skills/` is the user's own directory, and the names this pack ships
+are ordinary English, so a skill already sitting there under one of those names
+may well be one the user wrote. Install refuses to overwrite such a directory —
+it reports the collision by name, installs the rest, and `pteam preflight` then
+reports the refused one as a missing skill, because from the Lead's point of
+view it is: the role prompt sends it to this pack's procedure and it would find
+somebody else's. Uninstall is the same rule in reverse; it removes only the
+directories the pack can prove it wrote, either by the `.paseo-pi-team` marker
+it leaves inside each one or by a `SKILL.md` byte-identical to the shipped copy
+(which is how installs from before the marker existed are still recognised).
+Edit an installed skill and it becomes yours, and the pack stops touching it.
+
+The Claude copies are installed by `scripts/claude-setup.mjs --install` and only
+when the `claude` CLI is present. They matter: `prompts/lead.md` makes loading
+the orchestration procedure invariant 1, and until the pack installed them a
+Claude Lead's `Skill(paseo-team-lead)` call was allowed and simply found
+nothing. Which role may load which package is decided per call — see
+[Skill admission](#skill-admission).
 
 It installs no browser: both runtimes use one they already have — see
 [The browser surface](#the-browser-surface). An earlier version registered an
@@ -884,6 +1006,72 @@ Lead skill (LOCAL_CREATE_CYCLE vs REMOTE_CREATE_CYCLE).
 | pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool names prefixed `paseo_` |
 | Node | ≥ 22.18 | type stripping on by default; CI runs 22.18 and 24 on ubuntu/windows/macos |
 
+### Testing the tests
+
+`npm test` answers "do the tests pass?". It cannot answer "would these tests
+have caught the bug?", and on this repo the two came apart badly: a review of
+one branch found nine real defects while all 139 tests were green.
+
+```bash
+npm run coverage    # which files does the suite never execute?
+npm run mutate <mutations.json>   # break the code on purpose; does the suite notice?
+```
+
+Measured with both, the shape of the gap was consistent and is worth knowing
+before adding a test here:
+
+| Layer | Coverage when measured | Mutations killed |
+|---|---|---|
+| Rule modules (`policy-core`, `claude-policy`, `install-drift`, `workspace-protocol`) | 94–99% | 14 / 14 |
+| Wiring (`paseo-team-policy.ts`, `preflight.mjs`, `uninstall.mjs`) | 0–48% | 6 / 12 |
+| CLI error paths (`paseo-team.mjs`) | 82% line / **62% branch** | — |
+
+Both wiring layers are covered now — `preflight.mjs` went from *never executed*
+to ~80% including the whole N-host lane, `uninstall.mjs` from 0 to 94% — and 50
+more defect-shaped mutations against them all die. Writing those tests turned up
+four more defects of the same family, each one a place where two parts of the
+pack answered the same question differently:
+
+- preflight hardcoded `~/.pi/agent` while the installers honour
+  `PI_HOME`/`PI_CODING_AGENT_DIR`, so an override made a correct install report
+  three missing artifacts;
+- `config-walker` read `PST_TEAM_CONFIG_DIR` while `model-routing.mjs` read
+  `PASEO_TEAM_HOME`, so `pteam status` and `pteam preflight` could name
+  different routing files on one host;
+- the Pi adapter never asserted that the role prompt reaches the model at all;
+- and preflight, whose own header says *"Never prints secret values"*, printed
+  the remote pairing endpoint into the report whenever a remote daemon was
+  unreachable — `execFileSync` puts the whole command line in its error
+  message. `scripts/remote-paseo.mjs` already redacted exactly this; the second
+  place running the same command with the same secret had not inherited it.
+
+The CLI's own error paths were the last of it: 82% of lines but 62% of
+branches, and almost every uncovered region an error path. `pteam models` with
+the daemon down answered `{"ok": true}` and exit 0 — "unreachable" and "there
+are no models" were the same answer — while `pteam models --provider X` failed
+loudly on the same daemon. A bad role name printed a JavaScript stack trace. A
+usage error exited 1 from most dispatchers and 2 from the top level and
+`seats`. And the WebUI cache, which says it stores only successful answers,
+keyed that on the exit code alone — so a graph taken while the daemon was down
+was remembered for its whole window, which is the stale error the comment says
+it avoids.
+
+Every one of the nine defects was a **wiring** defect: a rule that exists, is
+correct, is unit-tested, and is never called — or is called at the wrong
+severity. Deleting preflight's whole workspace-protocol block, deleting its
+whole install-drift block, and stopping the Pi adapter from injecting the role
+prompt at all each passed the entire suite.
+
+So when you add an enforcement rule here, the unit test for the rule is the
+easy half. The half that has actually failed in this repo is the call site:
+drive the real adapter or the real script, and assert the rule fires.
+
+`npm run coverage` is a screen, not a verdict. `policy.test.mts` loads the Pi
+adapter through a query-string specifier to get a fresh module per scenario,
+and the reporter does not attribute that back to the base file — so lines that
+demonstrably execute are still listed as uncovered there. Confirm with
+`npm run mutate`, and do not put a coverage floor on that file.
+
 ### Preflight
 
 ```bash
@@ -907,8 +1095,19 @@ extension, the shared policy modules, role prompts, the role providers of every
 runtime in scope, **each healthy provider's model inventory**, routing config
 (single-host + cluster contract), each route against the real inventory,
 provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
-`null` level means the level gets clamped), endpoint env vars, and repository
-state (a writer host must be clean in strict mode). No secret is ever printed.
+`null` level means the level gets clamped), endpoint env vars, **whether every
+installed copy still matches this release** (`install-drift`), **the target
+repository's protocol** (`workspace-protocol`), the pack's config directory
+after the two-variable unification (`team-config-dir`), and repository state (a
+writer host must be clean in strict mode).
+
+No secret is ever printed. That is a real invariant and not a hope: an endpoint
+is a pairing offer, it travels only inside argv, and `remoteExec` redacts it
+from anything a failing subprocess hands back — `execFileSync` puts the whole
+command line into its error message, which is how the value used to reach the
+report on the single most likely failure of the remote lane.
+`test/preflight.test.mjs` asserts the value appears nowhere in the JSON report,
+on the healthy path and on the unreachable one.
 
 **Upgrading the package is only half an upgrade.** The policy core, the role
 prompts and the Lead skill are COPIED into `~/.pi/agent/` at install time, and
@@ -924,6 +1123,35 @@ pteam preflight   # confirm they match this version
 ```
 
 `pteam update` says this in its `nextSteps`, and on stderr when it upgrades.
+
+The second line is a real check, not a hope. `install-drift` hashes every
+installed artifact — the pi adapter, the shared policy core, the three role
+prompts, both skills on both runtimes, and the support scripts — against the
+package preflight is running from, and reports each file as `changed`,
+`missing` or `unexpected`. That last one is the leftover case: a support script
+or a built `.js` from an older release, still sitting in a directory this pack
+replaces wholesale.
+
+It has to be a byte comparison. The `policy-core` check above proves the
+installed module loads and exports the policy API — which a core from three
+releases ago does just as well, which is exactly how a half-upgraded host looks
+healthy. `pteam prompts write` and `pteam skills write` deliberately edit the
+installed copies; a difference there is still drift — the rules a running agent
+enforces are not this release's — but the remedy line says that `pteam install`
+will overwrite the edit, because a check that tells someone to destroy their own
+customization without saying so is worse than one that says nothing.
+
+Drift is a warning by default and a failure under `--strict`, because
+"the rules a running agent enforces are not the rules this CLI reports" is the
+unverifiable state `--strict` exists to reject. Two things are deliberately not
+drift: an unknown file in `~/.pi/agent/extensions/prompts/`, which is a shared
+directory, and a CRLF copy of otherwise identical content.
+
+No manifest is written at install time. Upstream Paseo ships one
+(`foundation/manifest.json`, a sha256 per distributed file) because the source
+bytes are not on the target host; ours are, since preflight runs from the
+package itself — so a manifest would be a third copy that can go stale on its
+own.
 
 The Claude half registers an ABSOLUTE node path in `~/.claude/settings.json`
 (hooks) and `~/.claude.json` (MCP), because a hook may run without the user's
