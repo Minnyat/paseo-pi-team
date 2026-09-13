@@ -996,13 +996,23 @@ before adding a test here:
 | Wiring (`paseo-team-policy.ts`, `preflight.mjs`, `uninstall.mjs`) | 0–48% | 6 / 12 |
 
 Both wiring layers are covered now — `preflight.mjs` went from *never executed*
-to 68%, `uninstall.mjs` from 0 to 94% — and 40 more defect-shaped mutations
-against them all die. Writing those tests turned up three more defects of the
-same family, each one a place where two parts of the pack answered the same
-question differently: preflight hardcoded `~/.pi/agent` while the installers
-honour `PI_HOME`/`PI_CODING_AGENT_DIR`; `config-walker` read
-`PST_TEAM_CONFIG_DIR` while `model-routing.mjs` read `PASEO_TEAM_HOME`; and the
-Pi adapter never asserted that the role prompt reaches the model.
+to ~80% including the whole N-host lane, `uninstall.mjs` from 0 to 94% — and 50
+more defect-shaped mutations against them all die. Writing those tests turned up
+four more defects of the same family, each one a place where two parts of the
+pack answered the same question differently:
+
+- preflight hardcoded `~/.pi/agent` while the installers honour
+  `PI_HOME`/`PI_CODING_AGENT_DIR`, so an override made a correct install report
+  three missing artifacts;
+- `config-walker` read `PST_TEAM_CONFIG_DIR` while `model-routing.mjs` read
+  `PASEO_TEAM_HOME`, so `pteam status` and `pteam preflight` could name
+  different routing files on one host;
+- the Pi adapter never asserted that the role prompt reaches the model at all;
+- and preflight, whose own header says *"Never prints secret values"*, printed
+  the remote pairing endpoint into the report whenever a remote daemon was
+  unreachable — `execFileSync` puts the whole command line in its error
+  message. `scripts/remote-paseo.mjs` already redacted exactly this; the second
+  place running the same command with the same secret had not inherited it.
 
 Every one of the nine defects was a **wiring** defect: a rule that exists, is
 correct, is unit-tested, and is never called — or is called at the wrong
@@ -1045,8 +1055,17 @@ runtime in scope, **each healthy provider's model inventory**, routing config
 provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
 `null` level means the level gets clamped), endpoint env vars, **whether every
 installed copy still matches this release** (`install-drift`), **the target
-repository's protocol** (`workspace-protocol`), and repository state (a writer
-host must be clean in strict mode). No secret is ever printed.
+repository's protocol** (`workspace-protocol`), the pack's config directory
+after the two-variable unification (`team-config-dir`), and repository state (a
+writer host must be clean in strict mode).
+
+No secret is ever printed. That is a real invariant and not a hope: an endpoint
+is a pairing offer, it travels only inside argv, and `remoteExec` redacts it
+from anything a failing subprocess hands back — `execFileSync` puts the whole
+command line into its error message, which is how the value used to reach the
+report on the single most likely failure of the remote lane.
+`test/preflight.test.mjs` asserts the value appears nowhere in the JSON report,
+on the healthy path and on the unreachable one.
 
 **Upgrading the package is only half an upgrade.** The policy core, the role
 prompts and the Lead skill are COPIED into `~/.pi/agent/` at install time, and

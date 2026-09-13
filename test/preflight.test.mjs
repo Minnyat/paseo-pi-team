@@ -110,6 +110,24 @@ if (at(0) === "provider" && at(1) === "models" && at(3) === "--json") {
   const body = env[key] ?? env.FAKE_MODELS;
   if (body === undefined) { process.stderr.write("no inventory\\n"); process.exit(1); }
   process.stdout.write(body); process.exit(0);
+}
+// --- the remote lane. Everything below takes --host <endpoint>, and the
+// endpoint carries a pairing secret: this stub NEVER echoes it, exactly as the
+// real CLI does not, so a test asserting the value stays out of the report is
+// testing preflight rather than testing the stub's discretion.
+const hostAt = argv.indexOf("--host");
+if (hostAt >= 0) {
+  if (env.FAKE_REMOTE_DOWN) { process.stderr.write("remote unreachable\\n"); process.exit(1); }
+  if (at(0) === "ls") { process.stdout.write("[]"); process.exit(0); }
+  if (at(0) === "provider" && at(1) === "ls") {
+    if (env.FAKE_REMOTE_PROVIDERS_BAD) { process.stdout.write("not json"); process.exit(0); }
+    process.stdout.write(env.FAKE_REMOTE_PROVIDERS ?? "[]"); process.exit(0);
+  }
+  if (at(0) === "provider" && at(1) === "models") {
+    const body = env.FAKE_REMOTE_MODELS;
+    if (body === undefined) { process.stderr.write("no remote inventory\\n"); process.exit(1); }
+    process.stdout.write(body); process.exit(0);
+  }
 }`,
 	);
 	stub(
@@ -807,6 +825,308 @@ test("team-config-dir: files stranded in the old default are named", { skip: !PO
 	} finally {
 		rmSync(fakeHome, { recursive: true, force: true });
 	}
+});
+
+// --- the cluster contract -----------------------------------------------------
+//
+// The N-host lane was the last part of preflight nothing executed. It is also
+// where the report is trusted most: an operator reads it to decide whether a
+// cross-host route is safe to use, and every finding here is about work that
+// will otherwise fail on a machine they are not sitting at.
+
+const clusterFile = join(home, "cluster.json");
+const ENDPOINT_ENV = "PST_TEST_REMOTE_ENDPOINT";
+// A pairing offer carries a secret. This exact string is asserted NEVER to
+// appear anywhere in the report, so it is deliberately distinctive.
+const ENDPOINT_VALUE = "https://app.paseo.sh/#offer=SECRET-PAIRING-TOKEN-do-not-print";
+
+const clusterRoutes = (provider = "pi-peer") =>
+	Object.fromEntries(
+		MODEL_CLASSES.map((cls) => [cls, { paseoProvider: provider, model: ROUTE_MODEL, thinking: "low" }]),
+	);
+
+function writeCluster(hosts) {
+	writeFileSync(clusterFile, JSON.stringify({ version: 1, hosts }));
+}
+
+const LOCAL_HOST = {
+	connection: { type: "local" },
+	required: true,
+	capabilities: ["git-read", "git-write", "focused-test", "independent-review"],
+	limits: { writers: 1, readers: 3 },
+	routes: clusterRoutes(),
+};
+const REMOTE_HOST = {
+	connection: { type: "remote", endpointEnv: ENDPOINT_ENV },
+	required: true,
+	capabilities: ["git-read", "independent-review"],
+	limits: { writers: 0, readers: 2 },
+	routes: clusterRoutes(),
+};
+
+test("cluster-config: valid names the hosts; invalid FAILS with the reason", { skip: !POSIX }, () => {
+	writeCluster({ "win-primary": LOCAL_HOST });
+	const ok = preflight(["--cluster", clusterFile]).of("cluster-config");
+	assert.equal(ok.status, "pass");
+	assert.match(ok.detail, /1 host\(s\): win-primary/);
+
+	writeFileSync(clusterFile, JSON.stringify({ version: 1 }));
+	const bad = preflight(["--cluster", clusterFile]).of("cluster-config");
+	assert.equal(bad.status, "fail");
+	assert.ok(bad.detail.length > 10, "the RoutingError message is the actionable part");
+
+	writeFileSync(clusterFile, "{ not json");
+	assert.equal(preflight(["--cluster", clusterFile]).of("cluster-config").status, "fail");
+});
+
+test("cluster-config: absent warns, but an explicit --cluster or --strict FAILS", { skip: !POSIX }, () => {
+	const absent = join(home, "no-such-cluster.json");
+	// Explicit: being handed a path that is not there is an error, not a shrug.
+	assert.equal(preflight(["--cluster", absent]).of("cluster-config").status, "fail");
+	// Default path, lax: a single-host dev setup keeps working.
+	const lax = preflight().of("cluster-config");
+	assert.equal(lax.status, "warn");
+	assert.match(lax.detail, /cluster-routing\.example\.json/, "the remedy names the template");
+	// Strict: cross-host routing you cannot verify is not routing you can use.
+	assert.equal(preflight(["--strict"]).of("cluster-config").status, "fail");
+});
+
+test("cluster-host: a writer host must carry the writer capabilities", { skip: !POSIX }, () => {
+	// A host that claims writers without git-write/focused-test will accept an
+	// engineer it cannot serve, and the failure lands on a machine the operator
+	// is not watching.
+	writeCluster({
+		"win-primary": { ...LOCAL_HOST, capabilities: ["git-read", "independent-review"] },
+	});
+	const check = preflight(["--cluster", clusterFile]).of("cluster-host:win-primary");
+	assert.equal(check.status, "fail");
+	assert.match(check.detail, /git-write/);
+	assert.match(check.detail, /focused-test/);
+
+	writeCluster({ "win-primary": LOCAL_HOST });
+	assert.equal(preflight(["--cluster", clusterFile]).of("cluster-host:win-primary"), undefined);
+});
+
+test("cluster-host-select: one host is implicit, several need --host-id", { skip: !POSIX }, () => {
+	// Nothing is ever verified silently: every skip produces its own line.
+	writeCluster({ "win-primary": LOCAL_HOST });
+	assert.equal(
+		preflight(["--cluster", clusterFile]).of("cluster-host-select"),
+		undefined,
+		"a single host needs no selection",
+	);
+
+	writeCluster({ "win-primary": LOCAL_HOST, "mac-review": { ...REMOTE_HOST, required: false } });
+	const ambiguous = preflight(["--cluster", clusterFile]).of("cluster-host-select");
+	assert.equal(ambiguous.status, "warn");
+	assert.match(ambiguous.detail, /win-primary/);
+	assert.match(ambiguous.detail, /mac-review/);
+	assert.match(ambiguous.detail, /--host-id/);
+
+	const strict = preflight(["--strict", "--cluster", clusterFile]).of("cluster-host-select");
+	assert.equal(strict.status, "fail", "an unverified host is not a pass in strict mode");
+
+	// A --host-id that is not in the file is a typo, and a silent one: the
+	// operator would read a clean report about a host that was never checked.
+	const typo = preflight(["--cluster", clusterFile, "--host-id", "mac-reviewer"]).of(
+		"cluster-host:mac-reviewer",
+	);
+	assert.equal(typo.status, "fail");
+	assert.match(typo.detail, /not present in cluster routing config/);
+});
+
+test("cluster-route: a local host resolves every class against the live daemon", { skip: !POSIX }, () => {
+	writeCluster({ "win-primary": LOCAL_HOST });
+	const env = { FAKE_PROVIDERS: PROVIDERS(), FAKE_MODELS: INVENTORY() };
+	const run = preflight(["--with-models", "--cluster", clusterFile], env);
+	for (const cls of MODEL_CLASSES) {
+		const check = run.of(`cluster-route:win-primary:${cls}`);
+		assert.ok(check, `${cls} was never resolved for the cluster host`);
+		assert.equal(check.status, "pass", `${cls}: ${check?.detail}`);
+	}
+
+	// A model the host cannot serve is a failure, not a warning.
+	writeCluster({
+		"win-primary": { ...LOCAL_HOST, routes: clusterRoutes() },
+	});
+	const missingModel = preflight(["--with-models", "--cluster", clusterFile], {
+		FAKE_PROVIDERS: PROVIDERS(),
+		FAKE_MODELS: JSON.stringify([{ id: "prov/something-else", thinkingOptions: ["low"] }]),
+	}).of("cluster-route:win-primary:FAST_READ");
+	assert.equal(missingModel.status, "fail");
+
+	// --skip-models does not pretend the route was verified.
+	const skipped = preflight(["--cluster", clusterFile], env).of("cluster-route:win-primary");
+	assert.equal(skipped.status, "warn");
+	assert.match(skipped.detail, /skipped/);
+});
+
+// --- the remote lane ----------------------------------------------------------
+
+test("cluster-host: a required remote host needs its endpoint env, and the VALUE is never printed", { skip: !POSIX }, () => {
+	writeCluster({ "mac-review": REMOTE_HOST });
+
+	const unset = preflight(["--cluster", clusterFile]);
+	const check = unset.of("cluster-host:mac-review");
+	assert.equal(check.status, "warn");
+	assert.match(check.detail, new RegExp(ENDPOINT_ENV), "the env NAME is what an operator needs");
+	assert.equal(
+		preflight(["--strict", "--cluster", clusterFile]).of("cluster-host:mac-review").status,
+		"fail",
+	);
+
+	const set = preflight(["--cluster", clusterFile], { [ENDPOINT_ENV]: ENDPOINT_VALUE });
+	assert.equal(set.of("cluster-host:mac-review").status, "pass");
+	assert.match(set.of("cluster-host:mac-review").detail, /value not printed/);
+
+	// The whole report, not just that one line: an endpoint carries a pairing
+	// secret and preflight output gets pasted into issues and chat logs.
+	const serialized = JSON.stringify(set.checks);
+	assert.ok(
+		!serialized.includes("SECRET-PAIRING-TOKEN"),
+		"the endpoint value must not appear anywhere in the report",
+	);
+});
+
+test("cluster-remote: an endpoint of unexpected shape is REFUSED, not tried", { skip: !POSIX }, () => {
+	// It is handed to a CLI as argv; a value that is not a recognised endpoint
+	// shape is not something to pass along and hope.
+	writeCluster({ "mac-review": REMOTE_HOST });
+    for (const bad of ["not-an-endpoint", "tcp://nohost", "http://x y", "https://a.b;rm -rf /"]) {
+		const check = preflight(["--with-models", "--cluster", clusterFile], {
+			[ENDPOINT_ENV]: bad,
+		}).of("cluster-remote:mac-review");
+		assert.equal(check.status, "fail", `accepted a bad endpoint: ${bad}`);
+		assert.match(check.detail, /refusing to use it/);
+	}
+});
+
+// NOT covered, on purpose and on the record: the `cmdPercentExpansionRisk`
+// branch. cmd.exe expands %VAR% before paseo sees the argv, so a Windows
+// controller must refuse an endpoint carrying two or more '%' rather than try
+// to out-quote cmd's parser — and that branch is gated on
+// `NEEDS_SHELL === (process.platform === "win32")`, which this harness cannot
+// reach from POSIX. The RULE has its own unit tests in
+// test/model-routing.test.mjs; what is unverified here is the wiring, which is
+// exactly the distinction this whole file exists to make. Making NEEDS_SHELL
+// env-overridable would buy the coverage by changing how the real thing picks
+// its exec path — a worse trade than an honest gap.
+
+test("cluster-remote: --skip-models says the remote was not checked", { skip: !POSIX }, () => {
+	writeCluster({ "mac-review": REMOTE_HOST });
+	const check = preflight(["--cluster", clusterFile], { [ENDPOINT_ENV]: ENDPOINT_VALUE }).of(
+		"cluster-remote:mac-review",
+	);
+	assert.equal(check.status, "warn");
+	assert.match(check.detail, /skipped/);
+});
+
+test("cluster-remote: a live remote is checked end to end", { skip: !POSIX }, () => {
+	writeCluster({ "mac-review": REMOTE_HOST });
+	const base = { [ENDPOINT_ENV]: ENDPOINT_VALUE };
+	const remoteProviders = JSON.stringify([
+		{ provider: "pi-peer", enabled: "enabled", status: "available" },
+	]);
+
+	// 1. unreachable daemon
+	const down = preflight(["--with-models", "--cluster", clusterFile], {
+		...base,
+		FAKE_REMOTE_DOWN: "1",
+	});
+	assert.equal(down.of("cluster-remote:mac-review").status, "fail");
+	assert.match(down.of("cluster-remote:mac-review").detail, new RegExp(ENDPOINT_ENV));
+	assert.ok(
+		!JSON.stringify(down.checks).includes("SECRET-PAIRING-TOKEN"),
+		"not even the unreachable message may carry the endpoint",
+	);
+
+	// 2. reachable, but the provider list is unparseable
+	const garbled = preflight(["--with-models", "--cluster", clusterFile], {
+		...base,
+		FAKE_REMOTE_PROVIDERS_BAD: "1",
+	});
+	assert.equal(garbled.of("cluster-remote:mac-review").status, "pass", "the daemon answered");
+	assert.equal(garbled.of("cluster-remote:mac-review:providers").status, "fail");
+
+	// 3. the role provider the routes need is not on the remote daemon
+	const absent = preflight(["--with-models", "--cluster", clusterFile], {
+		...base,
+		FAKE_REMOTE_PROVIDERS: "[]",
+	}).of("cluster-remote:mac-review:provider:pi-peer");
+	assert.equal(absent.status, "fail");
+	assert.match(absent.detail, /NOT registered on remote daemon/);
+
+	// 4. present but unhealthy — the false pass this check exists for
+	const unhealthy = preflight(["--with-models", "--cluster", clusterFile], {
+		...base,
+		FAKE_REMOTE_PROVIDERS: JSON.stringify([
+			{ provider: "pi-peer", enabled: "enabled", status: "unauthorized" },
+		]),
+	}).of("cluster-remote:mac-review:provider:pi-peer");
+	assert.equal(unhealthy.status, "fail");
+
+	// 5. healthy, with a remote inventory that resolves every class
+	const healthy = preflight(["--with-models", "--cluster", clusterFile], {
+		...base,
+		FAKE_REMOTE_PROVIDERS: remoteProviders,
+		FAKE_REMOTE_MODELS: INVENTORY(),
+	});
+	assert.equal(healthy.of("cluster-remote:mac-review:provider:pi-peer").status, "pass");
+	for (const cls of MODEL_CLASSES) {
+		const check = healthy.of(`cluster-remote:mac-review:route:${cls}`);
+		assert.ok(check, `${cls} was never resolved against the remote inventory`);
+		assert.equal(check.status, "pass", `${cls}: ${check?.detail}`);
+	}
+	assert.ok(!JSON.stringify(healthy.checks).includes("SECRET-PAIRING-TOKEN"));
+
+	// 6. healthy providers, unreadable remote inventory — warn, strict fails
+	const noInventory = { ...base, FAKE_REMOTE_PROVIDERS: remoteProviders };
+	assert.equal(
+		preflight(["--with-models", "--cluster", clusterFile], noInventory).of(
+			"cluster-remote:mac-review:route:FAST_READ",
+		).status,
+		"warn",
+	);
+	assert.equal(
+		preflight(["--with-models", "--strict", "--cluster", clusterFile], noInventory).of(
+			"cluster-remote:mac-review:route:FAST_READ",
+		).status,
+		"fail",
+	);
+});
+
+test("cluster-remote: the remote inventory is the remote's, not the local one", { skip: !POSIX }, () => {
+	// Model inventory is per-DAEMON. This runs the local and remote lanes in one
+	// pass with DIFFERENT inventories — the local daemon offers the routed model,
+	// the remote one does not — so a lane reading the wrong side would have to
+	// show itself.
+	writeCluster({ "mac-review": REMOTE_HOST });
+	const run = preflight(["--with-models", "--cluster", clusterFile, "--routes", routesFile], {
+		[ENDPOINT_ENV]: ENDPOINT_VALUE,
+		FAKE_PROVIDERS: PROVIDERS(),
+		FAKE_MODELS: INVENTORY(),
+		FAKE_REMOTE_PROVIDERS: JSON.stringify([
+			{ provider: "pi-peer", enabled: "enabled", status: "available" },
+		]),
+		FAKE_REMOTE_MODELS: JSON.stringify([{ id: "prov/remote-only", thinkingOptions: ["low"] }]),
+	});
+	assert.equal(run.of("route:FAST_READ").status, "pass", "the LOCAL inventory has the model");
+	assert.equal(
+		run.of("cluster-remote:mac-review:route:FAST_READ").status,
+		"fail",
+		"the REMOTE inventory does not, and the remote lane must say so",
+	);
+
+	// What this does NOT prove, on the record: that `remoteModelsCache` is keyed
+	// on the host. It cannot — preflight verifies exactly one host per run
+	// (`verifyHostId`), so the remote cache never holds two hosts and mutating
+	// the key to the provider alone SURVIVES this suite. The key is
+	// defence-in-depth for a future multi-host verify loop, not a live
+	// invariant; the rule behind it (`modelsCacheKey`) has its own unit tests in
+	// test/model-routing.test.mjs. An earlier version of this test claimed the
+	// stronger thing and passed for an unrelated reason — the local and remote
+	// caches are separate maps — which is the same "claims more than it does"
+	// failure this file exists to catch, committed inside the test itself.
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));

@@ -718,17 +718,40 @@ function cmdQuote(value) {
 	}
 	return `"${value}"`;
 }
-/** Run a paseo CLI command. On Windows (.cmd shims) every argv element is
- * quoted through cmdQuote; endpoint values carry secrets so they ONLY ever
- * travel inside argv — they are logged nowhere. */
+/**
+ * Run a paseo CLI command against a remote endpoint.
+ *
+ * On Windows (.cmd shims) every argv element is quoted through cmdQuote.
+ *
+ * The redaction is the load-bearing part, and it belongs HERE rather than at
+ * each call site. An endpoint is a pairing offer — a secret — and it travels
+ * inside argv, which is the safe channel. But a failing `execFileSync` puts the
+ * whole command line into `error.message` ("Command failed: paseo ls --host
+ * <secret> --json"), and preflight reported that verbatim when a remote daemon
+ * was unreachable. So the file that opens with "Never prints secret values"
+ * printed one on the single most likely failure of the remote lane, straight
+ * into output that gets pasted into issues and chat logs.
+ *
+ * scripts/remote-paseo.mjs already redacts exactly this, which is the point:
+ * the rule was known and implemented once, and the second place running the
+ * same command with the same secret did not inherit it. Doing it inside the
+ * helper makes every consumer safe by construction instead of by remembering.
+ */
 function remoteExec(argv, timeoutMs = 60000) {
-	if (NEEDS_SHELL) {
-		return tryExecRaw(
-			[argv[0], ...argv.slice(1).map(cmdQuote)].join(" "),
-			timeoutMs,
-		);
-	}
-	return tryExec(argv[0], argv.slice(1), timeoutMs);
+	const hostAt = argv.indexOf("--host");
+	const secret = hostAt >= 0 ? argv[hostAt + 1] : undefined;
+	const redact = (text) =>
+		secret && typeof text === "string"
+			? text.split(secret).join("<endpoint-value-redacted>")
+			: text;
+	const result = NEEDS_SHELL
+		? tryExecRaw([argv[0], ...argv.slice(1).map(cmdQuote)].join(" "), timeoutMs)
+		: tryExec(argv[0], argv.slice(1), timeoutMs);
+	return {
+		...result,
+		stdout: redact(result.stdout),
+		...(result.error === undefined ? {} : { error: redact(result.error) }),
+	};
 }
 
 function tryExecRaw(commandString, timeoutMs) {
