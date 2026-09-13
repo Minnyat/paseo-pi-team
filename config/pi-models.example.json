@@ -1,0 +1,16 @@
+{
+  "$comment": "COPY → ~/.paseo-pi-team/pi-models.local.json on each host that routes to pi. Never commit the local copy: it names host-specific endpoints. `pteam models sync` reads this, probes every model each endpoint lists, and rewrites ONE entry per provider in ~/.pi/agent/models.json — providers absent from this file are left alone. Each key under 'providers' is the pi provider name, so a route's model reads '<provider-name>/<model-id>'; it must not contain a slash, because Paseo splits that reference at the FIRST slash only. Add as many endpoints as you like: they are written in one pass, and one whose endpoint is down keeps the models it already had instead of losing them. The API key is NEVER stored here — 'keyEnv' names the environment variable pi resolves at runtime, and 'keyFile' is where `pteam models sync` looks when that variable is unset; point it at the same file systemd hands the daemon via EnvironmentFile= so the secret lives in exactly one place. 'probe: false' writes whatever the endpoint lists without checking it answers, which is only safe on an endpoint that never lists a dead model.",
+  "version": 1,
+  "providers": {
+    "replace-me-provider-name": {
+      "baseUrl": "https://example.invalid/v1",
+      "api": "openai-completions",
+      "keyEnv": "CODING_API_KEY",
+      "keyFile": "~/.paseo-pi-team/pi-provider.env",
+      "probe": true,
+      "concurrency": 5,
+      "contextWindow": 200000,
+      "maxTokens": 32000
+    }
+  }
+}

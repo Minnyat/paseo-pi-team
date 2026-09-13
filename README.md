@@ -54,6 +54,7 @@ paseo-pi-team/
 ├── config/
 │   ├── paseo.providers.example.json   # 6 role providers: pi-* and claude-* (supervisor/lead/peer)
 │   ├── model-routing.example.json     # MODEL_CLASS → model route template (copy per host)
+│   ├── pi-models.example.json         # pi model endpoint for `pteam models sync` (copy per host)
 │   └── cluster-routing.example.json   # controller-local N-host contract template
 ├── templates/
 │   ├── TASK_BRIEF_V3.md               # canonical V3 task brief + parser rules
@@ -92,6 +93,7 @@ paseo-pi-team/
 │   ├── install.ps1 / install.sh    # installers
 │   ├── lib-common.mjs              # shared helpers: exec/shim resolution, entrypoint, versions
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
+│   ├── pi-models-sync.mjs          # rebuilds ~/.pi/agent/models.json from a probed endpoint
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host by HOST_ID (Lead REMOTE cycle)
 │   ├── reliability.mjs             # retry classification/backoff + stale predicates
 │   ├── team-communication.mjs      # parent-scoped Peer → Lead messaging
@@ -794,7 +796,23 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
 [`docs/model-routing.md`](docs/model-routing.md). In short:
 
 1. Per host (layer 1, never committed): pi + credentials + `~/.pi/agent/models.json`
-   when using a custom provider.
+   when using a custom provider. pi has no model discovery, so that file IS the
+   catalog. For an OpenAI-compatible endpoint, copy
+   `config/pi-models.example.json` → `~/.paseo-pi-team/pi-models.local.json` and
+   run `pteam models sync`: it probes every model each endpoint lists, writes only
+   the ones that answer, and derives each model's `reasoning` flag from that
+   answer rather than from its name (`--no-probe`, or `probe: false` on one
+   endpoint, skips all of that and keeps whatever an earlier run proved) — a wrong flag there makes Paseo report
+   `thinkingOptions: "none"` and refuse every route above `thinking: off`. As many
+   endpoints as you like can be configured under `providers`; they are written in
+   one pass, and one whose endpoint is down keeps the models it already had
+   instead of losing them (`--only <name>` syncs just one). The
+   API key never enters that file: it names the env var and the file holding it.
+   The daemon caches the catalog for its whole lifetime, so `models sync` ends by
+   refreshing it; `pteam models refresh` does that step alone. A refresh that
+   succeeds is what removes the need to restart the daemon — when it is skipped
+   (`--dry-run`, `--no-refresh`) or fails, both commands say so and name the
+   restart that finishes the job.
 2. Copy `config/model-routing.example.json` →
    `~/.paseo-pi-team/model-routing.local.json` and fill in the host's REAL model
    IDs (5 classes: `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`,
@@ -989,6 +1007,8 @@ pteam activity <ref> --tail 5 --max-chars 2000
 pteam permits list
 pteam seats list                        # custom seats + the providers they generate
 pteam seats apply                       # write those providers into ~/.paseo/config.json
+pteam models sync                       # rebuild pi's catalogs from their endpoints, then refresh
+pteam models refresh                    # daemon re-reads the catalog, without a restart
 pteam web --port 4321 --open            # prints http://127.0.0.1:PORT/#token=...
 ```
 
@@ -1013,8 +1033,8 @@ Two different things are called "permission", and the UI keeps them apart:
   is still no way to type a tool name into the browser and have it granted, and
   no "grant everything" button.
 
-Two of those commands exist because Paseo's own monitoring surface answers the
-wrong shape of question for a fifteen-Peer project:
+Three of those commands exist because Paseo's own surface answers the wrong
+shape of question for a fifteen-Peer project:
 
 - **`pteam cost`** — `list_agents` has no cost field and `get_agent_status`
   has one per agent, so the only way to total a project's spend was to call
@@ -1026,6 +1046,19 @@ wrong shape of question for a fifteen-Peer project:
   from `paseo inspect → LastUsage` and are reported under that name rather than
   relabelled, because the daemon's own framing is the only thing the pack can
   vouch for.
+- **`pteam models refresh`** (and the last step of `models sync`) — Paseo caches
+  each provider's model list for the daemon's whole process lifetime. Rewrite
+  `~/.pi/agent/models.json` and `paseo provider models pi-peer` keeps answering
+  with the old list; `paseo reload` does not help either, because it reloads
+  daemon config rather than the provider snapshot. The only documented cure was
+  restarting the daemon, which drops every live agent connection over a
+  read-only change. The daemon does accept a `refresh_providers_snapshot_request`
+  (permission `daemon.read`) — the `paseo` CLI simply never exposed it. This is
+  the one command in the pack that reaches Paseo through its client SDK instead
+  of argv, and `cli/lib/paseo-bridge.mjs` still owns it so the rule that holds is
+  "one place talks to Paseo", by any transport. It fails closed: an unreachable
+  daemon, a missing SDK or a Paseo too old to know the message all report the
+  catalog as still stale and name the restart that would finish the job.
 - **`pteam activity`** — `get_agent_activity`'s `limit` bounds how many entries
   come back and says nothing about how big one is. One entry can be a Peer's
   whole `PEER_MESSAGE_V1` report, so `limit: 3` routinely returns hundreds of
