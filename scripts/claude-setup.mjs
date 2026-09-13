@@ -47,7 +47,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
@@ -1034,28 +1034,94 @@ export function packSkillSources(root = join(HERE, "..", "skills")) {
  * current. Only directories this pack ships are touched; everything else in
  * the user's skills directory is left exactly as it was.
  */
+/**
+ * Marker written inside every skill directory this pack installs, and the only
+ * thing that authorises deleting one.
+ *
+ * `~/.claude/skills/` is the user's own directory. A skill in it named
+ * `paseo-team-lead` is not necessarily ours: the names this pack ships are
+ * plain English, the user picked them first if they got there first, and
+ * nothing about a directory's contents says who created it. Without a marker,
+ * install replaced that directory and uninstall deleted it — both silently,
+ * both destroying work the pack never wrote.
+ *
+ * This is a marker per directory, not the install manifest that `install-drift`
+ * deliberately does not write. The distinction is staleness: a central manifest
+ * is a third copy of the file list that can disagree with both other copies,
+ * while this file travels inside the thing it describes and answers exactly one
+ * question that nothing else can answer — did we create this directory?
+ */
+export const SKILL_OWNER_MARKER = ".paseo-pi-team";
+
+/**
+ * True when `dir` is a skill directory this pack installed.
+ *
+ * Two ways to be ours, because the marker only exists going forward:
+ *
+ *  1. The marker is present — every install from this version on.
+ *  2. `SKILL.md` is byte-identical to the copy this release ships. Installs
+ *     from before the marker existed have no receipt at all, and on those
+ *     hosts a marker-only rule would quietly stop uninstalling the very
+ *     packages it put there. Nobody retypes a 900-line procedure byte for
+ *     byte, so an exact match is proof enough; the moment a user edits it the
+ *     bytes diverge and it becomes theirs — which is the direction to err in
+ *     anyway, since an edited skill is the one worth not deleting.
+ *
+ * Everything else is the user's, including a directory whose SKILL.md merely
+ * resembles ours. That is the fail-closed direction on purpose: the cost is one
+ * refused install that names the directory, against silently destroying work
+ * the pack never wrote.
+ */
+export function skillIsOurs(dir, sources = packSkillSources()) {
+	if (existsSync(join(dir, SKILL_OWNER_MARKER))) return true;
+	const shipped = sources.find((source) => source.path && basename(dir) === source.name);
+	if (!shipped) return false;
+	const here = join(dir, "SKILL.md");
+	const there = join(shipped.path, "SKILL.md");
+	if (!existsSync(here) || !existsSync(there)) return false;
+	try {
+		return readFileSync(here).equals(readFileSync(there));
+	} catch {
+		return false;
+	}
+}
+
 export function installSkills(env = process.env) {
 	const target = claudeSkillsDir(env);
 	const sources = packSkillSources();
 	if (sources.length === 0) {
-		return { path: target, status: "failed", error: "no skills found in this checkout", skills: [] };
+		return { path: target, status: "failed", error: "no skills found in this checkout", skills: [], conflicts: [] };
 	}
+	const installed = [];
+	const conflicts = [];
 	try {
 		mkdirSync(target, { recursive: true });
 		for (const source of sources) {
 			const destination = join(target, source.name);
+			if (existsSync(destination) && !skillIsOurs(destination)) {
+				conflicts.push(source.name);
+				continue;
+			}
 			rmSync(destination, { recursive: true, force: true });
 			cpSync(source.path, destination, { recursive: true });
+			writeFileSync(join(destination, SKILL_OWNER_MARKER), "paseo-pi-team\n");
+			installed.push(source.name);
 		}
 	} catch (error) {
 		return {
 			path: target,
 			status: "failed",
 			error: String(error?.message ?? error),
-			skills: sources.map((source) => source.name),
+			skills: installed,
+			conflicts,
 		};
 	}
-	return { path: target, status: "updated", skills: sources.map((source) => source.name) };
+	return {
+		path: target,
+		status: conflicts.length > 0 ? "conflict" : "updated",
+		skills: installed,
+		conflicts,
+	};
 }
 
 /**
@@ -1071,7 +1137,9 @@ export function removeSkills(env = process.env) {
 	try {
 		for (const { name } of packSkillSources()) {
 			const destination = join(target, name);
-			if (!existsSync(join(destination, "SKILL.md"))) continue;
+			// Ownership, not existence. A same-named skill the user wrote has a
+			// SKILL.md too, and uninstalling this pack must not delete it.
+			if (!skillIsOurs(destination)) continue;
 			rmSync(destination, { recursive: true, force: true });
 			removed.push(name);
 		}
@@ -1084,9 +1152,12 @@ export function removeSkills(env = process.env) {
 /** Pack skills this checkout ships that are NOT installed for Claude. */
 export function missingSkills(env = process.env) {
 	const target = claudeSkillsDir(env);
+	// A same-named directory the pack does not own does not satisfy the
+	// requirement: the role prompt tells the Lead to load OUR procedure, and
+	// somebody else's file under that name is a wrong answer, not a present one.
 	return packSkillSources()
 		.map(({ name }) => name)
-		.filter((name) => !existsSync(join(target, name, "SKILL.md")));
+		.filter((name) => !skillIsOurs(join(target, name)));
 }
 
 // ---------------------------------------------------------------------------

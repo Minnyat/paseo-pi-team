@@ -720,6 +720,18 @@ What the installers copy:
 | `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` and `~/.claude/skills/paseo-ocr-reviewer/` |
 | support scripts (see below) | `~/.pi/agent/extensions/paseo-team-scripts/` |
 
+`~/.claude/skills/` is the user's own directory, and the names this pack ships
+are ordinary English, so a skill already sitting there under one of those names
+may well be one the user wrote. Install refuses to overwrite such a directory —
+it reports the collision by name, installs the rest, and `pteam preflight` then
+reports the refused one as a missing skill, because from the Lead's point of
+view it is: the role prompt sends it to this pack's procedure and it would find
+somebody else's. Uninstall is the same rule in reverse; it removes only the
+directories the pack can prove it wrote, either by the `.paseo-pi-team` marker
+it leaves inside each one or by a `SKILL.md` byte-identical to the shipped copy
+(which is how installs from before the marker existed are still recognised).
+Edit an installed skill and it becomes yours, and the pack stops touching it.
+
 The Claude copies are installed by `scripts/claude-setup.mjs --install` and only
 when the `claude` CLI is present. They matter: `prompts/lead.md` makes loading
 the orchestration procedure invariant 1, and until the pack installed them a

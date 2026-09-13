@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cw from "./config-walker.mjs";
+import { SKILL_OWNER_MARKER } from "../../scripts/claude-setup.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -77,7 +78,14 @@ function sameBytes(source, installed) {
  * One artifact group. `owned` means the installers delete and re-create the
  * whole directory, so a file with no source counterpart is our leftover.
  */
-function compareDir({ kind, sourceDir, installedDir, owned, sourceFilter = () => true }) {
+function compareDir({
+	kind,
+	sourceDir,
+	installedDir,
+	owned,
+	sourceFilter = () => true,
+	ignoreInstalled = () => false,
+}) {
 	const results = [];
 	const sourceFiles = walk(sourceDir).filter(sourceFilter);
 	const installedFiles = new Set(walk(installedDir));
@@ -94,7 +102,7 @@ function compareDir({ kind, sourceDir, installedDir, owned, sourceFilter = () =>
 	if (owned) {
 		const shipped = new Set(sourceFiles);
 		for (const rel of installedFiles) {
-			if (shipped.has(rel)) continue;
+			if (shipped.has(rel) || ignoreInstalled(rel)) continue;
 			results.push({
 				kind,
 				file: rel,
@@ -211,6 +219,10 @@ export function installDrift({ root = ROOT, env = process.env } = {}) {
 					sourceDir,
 					installedDir: join(claudeSkills, name),
 					owned: true,
+					// claude-setup.mjs writes an ownership marker into each skill
+					// directory it creates; it is the only file there with no
+					// counterpart in the release, and it is ours, not drift.
+					ignoreInstalled: (rel) => rel === SKILL_OWNER_MARKER,
 				}).map((item) => ({ ...item, file: `${name}/${item.file}` })),
 			);
 		}

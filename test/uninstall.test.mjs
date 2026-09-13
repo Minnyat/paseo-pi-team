@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { SKILL_OWNER_MARKER } from "../scripts/claude-setup.mjs";
 
 const home = mkdtempSync(join(tmpdir(), "paseo-uninstall-"));
 const piHome = join(home, ".pi");
@@ -61,6 +62,11 @@ function install() {
 		writeFileSync(join(skillsDir, name, "SKILL.md"), `# ${name}`);
 		mkdirSync(join(claudeDir, "skills", name), { recursive: true });
 		writeFileSync(join(claudeDir, "skills", name, "SKILL.md"), `# ${name}`);
+		// The ownership marker a real install writes. Without it these are
+		// indistinguishable from a skill the user wrote under the same name, and
+		// uninstall deliberately leaves those alone — so a fixture that skips it
+		// is not simulating an install, it is simulating a collision.
+		writeFileSync(join(claudeDir, "skills", name, SKILL_OWNER_MARKER), "paseo-pi-team\n");
 	}
 	writeFileSync(join(teamScriptsDir(), "lib-common.mjs"), "// support");
 
