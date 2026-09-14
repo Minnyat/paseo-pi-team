@@ -3300,6 +3300,13 @@ export function forkModeBlockReason({
 	/** The fork's own family; only "claude" has modes to check at all. */
 	family?: RuntimeFamily | null;
 }): string | null {
+	// Refused before anything is compared, and on any family: asking for it does
+	// not make it a seat mode, so a verify that repeats "bypassPermissions" must
+	// not pass a fork that is on it. Only a Claude runtime can report this value
+	// at all, so no pi seat is caught by skipping the family check.
+	if (actualMode === FORBIDDEN_SEAT_MODE || expectedMode === FORBIDDEN_SEAT_MODE) {
+		return `BLOCKED: FORK_MODE_UNROUTABLE — "${FORBIDDEN_SEAT_MODE}" is never a seat mode in this pack, requested or not: Paseo's own guardrails are off and the role policy does not replace them.`;
+	}
 	if (expectedMode) {
 		if (!actualMode) {
 			return `BLOCKED: FORK_MODE_UNROUTABLE — the fork reports no mode yet, so it cannot be shown to run "${expectedMode}". A fork whose mode is unknown is a seat that may be parking every tool call in the permission queue; do not use it.`;
@@ -3311,16 +3318,14 @@ export function forkModeBlockReason({
 	}
 	// Nothing was asked for, so a deliberate narrowing is not a fault: a fork
 	// created with modeId "plan" and verified without repeating it must not be
-	// deleted for being on "plan". Only the two modes nobody chooses on purpose
-	// are refused here — and an UNREADABLE mode is left alone, because deleting
-	// a correctly moved fork over a state file that has not caught up yet is the
-	// same over-strictness the model comparison is careful to avoid.
+	// deleted for being on "plan". Of the two modes nobody chooses on purpose,
+	// "bypassPermissions" was refused above; "default" is refused here — and an
+	// UNREADABLE mode is left alone, because deleting a correctly moved fork
+	// over a state file that has not caught up yet is the same over-strictness
+	// the model comparison is careful to avoid.
 	if (family !== "claude" || !actualMode) return null;
 	if (actualMode === "default") {
 		return `BLOCKED: FORK_MODE_UNROUTABLE — the fork is still on "default" (Always Ask): \`paseo import\` cannot carry a mode and Paseo applies no provider default, so nothing ever moved it. Every tool call it makes will park in the permission queue. Delete it and fork again.`;
-	}
-	if (actualMode === FORBIDDEN_SEAT_MODE) {
-		return `BLOCKED: FORK_MODE_UNROUTABLE — the fork is on "${FORBIDDEN_SEAT_MODE}", which is never a seat mode in this pack: Paseo's own guardrails are off and the role policy does not replace them.`;
 	}
 	return null;
 }

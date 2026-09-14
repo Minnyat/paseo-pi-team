@@ -2172,6 +2172,20 @@ import {
 	// pi has no modes, and an unreadable mode is not evidence of anything.
 	assert.equal(forkModeBlockReason({ actualMode: "default", family: "pi" }), null);
 	assert.equal(forkModeBlockReason({ actualMode: null, family: "claude" }), null);
+	// Asking for the forbidden mode does not launder it: a verify that repeats
+	// "bypassPermissions" must still refuse a fork that is on it.
+	assert.match(
+		forkModeBlockReason({
+			expectedMode: "bypassPermissions",
+			actualMode: "bypassPermissions",
+			family: "claude",
+		}) ?? "",
+		/guardrails/,
+	);
+	assert.match(
+		forkModeBlockReason({ expectedMode: "bypassPermissions", actualMode: "bypassPermissions" }) ?? "",
+		/guardrails/,
+	);
 }
 
 console.log("[paseo-team] policy tests passed");

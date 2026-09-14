@@ -618,7 +618,12 @@ test("a fork that cannot be moved off default is deleted, not handed over", asyn
 					},
 				},
 			),
-			(error) => error.code === "FORK_MODE_UNSET" && /deleted/.test(error.message),
+			(error) =>
+				error.code === "FORK_MODE_UNSET" &&
+				/deleted/.test(error.message) &&
+				// The default mode was never chosen by the caller, so the way out
+				// when auto does not exist for this model is named.
+				/explicit modeId/.test(error.message),
 		);
 		assert.deepEqual(calls[2], ["delete", FORKED], "the half-made fork does not survive");
 	});
@@ -641,6 +646,24 @@ test("verify refuses a claude fork still sitting on default", async () => {
 		assert.equal(result.ok, false);
 		assert.equal(result.code, "FORK_MODE_UNROUTABLE");
 		assert.equal(result.mode, "default");
+		assert.equal(result.removed, true);
+		assert.deepEqual(calls, [["delete", FORKED]]);
+	});
+});
+
+test("verify refuses bypassPermissions even when the caller asked for it", async () => {
+	await withState(async ({ agentsRoot, write }) => {
+		write(FORKED, {
+			provider: "claude-lead/claude-opus-5",
+			runtimeInfo: { sessionId: "s", model: "claude-opus-5", modeId: "bypassPermissions" },
+		});
+		const calls = [];
+		const result = await verifyFork(
+			{ agentId: FORKED, model: "claude-opus-5", modeId: "bypassPermissions" },
+			{ role: "lead", agentsRoot, runPaseo: async (args) => (calls.push(args), {}) },
+		);
+		assert.equal(result.ok, false);
+		assert.equal(result.code, "FORK_MODE_UNROUTABLE");
 		assert.equal(result.removed, true);
 		assert.deepEqual(calls, [["delete", FORKED]]);
 	});

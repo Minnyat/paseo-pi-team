@@ -154,6 +154,9 @@ assert.ok(
 	assert.match(rows[0].suspicion, /Always Ask/);
 	assert.match(rows[0].suspicion, /2 already queued/);
 	assert.equal(rows[0].fix, "paseo agent mode a auto");
+	// The fix is conditional on auto existing for that seat, and the row says so.
+	assert.match(rows[0].fixNote, /Bedrock\/Vertex/);
+	assert.match(rows[0].fixNote, /never "bypassPermissions"/);
 	assert.match(rows[1].suspicion, /guardrails/);
 	assert.deepEqual(classifyParkedSeats(null), []);
 }

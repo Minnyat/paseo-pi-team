@@ -145,6 +145,11 @@ export function classifyParkedSeats(agents) {
           ? `seat is on "default" (Always Ask): every tool call waits for a human${pending > 0 ? ` — ${pending} already queued` : ""}. Paseo does not apply the provider's defaultMode at create time, so a seat created without settings.modeId lands here.`
           : 'seat is on "bypassPermissions": Paseo\'s own guardrails are off, and the role policy does not replace them.',
       fix: `paseo agent mode ${agent.id} auto`,
+      // `auto` is not always there to move to, and the command then fails
+      // without correcting anything — say what to do instead of leaving the
+      // operator to rediscover it.
+      fixNote:
+        '"auto" needs support from the seat\'s backend and model: it is absent under Bedrock/Vertex, and a model without it answers "auto mode unavailable for this model". Then pick another explicit mode the seat supports ("acceptEdits", "plan", or "default" if you mean to watch it) — never "bypassPermissions".',
     });
   }
   return rows;

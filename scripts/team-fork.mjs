@@ -301,7 +301,7 @@ export async function forkAgent(input = {}, options = {}) {
 			}
 			throw bad(
 				"FORK_MODE_UNSET",
-				`the fork was imported but could not be moved onto mode "${mode}" (${String(error?.message ?? error)}). ${removed ? "It has been deleted; fork again." : `DELETE IT BY HAND — \`paseo delete ${forkAgentId}\` — then fork again.`} An imported seat stays on "default", where every tool call waits for a human.`,
+				`the fork was imported but could not be moved onto mode "${mode}" (${String(error?.message ?? error)}). ${removed ? "It has been deleted; fork again." : `DELETE IT BY HAND — \`paseo delete ${forkAgentId}\` — then fork again.`} An imported seat stays on "default", where every tool call waits for a human.${requestedMode === null ?` If "${mode}" is unavailable for this backend or model (Bedrock/Vertex, or a model without it), fork again with an explicit modeId the seat supports.` : ""}`,
 			);
 		}
 	}

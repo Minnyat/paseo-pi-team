@@ -405,7 +405,7 @@ create_agent({
 ```
 
 The Paseo CLI spells the same thing `--mode` (`paseo run --mode default`), and
-so does `remote-paseo.mjs run`, which refuses a `claude-*` route without one.
+so does `remote-paseo.mjs run`, which never sends a `claude-*` route without one.
 
 `modeId: "auto"` is the right answer for a Peer, and it is what
 `remote-paseo.mjs run` fills in when `--mode` is omitted
@@ -462,7 +462,8 @@ the pack creates a seat:
   sitting on `"default"`.
 
 `pteam watchdog` reports the seats already running that way, under `parked`,
-with the `paseo agent mode <id> auto` that fixes each one.
+with the `paseo agent mode <id> auto` that fixes each one where `auto` exists
+(see below for where it does not — the row's `fixNote` says the same).
 
 Two more mode facts worth knowing before you debug one:
 

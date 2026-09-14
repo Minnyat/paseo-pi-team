@@ -392,11 +392,16 @@ Hard rules for a mixed fleet:
 
   A fork needs nothing extra: `paseo import` cannot carry a mode, so
   `team_fork` moves the fork onto `auto` right after the import and deletes it
-  if that fails. Pass `modeId` to `team_fork` only to narrow it on purpose
-  (`"plan"` for a fork that should propose before acting).
+  if that fails. Pass `modeId` to `team_fork` to narrow it on purpose
+  (`"plan"` for a fork that should propose before acting) — and whenever `auto`
+  is unavailable for the fork: under Bedrock/Vertex, or on a model that answers
+  "auto mode unavailable for this model". Without `modeId` such a fork fails
+  with `FORK_MODE_UNSET` every time; pick another explicit mode the seat
+  supports, never `bypassPermissions`.
 
   Seats already running on the wrong mode show up in `pteam watchdog` under
-  `parked`, each with the `paseo agent mode <id> auto` that fixes it.
+  `parked`, each with the `paseo agent mode <id> auto` that fixes it where
+  `auto` exists, and a `fixNote` for the seats where it does not.
 
 Model classes (decided by task risk + disposition, not by role name):
 
