@@ -53,7 +53,8 @@
         "extends": "claude",
         "label": "Claude Project Lead",
         "env": {
-          "PASEO_PI_ROLE": "lead"
+          "PASEO_PI_ROLE": "lead",
+          "CLAUDE_CODE_ENABLE_CFC": "1"
         },
         "disallowedTools": [
           "Write",
@@ -71,7 +72,8 @@
         "extends": "claude",
         "label": "Claude Peer",
         "env": {
-          "PASEO_PI_ROLE": "peer"
+          "PASEO_PI_ROLE": "peer",
+          "CLAUDE_CODE_ENABLE_CFC": "1"
         },
         "disallowedTools": [
           "Task",

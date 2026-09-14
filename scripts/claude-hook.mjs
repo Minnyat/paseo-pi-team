@@ -20,10 +20,9 @@
 // safe to install globally for humans using Claude Code outside the team.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isEntrypoint } from "./lib-common.mjs";
+import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -81,7 +80,7 @@ async function loadPolicy(env = process.env) {
 }
 
 export function teamHome(env = process.env) {
-	return env.PASEO_TEAM_HOME?.trim() || join(homedir(), ".paseo-pi-team");
+	return teamConfigDir(env);
 }
 
 export function sessionStateDir(env = process.env) {

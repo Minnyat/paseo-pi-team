@@ -42,7 +42,7 @@ export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 // --- request -> argv -------------------------------------------------------
 
-const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings", "seats"];
+export const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo", "pi-settings", "seats", "pi-models"];
 const ROLES = ["supervisor", "lead", "peer"];
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -183,6 +183,28 @@ export const ROUTES = {
 	},
 
 	"GET /api/watchdog": { build: () => ({ args: ["watchdog"] }), cacheMs: 10_000, tag: "watchdog" },
+
+	// Rebuilding pi's catalog means one real completion per model the endpoint
+	// lists, so it is minutes rather than seconds on a slow upstream — hence a
+	// timeout of its own. It rewrites models.json and the daemon's snapshot, so
+	// every cached answer that quotes a model has to go.
+	"POST /api/models/sync": {
+		build: (q, body) => ({
+			args: [
+				"models",
+				"sync",
+				...(typeof body?.only === "string" && body.only ? ["--only", body.only] : []),
+				...(body?.dryRun === true ? ["--dry-run"] : []),
+			],
+		}),
+		timeoutMs: 600_000,
+		invalidates: ["config", "preflight", "status", "models"],
+	},
+	"POST /api/models/refresh": {
+		build: () => ({ args: ["models", "refresh"] }),
+		timeoutMs: 60_000,
+		invalidates: ["config", "preflight", "models"],
+	},
 };
 
 // --- CLI invocation --------------------------------------------------------
@@ -235,6 +257,32 @@ export function runCli(args, stdin = null, options = {}) {
 
 // --- cache + single flight -------------------------------------------------
 
+/**
+ * Is this answer worth remembering?
+ *
+ * A zero exit is not the same question as a successful answer, and `graph` is
+ * where they came apart. `collectGraph` deliberately reports a fault AS DATA —
+ * `{ ok: false, degraded: [...] }` with exit 0 — so the WebUI can still render
+ * a page that explains itself; making it exit non-zero instead would send this
+ * server down the CLI_FAILED path below, which returns 502 and never parses the
+ * body, so the explaining page would be the thing lost.
+ *
+ * The cost was here: the exit code alone said "successful", and a graph taken
+ * while the daemon was down got cached for its whole window — exactly the
+ * "keep showing a stale error after the daemon came back" this cache says it
+ * avoids. So the body gets a say too. Parsed once, on the miss path only, and
+ * an unparseable body is simply not cached: it is going to 502 anyway.
+ */
+export function isCacheable(value) {
+	if (value?.exitCode !== 0) return false;
+	if (typeof value.stdout !== "string" || value.stdout.trim() === "") return true;
+	try {
+		return JSON.parse(value.stdout)?.ok !== false;
+	} catch {
+		return false;
+	}
+}
+
 export function createCache() {
 	const entries = new Map();
 	const inflight = new Map();
@@ -251,7 +299,7 @@ export function createCache() {
 			const value = await promise;
 			// Only successful answers are cached: caching a failure would keep
 			// showing a stale error after the daemon came back.
-			if (value.exitCode === 0) entries.set(key, { at: Date.now(), value, tag });
+			if (isCacheable(value)) entries.set(key, { at: Date.now(), value, tag });
 			return value;
 		},
 		// A POST drops only the reads its write can reach (ROUTES `invalidates`),
@@ -447,6 +495,17 @@ export async function startServer(options = {}) {
 			});
 			if (req.method === "POST") cache.invalidate(route?.invalidates ?? []); // a write drops only the reads it can affect
 			if (result.exitCode !== 0) {
+				// A non-zero exit is not always a crash: several commands answer
+				// with a full JSON report AND exit non-zero because part of the
+				// work failed. Flattening that into a stdout string threw away
+				// the only copy of which part — so the body is carried through
+				// verbatim when it parses, and the page can say what happened.
+				let data = null;
+				try {
+					data = JSON.parse(result.stdout ?? "");
+				} catch {
+					/* genuinely not a JSON answer; stdout below is all there is */
+				}
 				sendJson(res, 502, {
 					ok: false,
 					code: "CLI_FAILED",
@@ -454,6 +513,7 @@ export async function startServer(options = {}) {
 					exitCode: result.exitCode,
 					stderr: result.stderr?.slice(0, 4000) ?? "",
 					stdout: result.stdout?.slice(0, 4000) ?? "",
+					...(data !== null && typeof data === "object" ? { data } : {}),
 				});
 				return;
 			}

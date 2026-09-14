@@ -10,7 +10,7 @@
  *
  *   paseo-team status                  -> machine-readable snapshot of paths + presence
  *   paseo-team preflight    [--strict|--json|--skip-models|--runtime pi|claude|both|--host-id <id>|--cluster <p>|--routes <p>]
- *   paseo-team claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
+ *   paseo-team claude-setup [--install|--apply|--verify|--uninstall|--print-providers] [--json] [--force]
  *   paseo-team config read  <section>  -> full JSON of that section (stdout)
  *   paseo-team config write <section>  -> full JSON of that section from stdin, atomic+backup
  *   paseo-team prompts read <role>     -> markdown body (JSON-wrapped)
@@ -18,6 +18,8 @@
  *   paseo-team skills list             -> [{ name, path, pack }]
  *   paseo-team skills read <name>      -> SKILL.md body (JSON-wrapped)
  *   paseo-team skills write <name>     -> SKILL.md body from stdin
+ *   paseo-team cost [--all|--cluster <id>]        -> per-agent + summed cost for one cluster
+ *   paseo-team activity <ref> [--tail|--max-chars] -> one agent's activity, capped PER ENTRY
  *   paseo-team env list                -> documented env knobs + process values + target file
  *   paseo-team install                            -> delegate to the bundled installer
  *
@@ -43,7 +45,8 @@ import {
 	baseRole,
 	SEAT_CAPABILITIES,
 } from "../scripts/seat-profiles.mjs";
-import { runPaseoJson, PaseoError } from "./lib/paseo-bridge.mjs";
+import { runPaseoJson, runPaseoText, mapWithConcurrency, refreshProviderSnapshot, PaseoError } from "./lib/paseo-bridge.mjs";
+import { describeProtocolState, protocolState } from "./lib/workspace-protocol.mjs";
 import {
 	ROLE_PROVIDERS,
 	RUNTIME_FAMILIES,
@@ -52,9 +55,11 @@ import {
 	normalizeModelEntry,
 	providerFamily,
 } from "../scripts/model-routing.mjs";
+import { configProblems, normalizeConfig, resolveApiKey, syncModels } from "../scripts/pi-models-sync.mjs";
 import * as graphCache from "./lib/graph-cache.mjs";
 import { collectGraph, inferRole, inferSeat, normalizePermits } from "./lib/graph.mjs";
 import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
+import { agentCluster, normalizeCluster } from "../extensions/paseo-team-core/policy-core.js";
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
 
@@ -64,6 +69,17 @@ function fail(msg, code = 1) {
 	process.stderr.write(`[paseo-team] ${msg}\n`);
 	process.exit(code);
 }
+
+/**
+ * Exit code for "you typed something this CLI does not accept".
+ *
+ * 2 is usage, 1 is an operation that ran and failed — the distinction a script
+ * keys on to tell a typo from a daemon that is down. The top-level dispatcher
+ * and `seats` already used 2 while every other subcommand dispatcher used 1,
+ * so one question had two answers depending on which noun you got wrong.
+ */
+const USAGE = 2;
+const usageFail = (msg) => fail(msg, USAGE);
 
 function json(obj) {
 	process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
@@ -243,7 +259,145 @@ async function discoverModels(options = {}) {
 	return { byProvider, degraded };
 }
 
+/**
+ * `models refresh` — tell the daemon to re-read its provider catalog.
+ *
+ * Editing ~/.pi/agent/models.json changes nothing the daemon can see until it
+ * is told: it caches the catalog for its whole process lifetime. Without this
+ * the only cure is a daemon restart, which drops every live agent connection
+ * for what is a read-only change.
+ */
+async function cmdModelsRefresh(argv) {
+	rejectUnknownFlags(argv, ["--provider", "--host"]);
+	const provider = flagValue(argv, "--provider");
+	const host = flagValue(argv, "--host");
+	if (provider !== undefined && !ROLE_PROVIDERS.includes(provider)) {
+		fail(`models refresh: --provider must be one of ${ROLE_PROVIDERS.join(", ")} (got '${provider}')`);
+	}
+	const targets = provider === undefined ? [] : [provider];
+	const result = await refreshProviderSnapshot(targets, { timeoutMs: 20000, ...(host ? { host } : {}) });
+	if (!result.ok) {
+		json({
+			ok: false,
+			command: "models refresh",
+			code: result.code,
+			message: result.message,
+			// The catalog is still whatever the daemon read at startup, so say
+			// what actually fixes it rather than leaving the user guessing.
+			hint: "restart the daemon to pick up catalog changes (systemd: systemctl --user restart paseo)",
+		});
+		process.exit(3);
+	}
+	json({
+		ok: true,
+		command: "models refresh",
+		providers: targets.length > 0 ? targets : "all",
+	});
+}
+
+/**
+ * `models sync` — rebuild pi's model catalogs from their endpoints, then tell
+ * the daemon about it.
+ *
+ * Two halves on purpose. scripts/pi-models-sync.mjs knows about endpoints and
+ * models.json and nothing about Paseo, so it still works on a host with no
+ * daemon; this function adds the one Paseo-specific step, because a catalog the
+ * daemon has not re-read is a catalog nobody can route to.
+ *
+ * A refresh that fails does NOT fail the sync: the file on disk is correct
+ * either way, and pi itself re-reads it on every start. It is reported, with
+ * the restart that would finish the job.
+ */
+async function cmdModelsSync(argv) {
+	rejectUnknownFlags(argv, ["--config", "--only", "--no-probe", "--all", "--no-refresh", "--dry-run"]);
+	const configPath = flagValue(argv, "--config") ?? resolveSection("pi-models");
+	const doc = cw.readJsonOrNull(configPath);
+	if (!doc) {
+		json({
+			ok: false,
+			command: "models sync",
+			code: "CONFIG_MISSING",
+			path: configPath,
+			message: `no endpoint configured at ${configPath}`,
+			hint: "copy config/pi-models.example.json there, or add one in the WebUI under Cấu hình → Kho model Pi",
+		});
+		process.exit(2);
+	}
+
+	const { entries: all, legacy } = normalizeConfig(doc);
+	const only = flagValue(argv, "--only");
+	const entries = only === undefined ? all : all.filter((entry) => entry.name === only);
+	if (only !== undefined && entries.length === 0) {
+		fail(`models sync: --only '${only}' is not configured (have: ${all.map((e) => e.name).join(", ") || "none"})`);
+	}
+	const problems = configProblems(entries);
+	if (problems.length > 0) {
+		json({ ok: false, command: "models sync", code: "CONFIG_INVALID", path: configPath, problems });
+		process.exit(2);
+	}
+
+	// Resolve every key BEFORE any request: a half-synced run would rewrite one
+	// provider's catalog and leave the operator guessing about the rest.
+	const keys = new Map();
+	const keySources = {};
+	const missing = [];
+	for (const entry of entries) {
+		const { key, source, tried } = resolveApiKey(entry);
+		if (!key) {
+			missing.push({ provider: entry.name, tried });
+			continue;
+		}
+		keys.set(entry.name, key);
+		keySources[entry.name] = source;
+	}
+	if (missing.length > 0) {
+		json({
+			ok: false,
+			command: "models sync",
+			code: "API_KEY_MISSING",
+			missing,
+			hint: "put each key in the keyFile that provider names; systemd hands the daemon the same file",
+		});
+		process.exit(2);
+	}
+
+	const dryRun = argv.includes("--dry-run");
+	const report = await syncModels({
+		entries,
+		keys,
+		modelsPath: cw.piModelsPath(),
+		probe: argv.includes("--no-probe") ? false : undefined,
+		keepAll: argv.includes("--all"),
+		dryRun,
+	});
+	if (report.code) {
+		json({ ok: false, command: "models sync", ...report });
+		process.exit(2);
+	}
+
+	// The daemon caches the catalog for its whole lifetime, so a write nobody
+	// told it about changes nothing it can route to.
+	let refresh = { skipped: true, reason: dryRun ? "--dry-run" : "--no-refresh" };
+	const wroteSomething = !dryRun && report.providers.some((p) => p.ok);
+	if (wroteSomething && !argv.includes("--no-refresh")) {
+		const refreshed = await refreshProviderSnapshot([], { timeoutMs: 20000 });
+		refresh = refreshed.ok
+			? { ok: true }
+			: {
+					ok: false,
+					code: refreshed.code,
+					message: refreshed.message,
+					hint: "the catalog on disk is correct; restart the daemon to make it visible (systemctl --user restart paseo)",
+				};
+	}
+	json({ ok: report.ok, command: "models sync", legacyConfigShape: legacy, keySources, ...report, refresh });
+	// A provider that failed must not read as success in a script.
+	if (!report.ok) process.exit(3);
+}
+
 async function cmdModels(argv) {
+	if (argv[0] === "refresh") return cmdModelsRefresh(argv.slice(1));
+	if (argv[0] === "sync") return cmdModelsSync(argv.slice(1));
 	rejectUnknownFlags(argv, ["--provider"]);
 	const provider = flagValue(argv, "--provider");
 	if (provider !== undefined) {
@@ -261,8 +415,14 @@ async function cmdModels(argv) {
 		return;
 	}
 	const { byProvider, degraded } = await discoverModels({ timeoutMs: 20000 });
+	// `ok` reports whether this answer is COMPLETE, not whether the command ran.
+	// A fan-out keeps exit 0 and a renderable body on purpose — same reason
+	// `graph` does — but claiming ok:true after reaching nothing made "the
+	// daemon is unreachable" indistinguishable from "there are no models", and
+	// disagreed with `models --provider X`, which fails loudly on the same
+	// daemon. Partial results stay ok:true with `degraded` listing the gaps.
 	json({
-		ok: true,
+		ok: Object.keys(byProvider).length > 0 || degraded.length === 0,
 		providers: byProvider,
 		count: Object.fromEntries(Object.entries(byProvider).map(([k, v]) => [k, v.length])),
 		degraded,
@@ -281,6 +441,7 @@ const CONFIG_SECTIONS = {
 	paseo: () => cw.paseoConfigPath(),
 	"pi-settings": () => cw.piSettingsPath(),
 	seats: () => seatsPath(cw.teamConfigDir()),
+	"pi-models": () => join(cw.teamConfigDir(), "pi-models.local.json"),
 };
 
 function resolveSection(section) {
@@ -332,8 +493,23 @@ function cmdConfigWrite(section) {
 // prompts read/write
 // ---------------------------------------------------------------------------
 
+/**
+ * `cw.rolePromptPath` throws on an unknown role, and the top-level handler
+ * prints `error.stack` — so a plain typo answered with a JavaScript stack
+ * trace while every other bad-name path here printed one clean line. The
+ * message the walker raises is already the right one; only its framing and
+ * exit code were wrong.
+ */
+function rolePromptPathOrUsage(role) {
+	try {
+		return cw.rolePromptPath(role);
+	} catch (error) {
+		return usageFail(String(error?.message ?? error));
+	}
+}
+
 function cmdPromptsRead(role) {
-	const path = cw.rolePromptPath(role);
+	const path = rolePromptPathOrUsage(role);
 	if (!existsSync(path)) {
 		fail(`prompt not installed for role '${role}' at ${path} — run 'paseo-team install'`);
 	}
@@ -341,7 +517,7 @@ function cmdPromptsRead(role) {
 }
 
 function cmdPromptsWrite(role) {
-	const path = cw.rolePromptPath(role);
+	const path = rolePromptPathOrUsage(role);
 	const content = readStdin();
 	cw.atomicWrite(path, content);
 	json({ ok: true, wrote: true, role, path });
@@ -391,11 +567,14 @@ const DOC_ENV = [
 	{ key: "PASEO_PI_ROLE", scope: "per-provider", where: "Paseo config agents.providers.<name>.env", purpose: "role selection (supervisor|lead|peer)" },
 	{ key: "PASEO_TEAM_LEAD_WRITE", scope: "host", where: "machine env", purpose: "grant Lead write/edit tools ('1' to enable)" },
 	{ key: "PASEO_TEAM_EXTRA_TOOLS", scope: "host", where: "machine env", purpose: "comma-separated extra tools per profile" },
+	{ key: "PST_TEAM_CONFIG_DIR", scope: "host", where: "machine env", purpose: "override the pack's config directory (routing files, seat ledger, permit log, Claude session state). Default ~/.paseo-pi-team; PASEO_TEAM_HOME is honoured as a legacy alias and loses to this one" },
+	{ key: "PASEO_TEAM_HOME", scope: "host", where: "machine env", purpose: "legacy alias for PST_TEAM_CONFIG_DIR — still read, and only used when PST_TEAM_CONFIG_DIR is unset" },
 	{ key: "PASEO_TEAM_PROMPTS_DIR", scope: "host", where: "machine env", purpose: "override prompts directory" },
 	{ key: "PASEO_TEAM_SCRIPTS_DIR", scope: "host", where: "machine env", purpose: "override support-scripts directory" },
 	{ key: "PASEO_TEAM_TOPOLOGY", scope: "per-agent", where: "paseo run --env / provider env", purpose: "single (default) | multi — 'multi' turns on the several-Supervisor governance rules: DOMAIN on supervisor blocks, recovery_for inside the supervisor's own domain, and the send_agent_prompt ownership wall. Any unrecognized value resolves to 'multi' (the side that only denies)" },
 	{ key: "PASEO_TEAM_DOMAIN", scope: "per-agent", where: "paseo run --env / provider env", purpose: "jurisdiction of this seat; also set it as the team.domain label so `ls --label` can find it. Required on every Lead and Supervisor under PASEO_TEAM_TOPOLOGY=multi" },
 	{ key: "PASEO_HOME", scope: "host", where: "machine env", purpose: "Paseo's own home; the CLI reads agent state from $PASEO_HOME/agents (defaults to ~/.paseo)" },
+	{ key: "PASEO_TEAM_NODE_EXEC", scope: "install-time", where: "env of the `pteam install` / `claude-setup --install` run", purpose: "absolute node to write into the Claude hook + MCP registrations. Default: the most durable version-alias of the running interpreter that still satisfies engines (>=22.18), else the running one. Set this when you know your layout better than that heuristic — e.g. a version manager whose aliases move. `claude-setup --verify` re-checks whichever path was written" },
 ];
 
 function cmdEnvList() {
@@ -428,8 +607,8 @@ function cmdInstall(argv) {
 // ---------------------------------------------------------------------------
 
 function cmdClaudeSetup(argv) {
-	const known = ["--install", "--verify", "--uninstall", "--print-providers"];
-	const passthrough = ["--json"];
+	const known = ["--install", "--apply", "--verify", "--uninstall", "--print-providers"];
+	const passthrough = ["--json", "--force"];
 	// No valued flags any more: --attach-cdp-port went with the agent-browser
 	// integration. Kept as an empty list because the loop below distinguishes
 	// flag-with-value from bare flag, and collapsing that is how the next valued
@@ -459,6 +638,11 @@ function cmdClaudeSetup(argv) {
 	const modes = bareFlags.filter((arg) => known.includes(arg));
 	if (modes.length > 1) fail(`claude-setup: pick one of ${known.join(", ")}`);
 	const mode = modes[0] ?? "--verify";
+	// --force overwrites a provider the operator owns, so it must never be a
+	// no-op flag someone leaves on a command that cannot use it.
+	if (bareFlags.includes("--force") && mode !== "--apply") {
+		fail("claude-setup: --force is only valid with --apply");
+	}
 	if (valuedArgs.length > 0 && mode !== "--install") {
 		fail(`claude-setup: ${valuedArgs[0]} is only valid with --install`);
 	}
@@ -625,6 +809,279 @@ async function cmdPermitDecision(action, argv) {
 	json({ ok: true, action, agentId: agent, requestId, decidedAt, response: result });
 }
 
+// --- cost ------------------------------------------------------------------
+
+/**
+ * The usage numbers Paseo records for one agent, under whatever casing the
+ * daemon used. Reported under Paseo's own name (`LastUsage`) rather than
+ * renamed to `totalCostUsd`: the two are not obviously the same thing, and a
+ * cost report that quietly relabels its source is the kind of number people
+ * later build a budget on.
+ */
+function normalizeUsage(detail) {
+	const raw = detail?.LastUsage ?? detail?.lastUsage ?? detail?.usage ?? null;
+	if (!raw || typeof raw !== "object") return null;
+	const num = (...keys) => {
+		for (const key of keys) {
+			const value = raw[key];
+			if (typeof value === "number" && Number.isFinite(value)) return value;
+		}
+		return null;
+	};
+	return {
+		costUsd: num("CostUsd", "costUsd", "cost_usd", "totalCostUsd"),
+		inputTokens: num("InputTokens", "inputTokens"),
+		outputTokens: num("OutputTokens", "outputTokens"),
+		cachedTokens: num("CachedTokens", "cachedTokens"),
+	};
+}
+
+/**
+ * Cost for a whole cluster in ONE command.
+ *
+ * `paseo ls` carries no cost column and `paseo inspect` carries it one agent at
+ * a time, so a fifteen-Peer project had no way to answer "what has this cost"
+ * except fifteen sequential calls and mental arithmetic. The cluster is the
+ * right unit because it is already the pack's authority boundary: the same
+ * grouping that decides which Supervisor may bind which Lead decides whose
+ * spend this is.
+ *
+ * Cost discipline (paseo-bridge.mjs): one `paseo` invocation is ~3s of process
+ * startup, so the inspects run with bounded concurrency and an agent that fails
+ * to answer is reported as unavailable rather than silently counted as zero — a
+ * total that quietly omits a seat is worse than one that names the gap.
+ */
+async function cmdCost(argv) {
+	rejectUnknownFlags(argv, ["--all", "--cluster", "--concurrency", "--json"]);
+	const concurrencyRaw = flagValue(argv, "--concurrency");
+	// Validated to the range the message names rather than clamped: this repo
+	// already treats a silently-ignored flag value as the same defect class as a
+	// silently-ignored flag.
+	if (
+		concurrencyRaw !== undefined &&
+		(!/^\d{1,2}$/.test(concurrencyRaw) || Number(concurrencyRaw) < 1 || Number(concurrencyRaw) > 16)
+	) {
+		fail("--concurrency must be a number between 1 and 16");
+	}
+	const concurrency = concurrencyRaw === undefined ? 6 : Number(concurrencyRaw);
+	const clusterRaw = flagValue(argv, "--cluster");
+	const clusterFilter = clusterRaw === undefined ? null : normalizeCluster(clusterRaw);
+	if (clusterRaw !== undefined && clusterFilter === null) {
+		fail(`--cluster '${clusterRaw}' is not a usable cluster id`);
+	}
+
+	const listed = await live(flag(argv, "--all") ? ["ls", "-g", "-a"] : ["ls", "-g"], "cost");
+	// The Paseo CLI reports some daemon failures as a successful JSON body, so an
+	// unchecked envelope here would render as "0 agents, $0.00, ok: true" — the
+	// most dangerous possible answer to "what has this cost".
+	const listEnvelope = paseoErrorEnvelope(listed);
+	if (listEnvelope) {
+		json({ ok: false, command: "cost", ...listEnvelope });
+		process.exit(3);
+	}
+	const rows = Array.isArray(listed) ? listed : [];
+	const ids = rows.map((agent) => agent?.id).filter(isAgentId);
+	const { states } = readAgentStates(ids);
+
+	const candidates = rows
+		// An id `paseo ls` returned in a shape we cannot validate never becomes an
+		// argv element: safeRef would exit the process mid-snapshot, turning one
+		// odd row into a cost report nobody gets.
+		.filter((agent) => isAgentId(agent?.id))
+		.map((agent) => {
+			const state = states[agent.id] ?? null;
+			return { agent, cluster: state ? agentCluster(state) : null };
+		})
+		// A null cluster is "unknown", not "mine": including it would inflate one
+		// project's bill with another's seats. It stays visible via `--all`
+		// without a filter, where the caller has asked for everything.
+		.filter(({ cluster }) => clusterFilter === null || cluster === clusterFilter);
+
+	const results = await mapWithConcurrency(candidates, concurrency, async ({ agent, cluster }) => {
+		const detail = await runPaseoJson(["inspect", safeRef(agent.id)]);
+		// Same trap as the inventory reads above: `paseo inspect` can answer a
+		// daemon failure with exit 0 and an `{ error }` body. Left unchecked it has
+		// no usage field, so it would be filed as "Paseo reports no usage for this
+		// agent" — a transport failure silently reclassified as a benign state,
+		// and a total quietly missing a seat.
+		const envelope = paseoErrorEnvelope(detail);
+		if (envelope) {
+			const failure = new PaseoError(envelope.code, envelope.message);
+			return { agent, cluster, usage: null, failure };
+		}
+		return { agent, cluster, usage: normalizeUsage(detail), failure: null };
+	});
+
+	const agents = [];
+	const unavailable = [];
+	const totals = { costUsd: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+	let costedCount = 0;
+	for (const [index, result] of results.entries()) {
+		const { agent, cluster } = candidates[index];
+		if (!result.ok) {
+			unavailable.push({
+				id: agent?.id ?? null,
+				shortId: agent?.shortId ?? null,
+				cluster,
+				code: result.error instanceof PaseoError ? result.error.code : "PASEO_FAILED",
+				message: String(result.error?.message ?? result.error),
+			});
+			continue;
+		}
+		const { usage, failure } = result.value;
+		if (failure) {
+			unavailable.push({
+				id: agent.id,
+				shortId: agent?.shortId ?? null,
+				cluster,
+				code: failure.code,
+				message: failure.message,
+			});
+			continue;
+		}
+		if (usage === null) {
+			// An agent Paseo has recorded no usage for (never started, archived
+			// before its first turn) is not a failure and not a zero — say so.
+			unavailable.push({
+				id: agent?.id ?? null,
+				shortId: agent?.shortId ?? null,
+				cluster,
+				code: "USAGE_UNREPORTED",
+				message: "Paseo reports no usage for this agent",
+			});
+			continue;
+		}
+		costedCount += 1;
+		for (const key of Object.keys(totals)) {
+			if (typeof usage[key] === "number") totals[key] += usage[key];
+		}
+		agents.push({
+			id: agent?.id ?? null,
+			shortId: agent?.shortId ?? null,
+			name: agent?.name ?? null,
+			role: inferRole(agent?.provider),
+			provider: agent?.provider ?? null,
+			status: agent?.status ?? null,
+			cluster,
+			...usage,
+		});
+	}
+	agents.sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0));
+	json({
+		ok: true,
+		cluster: clusterFilter,
+		scope: flag(argv, "--all") ? "all" : "active",
+		agentCount: candidates.length,
+		costedCount,
+		totals: { ...totals, costUsd: Number(totals.costUsd.toFixed(6)) },
+		agents,
+		unavailable,
+		source: "paseo inspect -> LastUsage (per agent); summed here, not by the daemon",
+	});
+}
+
+// --- activity ---------------------------------------------------------------
+
+/** An entry in `paseo logs` output starts a line with its own `[Speaker]` tag. */
+const ACTIVITY_ENTRY_RE = /^\[[A-Za-z][A-Za-z ]{0,30}\]/;
+
+/**
+ * Split a transcript into entries and cap each one INDEPENDENTLY.
+ *
+ * A per-entry cap is the whole point. `limit`/`--tail` bounds how many entries
+ * come back but not how big one is, and a single entry can be a Peer's whole
+ * PEER_MESSAGE_V1 report — thousands of lines whose full text is, by the pack's
+ * own output contract, already sitting in a file the report names. Asking for
+ * four activities and being handed half a megabyte is not a large answer to a
+ * small question; it is the same document twice.
+ */
+export function clipActivity(text, { maxChars, tail }) {
+	const lines = String(text ?? "").split(/\r?\n/);
+	const entries = [];
+	for (const line of lines) {
+		if (entries.length === 0 || ACTIVITY_ENTRY_RE.test(line)) {
+			entries.push({ kind: ACTIVITY_ENTRY_RE.exec(line)?.[0].slice(1, -1) ?? null, lines: [line] });
+		} else {
+			entries[entries.length - 1].lines.push(line);
+		}
+	}
+	const picked = tail > 0 ? entries.slice(-tail) : entries;
+	return picked.map((entry, index) => {
+		const body = entry.lines.join("\n").replace(/\s+$/, "");
+		const truncated = body.length > maxChars;
+		return {
+			index,
+			kind: entry.kind,
+			chars: body.length,
+			truncated,
+			text: truncated
+				? `${body.slice(0, maxChars)}\n[... ${body.length - maxChars} more characters withheld by --max-chars. The full text is in the artifact this entry names, or read it with: paseo logs <agent> --tail 1]`
+				: body,
+		};
+	});
+}
+
+/**
+ * Bounded read of one agent's activity.
+ *
+ * Exists because the monitoring tool a Lead reaches for first
+ * (`get_agent_activity`) has no per-entry bound, and a Lead that blows its
+ * context reading a report it already has on disk has paid twice for one
+ * document.
+ */
+async function cmdActivity(argv) {
+	const [ref, ...rest] = argv;
+	if (!ref || ref.startsWith("--")) fail("activity: missing agent reference");
+	rejectUnknownFlags(rest, ["--tail", "--max-chars", "--filter"]);
+	const tailRaw = flagValue(rest, "--tail");
+	// 0 is rejected rather than treated as "all": this command exists to BOUND a
+	// read, and a spelling of it that silently removes the bound is a trap.
+	if (tailRaw !== undefined && (!/^\d{1,4}$/.test(tailRaw) || Number(tailRaw) < 1)) {
+		fail("--tail must be a number of entries, 1 or more");
+	}
+	const maxCharsRaw = flagValue(rest, "--max-chars");
+	if (maxCharsRaw !== undefined && !/^\d{1,7}$/.test(maxCharsRaw)) fail("--max-chars must be a number");
+	const filter = flagValue(rest, "--filter");
+	const FILTERS = ["tools", "text", "errors", "permissions"];
+	if (filter !== undefined && !FILTERS.includes(filter)) {
+		fail(`--filter must be one of: ${FILTERS.join(", ")}`);
+	}
+	const tail = tailRaw === undefined ? 20 : Number(tailRaw);
+	const maxChars = Math.max(200, maxCharsRaw === undefined ? 2000 : Number(maxCharsRaw));
+
+	const agent = safeRef(ref);
+	const args = ["logs", agent];
+	// Ask paseo for a few more entries than we return: --tail counts entries and
+	// our own splitter may merge or split differently, so a short read is worse
+	// than a slightly long one.
+	if (tail > 0) args.push("--tail", String(Math.min(9999, tail + 5)));
+	if (filter !== undefined) args.push("--filter", filter);
+
+	let raw;
+	try {
+		raw = await runPaseoText(args);
+	} catch (error) {
+		const code = error instanceof PaseoError ? error.code : "PASEO_FAILED";
+		json({ ok: false, code, command: "activity", agentId: agent, message: String(error?.message ?? error) });
+		process.exit(3);
+		return;
+	}
+	const entries = clipActivity(raw.text, { maxChars, tail });
+	const returnedChars = entries.reduce((sum, entry) => sum + entry.text.length, 0);
+	json({
+		ok: true,
+		agentId: agent,
+		tail,
+		maxChars,
+		filter: filter ?? null,
+		entryCount: entries.length,
+		sourceChars: raw.totalChars,
+		returnedChars,
+		withheldChars: Math.max(0, raw.totalChars - returnedChars),
+		entries,
+	});
+}
+
 // --- graph -----------------------------------------------------------------
 
 async function cmdGraph(argv) {
@@ -667,6 +1124,21 @@ function cmdUninstall(argv) {
 
 // --- update ----------------------------------------------------------------
 
+/**
+ * Upgrading the BINARY is only half of an upgrade.
+ *
+ * The policy core, the role prompts and the Lead skill are COPIED into
+ * ~/.pi/agent/ at install time — that copy is what a running agent actually
+ * loads, and `npm i -g` does not touch it. So a user who runs `pteam update`
+ * and stops there gets a new CLI enforcing the previous release's rules, with
+ * both halves reporting the new version number and nothing disagreeing out
+ * loud. Say it here, where the person who just upgraded is looking.
+ */
+const UPDATE_NEXT_STEPS = Object.freeze([
+	"re-run `pteam install` — the policy core, role prompts and Lead skill are copies under ~/.pi/agent and are NOT refreshed by the package upgrade",
+	"then `pteam preflight` to confirm the installed copies match this version",
+]);
+
 async function cmdUpdate(argv) {
 	rejectUnknownFlags(argv, ["--check"]);
 	const info = await su.checkForUpdate();
@@ -690,6 +1162,7 @@ async function cmdUpdate(argv) {
 			action: "manual",
 			mode,
 			message: "running from a git checkout — pull the latest yourself (`git pull`), then restart the CLI",
+			nextSteps: UPDATE_NEXT_STEPS,
 		});
 		return;
 	}
@@ -698,7 +1171,16 @@ async function cmdUpdate(argv) {
 	if (res.error || res.status !== 0) {
 		fail(`npm update failed (exit ${res.status ?? "?"}${res.error ? `: ${res.error.message}` : ""})`);
 	}
-	json({ ...info, action: "updated", mode, message: `updated ${info.current} -> ${info.latest}` });
+	json({
+		...info,
+		action: "updated",
+		mode,
+		message: `updated ${info.current} -> ${info.latest}`,
+		nextSteps: UPDATE_NEXT_STEPS,
+	});
+	// stderr, not the JSON body: a human running `pteam update` by hand is the
+	// one who has to act on it, and the WebUI reads stdout.
+	process.stderr.write(`[paseo-team] ${UPDATE_NEXT_STEPS[0]}\n`);
 }
 
 // --- web -------------------------------------------------------------------
@@ -875,7 +1357,8 @@ function helpText() {
 usage:
   pteam status
   pteam preflight [--strict] [--json] [--skip-models] [--runtime pi|claude|both] [--host-id <id>] [--cluster <path>] [--routes <path>]
-  pteam claude-setup [--install|--verify|--uninstall|--print-providers] [--json]
+  pteam claude-setup [--install|--apply|--verify|--uninstall|--print-providers] [--json] [--force]
+                                           (--apply writes the claude-* providers; it does NOT reload)
   pteam config read  <section> [--no-discovery]
   pteam config write <section>             (JSON body on stdin)
   pteam prompts read <role>                (supervisor|lead|peer)
@@ -883,6 +1366,7 @@ usage:
   pteam skills list
   pteam skills read <name>
   pteam skills write <name>                (markdown body on stdin)
+  pteam protocol status [--path <repo>]    (grade a repo's WORKSPACE_PROTOCOL.md)
   pteam env list
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
@@ -898,6 +1382,12 @@ live plane (talks to the Paseo daemon):
   pteam permits allow <agent> <reqId>
   pteam permits deny  <agent> <reqId>
   pteam models [--provider <role-provider>]
+  pteam models refresh [--provider <role-provider>] [--host <host>]
+                                           (daemon re-reads its model catalog; no restart)
+  pteam models sync [--only <pi-provider>] [--dry-run] [--no-probe] [--all] [--no-refresh]
+                                           (probe the pi endpoint, rewrite models.json, then refresh)
+  pteam cost [--all] [--cluster <id>] [--concurrency <n>]
+  pteam activity <ref> [--tail <n>] [--max-chars <n>] [--filter tools|text|errors|permissions]
   pteam graph [--all] [--max-inspect <n>] [--refresh]
   pteam watchdog [--stale-after <ms>]
   pteam web [--port <n>] [--open] [--no-token]
@@ -962,6 +1452,7 @@ async function main() {
 		case "config": return dispatchTwo("config", argv, { read: cmdConfigRead, write: cmdConfigWrite });
 		case "prompts": return dispatchTwo("prompts", argv, { read: cmdPromptsRead, write: cmdPromptsWrite });
 		case "skills": return dispatchSkills(argv);
+		case "protocol": return dispatchProtocol(argv);
 		case "env": return dispatchEnv(argv[0]);
 		case "install": return cmdInstall(argv);
 		case "claude-setup": return cmdClaudeSetup(argv);
@@ -970,6 +1461,8 @@ async function main() {
 		case "permits": return dispatchPermits(argv);
 		case "models": return cmdModels(argv);
 		case "seats": return dispatchSeats(argv);
+		case "cost": return cmdCost(argv);
+		case "activity": return cmdActivity(argv);
 		case "graph": return cmdGraph(argv);
 		case "watchdog": return cmdWatchdog(argv);
 		case "web": return cmdWeb(argv);
@@ -992,9 +1485,11 @@ async function main() {
 function dispatchAgent(argv) {
 	const [sub, ref] = argv;
 	switch (sub) {
-		case "inspect": if (!ref) fail("agent inspect: missing agent reference"); return cmdAgentInspect(ref);
-		case "send": if (!ref) fail("agent send: missing agent reference"); return cmdAgentSend(ref);
-		default: fail(`agent: unknown subcommand '${sub}' (expected inspect|send)`);
+		case "inspect": if (!ref) usageFail("agent inspect: missing agent reference"); return cmdAgentInspect(ref);
+		case "send": if (!ref) usageFail("agent send: missing agent reference"); return cmdAgentSend(ref);
+		// `${sub}` alone printed the string "undefined" when the subcommand was
+		// simply absent, which reads as a JavaScript leak rather than a message.
+		default: usageFail(`agent: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected inspect|send)`);
 	}
 }
 
@@ -1004,33 +1499,57 @@ function dispatchPermits(argv) {
 		case "list": return cmdPermitsList();
 		case "allow":
 		case "deny": return cmdPermitDecision(sub, rest);
-		default: fail(`permits: unknown subcommand '${sub}' (expected list|allow|deny)`);
+		default: usageFail(`permits: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|allow|deny)`);
 	}
 }
 
 function dispatchTwo(parent, argv, handlers) {
 	const [sub, arg] = argv;
-	if (!sub) fail(`${parent}: missing subcommand (read|write)`);
+	if (!sub) usageFail(`${parent}: missing subcommand (${Object.keys(handlers).join("|")})`);
 	const fn = handlers[sub];
-	if (!fn) fail(`${parent}: unknown subcommand '${sub}' (expected ${Object.keys(handlers).join("|")})`);
-	if (!arg) fail(`${parent} ${sub}: missing argument`);
+	if (!fn) usageFail(`${parent}: unknown subcommand '${sub}' (expected ${Object.keys(handlers).join("|")})`);
+	if (!arg) usageFail(`${parent} ${sub}: missing argument`);
 	// Trailing flags reach the handler; each one declares what it accepts and
 	// rejects the rest, so a typo can never be silently dropped here.
 	return fn(arg, argv.slice(2));
+}
+
+// ---------------------------------------------------------------------------
+// workspace protocol
+//
+// The repository tactics layer the Lead is told to read before orchestrating.
+// Reported, never enforced here: `missing` and `invalid` are facts a Human acts
+// on, and turning either into a delegation blocker is a fleet-operator decision
+// rather than something a release switches on underneath them.
+// ---------------------------------------------------------------------------
+
+function cmdProtocolStatus(argv) {
+	const i = argv.indexOf("--path");
+	const repoRoot = i >= 0 && argv[i + 1] ? argv[i + 1] : process.cwd();
+	const state = protocolState(repoRoot);
+	json({ repoRoot, ...state, summary: describeProtocolState(state) });
+}
+
+function dispatchProtocol(argv) {
+	const sub = argv[0];
+	switch (sub) {
+		case "status": return cmdProtocolStatus(argv.slice(1));
+		default: usageFail(`protocol: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected status)`);
+	}
 }
 
 function dispatchSkills(argv) {
 	const [sub, name] = argv;
 	switch (sub) {
 		case "list": return cmdSkillsList();
-		case "read": if (!name) fail("skills read: missing skill name"); return cmdSkillsRead(name);
-		case "write": if (!name) fail("skills write: missing skill name"); return cmdSkillsWrite(name);
-		default: fail(`skills: unknown subcommand '${sub}' (expected list|read|write)`);
+		case "read": if (!name) usageFail("skills read: missing skill name"); return cmdSkillsRead(name);
+		case "write": if (!name) usageFail("skills write: missing skill name"); return cmdSkillsWrite(name);
+		default: usageFail(`skills: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected list|read|write)`);
 	}
 }
 
 function dispatchEnv(sub) {
-	if (sub && sub !== "list") fail(`env: unknown subcommand '${sub}' (expected list)`);
+	if (sub && sub !== "list") usageFail(`env: unknown subcommand '${sub}' (expected list)`);
 	return cmdEnvList();
 }
 

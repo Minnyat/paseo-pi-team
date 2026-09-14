@@ -47,7 +47,7 @@ try {
 	{
 		const help = run(["--help"]);
 		assert.equal(help.status, 0);
-		for (const command of ["agents", "permits list", "graph", "web", "update", "uninstall", "models"]) {
+		for (const command of ["agents", "permits list", "graph", "web", "update", "uninstall", "models", "cost", "activity"]) {
 			assert.ok(help.stdout.includes(command), `help documents '${command}'`);
 		}
 
@@ -145,6 +145,103 @@ try {
 		assert.equal(warm.json.inspectSpent, 0);
 		assert.equal(warm.json.pendingParents, 0);
 		assert.equal(warm.json.counts.edges, 2);
+	}
+
+	// --- cost: one command for a whole cluster ------------------------------
+	// `paseo ls` has no cost column and `paseo inspect` has one per agent, so a
+	// fifteen-Peer project previously had to call inspect fifteen times and add
+	// the numbers by hand. Cluster is the unit because it is already the pack's
+	// authority boundary.
+	{
+		// Two of the three fake agents are labelled into one cluster; the third
+		// carries a different one, so the filter has something to exclude.
+		const stateDir = join(sandbox, "paseo", "agents", "w");
+		mkdirSync(stateDir, { recursive: true });
+		const clusters = {
+			"11111111-1111-1111-1111-111111111111": "wks_alpha",
+			"22222222-2222-2222-2222-222222222222": "wks_alpha",
+			"33333333-3333-3333-3333-333333333333": "wks_beta",
+		};
+		for (const [id, cluster] of Object.entries(clusters)) {
+			writeFileSync(
+				join(stateDir, `${id}.json`),
+				JSON.stringify({ id, cwd: "/w", labels: { "team.cluster": cluster } }),
+			);
+		}
+
+		const all = run(["cost"]);
+		assert.equal(all.status, 0, all.stderr);
+		assert.equal(all.json.ok, true);
+		assert.equal(all.json.agentCount, 3);
+		// The third agent reports no usage at all. That is neither a failure nor
+		// a zero, and a total that silently absorbed it would understate the bill.
+		assert.equal(all.json.costedCount, 2);
+		assert.equal(all.json.totals.costUsd, 3.75);
+		assert.deepEqual(
+			all.json.unavailable.map((row) => row.code),
+			["USAGE_UNREPORTED"],
+		);
+		// Most expensive first: the point of the report is to find the seat to
+		// look at, not to re-sort it by hand.
+		assert.deepEqual(all.json.agents.map((agent) => agent.costUsd), [2.25, 1.5]);
+
+		const alpha = run(["cost", "--cluster", "wks_alpha"]);
+		assert.equal(alpha.json.agentCount, 2);
+		assert.equal(alpha.json.costedCount, 2);
+		assert.equal(alpha.json.totals.costUsd, 3.75);
+		assert.equal(alpha.json.cluster, "wks_alpha");
+
+		const beta = run(["cost", "--cluster", "wks_beta"]);
+		assert.equal(beta.json.agentCount, 1);
+		assert.equal(beta.json.costedCount, 0);
+		assert.equal(beta.json.totals.costUsd, 0);
+
+		// An `{ error }` body that paseo returns with exit 0 must never be read as
+		// "this agent used nothing". A transport failure filed as a benign state
+		// is how a total quietly loses a seat.
+		const broken = run(["cost"], { FAKE_INSPECT: "envelope" });
+		assert.equal(broken.json.costedCount, 0);
+		assert.equal(broken.json.totals.costUsd, 0);
+		assert.deepEqual(
+			[...new Set(broken.json.unavailable.map((row) => row.code))],
+			["UNKNOWN_ERROR"],
+			"the daemon's own error code survives, it does not become USAGE_UNREPORTED",
+		);
+
+		assert.notEqual(run(["cost", "--concurrency", "abc"]).status, 0);
+		// The message promises 1-16, so 0 and 99 must be refused rather than
+		// silently clamped.
+		assert.notEqual(run(["cost", "--concurrency", "0"]).status, 0);
+		assert.notEqual(run(["cost", "--concurrency", "99"]).status, 0);
+		assert.notEqual(run(["cost", "--with-everything"]).status, 0);
+	}
+
+	// --- activity: the cap is PER ENTRY, not per call -----------------------
+	// A `limit` bounds how many entries come back and says nothing about how big
+	// one is — and one entry can be a Peer's whole report, whose full text the
+	// output contract already puts in a file. Four activities must not cost half
+	// a megabyte.
+	{
+		const capped = run(["activity", "22222222-2222-2222-2222-222222222222", "--tail", "4", "--max-chars", "200"]);
+		assert.equal(capped.status, 0, capped.stderr);
+		assert.equal(capped.json.ok, true);
+		assert.equal(capped.json.entryCount, 4);
+		const big = capped.json.entries.find((entry) => entry.truncated);
+		assert.ok(big, "the 5000-character entry is truncated");
+		assert.ok(big.chars > 4000, "the ORIGINAL size is still reported");
+		assert.ok(big.text.length < 500, "...but the text returned is bounded");
+		assert.match(big.text, /withheld by --max-chars/);
+		assert.ok(capped.json.withheldChars > 4000);
+		// A short entry is returned whole — the cap must not blunt everything.
+		const small = capped.json.entries.find((entry) => entry.kind === "Tool");
+		assert.equal(small.truncated, false);
+
+		assert.notEqual(run(["activity"]).status, 0);
+		// `--tail 0` used to mean "no --tail at all", i.e. read the WHOLE
+		// transcript — the exact opposite of the bound this command exists for.
+		assert.notEqual(run(["activity", "22222222-2222-2222-2222-222222222222", "--tail", "0"]).status, 0);
+		assert.notEqual(run(["activity", "$(rm -rf /)"]).status, 0);
+		assert.notEqual(run(["activity", "22222222-2222-2222-2222-222222222222", "--filter", "everything"]).status, 0);
 	}
 
 	// --- config still round-trips through the sandbox ------------------------
@@ -246,6 +343,15 @@ try {
 		const manual = run(["update"], gitEnv("sha\trefs/tags/v99.0.0\n"));
 		assert.equal(manual.status, 0);
 		assert.equal(manual.json.action, "manual");
+
+		// Upgrading the BINARY is only half an upgrade: the policy core, role
+		// prompts and Lead skill are copies under ~/.pi/agent that `npm i -g`
+		// never touches, so a user who stops at `update` runs a new CLI over the
+		// previous release's rules with both halves reporting the new version.
+		assert.ok(
+			manual.json.nextSteps?.some((step) => step.includes("pteam install")),
+			"an update must say the installed copies still need refreshing",
+		);
 		assert.equal(manual.json.mode, "checkout");
 
 		const noop = run(["update"], gitEnv("sha\trefs/tags/v0.0.1\n"));
@@ -385,6 +491,123 @@ try {
 		assert.deepEqual(envelope.json.providers, {});
 		assert.equal(envelope.json.degraded[0].code, "UNKNOWN_ERROR");
 		assert.match(envelope.json.degraded[0].message, /Connection timed out/);
+	}
+
+	// --- models refresh: the one command that is not a paseo spawn -----------
+	// Paseo caches the provider catalog for the daemon's whole lifetime, so
+	// editing models.json is invisible until the daemon is told. There is no
+	// `paseo` subcommand for it, hence the SDK path and a second fake.
+	{
+		const CLIENT = join(HERE, "fixtures", "fake-paseo-client.mjs");
+		const logPath = join(sandbox, "client-calls.log");
+		const clientRun = (args, extra = {}) => {
+			rmSync(logPath, { force: true });
+			const result = run(args, { PASEO_TEAM_PASEO_CLIENT: CLIENT, PST_FAKE_CLIENT_LOG: logPath, ...extra });
+			const calls = existsSync(logPath)
+				? readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+				: [];
+			return { ...result, calls };
+		};
+
+		const all = clientRun(["models", "refresh"]);
+		assert.equal(all.status, 0, all.stderr);
+		assert.equal(all.json.providers, "all");
+		const refreshAll = all.calls.find((c) => c.event === "refresh");
+		assert.deepEqual(refreshAll.payload, {}, "refreshing everything sends no provider filter");
+		assert.ok(all.calls.some((c) => c.event === "close"), "the socket is closed, not leaked");
+
+		const one = clientRun(["models", "refresh", "--provider", "pi-peer"]);
+		assert.equal(one.status, 0, one.stderr);
+		assert.deepEqual(one.json.providers, ["pi-peer"]);
+		assert.deepEqual(
+			one.calls.find((c) => c.event === "refresh").payload,
+			{ providers: ["pi-peer"] },
+			"a named provider reaches the daemon as a filter, not as a no-op",
+		);
+
+		// Same allowlist as `models --provider`: only the pack's role providers.
+		const notARole = clientRun(["models", "refresh", "--provider", "pi"]);
+		assert.notEqual(notARole.status, 0);
+		assert.match(notARole.stderr, /--provider must be one of/);
+		assert.equal(notARole.calls.length, 0, "a rejected argument never opens a connection");
+
+		assert.notEqual(clientRun(["models", "refresh", "--bogus"]).status, 0, "unknown flags are a usage error here too");
+
+		// Every failure must say the catalog is STILL STALE and name the cure.
+		// Reporting success on a refresh that did not happen is the one outcome
+		// that would quietly leave a dead model in the routing form.
+		for (const [mode, code] of [
+			["unreachable", "DAEMON_UNREACHABLE"],
+			["old-daemon", "REFRESH_UNSUPPORTED"],
+			["refresh-fails", "REFRESH_FAILED"],
+		]) {
+			const failed = clientRun(["models", "refresh"], { PST_FAKE_CLIENT_MODE: mode });
+			assert.equal(failed.status, 3, `${mode}: a failed refresh exits non-zero`);
+			assert.equal(failed.json.ok, false, `${mode}: and says so in the body`);
+			assert.equal(failed.json.code, code);
+			assert.match(failed.json.hint, /restart the daemon/, `${mode}: the hint names what actually fixes it`);
+		}
+
+		// A missing SDK is a configuration fault, not a crash.
+		const noSdk = run(["models", "refresh"], { PASEO_TEAM_PASEO_CLIENT: join(sandbox, "nope", "client.js") });
+		assert.equal(noSdk.status, 3, noSdk.stderr);
+		assert.equal(noSdk.json.ok, false);
+		assert.equal(noSdk.json.code, "PASEO_CLIENT_MISSING");
+	}
+
+	// --- models sync: fail closed before it can touch models.json ------------
+	{
+		const noConfig = run(["models", "sync", "--dry-run"]);
+		assert.equal(noConfig.status, 2, "no endpoint configured is a usage fault, not a crash");
+		assert.equal(noConfig.json.code, "CONFIG_MISSING");
+		assert.match(noConfig.json.hint, /pi-models\.example\.json/, "the hint names the file to copy");
+
+		const configPath = join(sandbox, "team", "pi-models.local.json");
+		mkdirSync(dirname(configPath), { recursive: true });
+
+		writeFileSync(configPath, JSON.stringify({ version: 1, providers: { testprov: {} } }));
+		const noBaseUrl = run(["models", "sync", "--dry-run"]);
+		assert.equal(noBaseUrl.status, 2);
+		assert.equal(noBaseUrl.json.code, "CONFIG_INVALID");
+		assert.match(noBaseUrl.json.problems.join(" "), /baseUrl/);
+
+		// Every key is resolved BEFORE any request: a half-synced run would
+		// rewrite one provider's catalog and leave the operator guessing about
+		// the rest.
+		writeFileSync(configPath, JSON.stringify({
+			version: 1,
+			providers: {
+				testprov: { baseUrl: "http://127.0.0.1:1/v1", keyEnv: "PST_TEST_KEY", keyFile: join(sandbox, "absent.env") },
+				second: { baseUrl: "http://127.0.0.1:1/v1", keyEnv: "PST_TEST_KEY_2", keyFile: join(sandbox, "absent.env") },
+			},
+		}));
+		const noKey = run(["models", "sync", "--dry-run"]);
+		assert.equal(noKey.status, 2);
+		assert.equal(noKey.json.code, "API_KEY_MISSING");
+		assert.equal(noKey.json.missing.length, 2, "every provider missing a key is named, not just the first");
+		assert.equal(noKey.json.missing[0].tried.length, 2, "and each one says both places it looked");
+
+		// --only addresses ONE endpoint; a name that is not configured must be
+		// a usage error rather than a silent no-op run over nothing.
+		const badOnly = run(["models", "sync", "--only", "khong-co"]);
+		assert.notEqual(badOnly.status, 0);
+		assert.match(badOnly.stderr, /is not configured \(have: /);
+
+		assert.notEqual(run(["models", "sync", "--provider", "pi-peer"]).status, 0, "sync takes --only, not --provider; a typo must not be ignored");
+
+		// The section is addressable by the config plumbing the WebUI uses.
+		const section = run(["config", "read", "pi-models"]);
+		assert.equal(section.status, 0, section.stderr);
+		assert.deepEqual(Object.keys(section.json.data.providers).sort(), ["second", "testprov"]);
+		assert.equal(section.json.schema.label, "Kho model Pi");
+		const map = section.json.schema.groups[0].fields[0];
+		assert.equal(map.type, "map", "the form adds endpoints rather than editing a single hard-coded one");
+		const itemFields = map.item.fields.map((f) => f.path);
+		assert.ok(itemFields.includes("keyEnv") && itemFields.includes("keyFile"), "the form offers the key's LOCATION...");
+		assert.ok(
+			!itemFields.some((path) => /^(apiKey|key|secret|token)$/i.test(path)),
+			"...and never a field to paste the secret into",
+		);
 	}
 
 	// --- config read folds that inventory into the routing schema ------------

@@ -8,10 +8,11 @@
  * and the WebUI can point at a throwaway HOME:
  *   PI_HOME               -> default ~/.pi
  *   PI_CODING_AGENT_DIR   -> default $PI_HOME/agent
- *   PST_TEAM_CONFIG_DIR   -> default ~/.paseo-pi-team
+ *   PST_TEAM_CONFIG_DIR   -> default ~/.paseo-pi-team (PASEO_TEAM_HOME also honoured)
  *   PASEO_CONFIG_JSON     -> default ~/.paseo/config.json
  */
 
+import { teamConfigDir as sharedTeamConfigDir } from "../../scripts/lib-common.mjs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import {
@@ -32,11 +33,20 @@ export function agentDir() {
 }
 
 export function teamConfigDir() {
-	return process.env.PST_TEAM_CONFIG_DIR || join(homedir(), ".paseo-pi-team");
+	// One resolver, shared with the support scripts through lib-common: this
+	// used to honour only PST_TEAM_CONFIG_DIR while model-routing.mjs honoured
+	// only PASEO_TEAM_HOME, so `pteam status` and `pteam preflight` could name
+	// different routing files on the same host.
+	return sharedTeamConfigDir(process.env);
 }
 
 export function paseoConfigPath() {
-	return process.env.PASEO_CONFIG_JSON || join(homedir(), ".paseo", "config.json");
+	// Layered, not just the test override: `paseoHome()` below honours Paseo's
+	// own PASEO_HOME and this did not, so a machine that moved its daemon home
+	// had the pack reading agent state from the new tree and the daemon CONFIG
+	// from the old one. Preflight could then pass `paseo-browser-tools` on a
+	// host whose real config has the browser disabled.
+	return process.env.PASEO_CONFIG_JSON || join(paseoHome(), "config.json");
 }
 
 /**
@@ -64,6 +74,15 @@ export function mcpConfigPath() {
  */
 export function piSettingsPath() {
 	return join(agentDir(), "settings.json");
+}
+
+/**
+ * pi's hand-written model inventory (layer 1 of model routing). pi has no
+ * discovery, so this file IS the catalog; `pteam models sync` rewrites one
+ * provider entry in it.
+ */
+export function piModelsPath() {
+	return join(agentDir(), "models.json");
 }
 
 export function promptsDir() {

@@ -159,6 +159,68 @@ export const PASEO_CONVENTIONAL_ENTRIES = [
 ];
 
 /**
+ * Locate Paseo's client SDK module, the one the `paseo` CLI itself imports.
+ *
+ * Why this exists: a handful of daemon operations have never been exposed as
+ * `paseo` subcommands — refreshing the provider snapshot is the one this pack
+ * needs. Spawning the CLI cannot reach them, so for those the pack imports the
+ * same module the CLI does and speaks the protocol directly.
+ *
+ * The path is derived from wherever `paseo` actually lives (`<root>/bin/paseo`
+ * -> `<root>/dist/utils/client.js`) rather than hard-coded: npm -g, mise, nvm
+ * and Homebrew each put it somewhere different, and a checkout puts it under
+ * node_modules. PASEO_TEAM_PASEO_CLIENT overrides everything, which is also
+ * how the tests substitute a fake daemon.
+ *
+ * @param {(reason: string, tried: string[]) => never} [onMissing]
+ * @returns {string} a file:// URL ready for dynamic import
+ */
+export function resolvePaseoClientModule(onMissing) {
+	const override = process.env.PASEO_TEAM_PASEO_CLIENT?.trim();
+	if (override) {
+		return override.startsWith("file:") ? override : pathToFileURL(override).href;
+	}
+	const tried = [];
+	const bin = findOnPath(["paseo", "paseo.exe", "paseo.cmd", "paseo.bat"]);
+	if (bin) {
+		// realpath first: ~/.local/bin/paseo is usually a symlink into the
+		// package, and the relative layout only holds at the real location.
+		let real;
+		try {
+			real = realpathSync(bin);
+		} catch {
+			real = bin;
+		}
+		// On Windows the thing on PATH is an npm .cmd shim that lives nowhere
+		// near the package — walking up from it lands outside @getpaseo/cli
+		// entirely. resolveCmdEntry reads the shim for the JS entry it runs,
+		// and both known layouts (<root>/dist/index.js, <root>/bin/paseo) sit
+		// two levels below the package root, same as the POSIX bin.
+		const entry = /\.(?:cmd|bat)$/i.test(real)
+			? (resolveCmdEntry(real, PASEO_CONVENTIONAL_ENTRIES) ?? real)
+			: real;
+		const candidate = join(dirname(dirname(entry)), "dist", "utils", "client.js");
+		tried.push(candidate);
+		if (existsSync(candidate)) return pathToFileURL(candidate).href;
+	}
+	for (const segments of PASEO_CLIENT_CONVENTIONAL_ENTRIES) {
+		const candidate = join(process.cwd(), ...segments);
+		tried.push(candidate);
+		if (existsSync(candidate)) return pathToFileURL(candidate).href;
+	}
+	const reason = bin
+		? "found the paseo CLI but not its client SDK next to it"
+		: "could not find the paseo CLI on PATH";
+	if (onMissing) onMissing(reason, tried);
+	throw new Error(`${reason} (tried: ${tried.join(", ") || "nothing"})`);
+}
+
+// Checkout layout, for a repo that has @getpaseo/cli as a dependency.
+export const PASEO_CLIENT_CONVENTIONAL_ENTRIES = [
+	["node_modules", "@getpaseo", "cli", "dist", "utils", "client.js"],
+];
+
+/**
  * Resolve `[bin, ...prefixArgs]` for the paseo CLI.
  *
  * Windows `.cmd` shims cannot be spawned with argv (EINVAL), so the shim's
@@ -243,6 +305,37 @@ export const PASEO_ORCHESTRATION_PREFS = "orchestration-preferences.json";
 /** `$PASEO_HOME`, else the documented default. */
 export function paseoHomeDir(env = process.env) {
 	return env.PASEO_HOME?.trim() || join(homedir(), ".paseo");
+}
+
+/**
+ * The pack's own config directory — routing files, the seat ledger, the permit
+ * audit log, the Claude session state.
+ *
+ * It lives here, at the bottom of the import graph, because it is the one
+ * directory BOTH halves of the pack need to agree on and neither half can
+ * import the other's resolver: `cli/lib/config-walker.mjs` is not shipped to
+ * the installed support directory, and the support scripts are not importable
+ * from the CLI's own layer. lib-common is.
+ *
+ * Two variable names, in a fixed order, because the pack shipped both and only
+ * one of them was ever documented. Before this existed, config-walker read
+ * `PST_TEAM_CONFIG_DIR` while model-routing.mjs and claude-hook.mjs read
+ * `PASEO_TEAM_HOME` — so an operator who set one got `pteam status` reporting
+ * the routing file as present at the configured path while `pteam preflight`
+ * reported it MISSING and named a different one. Same command family, same
+ * environment, two answers, and the honest-looking half was wrong.
+ *
+ * `PST_TEAM_CONFIG_DIR` wins because it is the name `config-walker`'s header
+ * and `seat-profiles.mjs` document; `PASEO_TEAM_HOME` is still honoured so a
+ * host configured the old way keeps working — everywhere, now, rather than in
+ * half the commands.
+ */
+export function teamConfigDir(env = process.env) {
+	return (
+		env.PST_TEAM_CONFIG_DIR?.trim() ||
+		env.PASEO_TEAM_HOME?.trim() ||
+		join(homedir(), ".paseo-pi-team")
+	);
 }
 
 /**

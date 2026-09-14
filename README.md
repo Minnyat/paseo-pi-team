@@ -54,10 +54,11 @@ paseo-pi-team/
 ├── config/
 │   ├── paseo.providers.example.json   # 6 role providers: pi-* and claude-* (supervisor/lead/peer)
 │   ├── model-routing.example.json     # MODEL_CLASS → model route template (copy per host)
+│   ├── pi-models.example.json         # pi model endpoint for `pteam models sync` (copy per host)
 │   └── cluster-routing.example.json   # controller-local N-host contract template
 ├── templates/
 │   ├── TASK_BRIEF_V3.md               # canonical V3 task brief + parser rules
-│   └── WORKSPACE_PROTOCOL.example.md  # .orchestration/WORKSPACE_PROTOCOL.md for the target repo
+│   └── WORKSPACE_PROTOCOL.example.md  # root WORKSPACE_PROTOCOL.md for the target repo
 ├── prompts/
 │   ├── supervisor.md               # Governance Supervisor
 │   ├── lead.md                     # Project Lead (orchestration owner)
@@ -84,6 +85,8 @@ paseo-pi-team/
 │       ├── config-walker.mjs       # path resolution + atomic write with backup
 │       ├── paseo-bridge.mjs        # the only place that spawns `paseo` (argv, timeouts, fan-out)
 │       ├── graph-cache.mjs         # spawn-tree cache; `paseo ls` has no parent link, `inspect` does
+│       ├── install-drift.mjs       # installed copies vs THIS release, byte for byte
+│       ├── workspace-protocol.mjs  # grade a target repo's WORKSPACE_PROTOCOL.md
 │       └── graph.mjs               # agents + parents + permits -> nodes/edges/degraded
 ├── webui/
 │   ├── server.mjs                  # transport only: route -> paseo-team argv, token, localhost
@@ -92,6 +95,7 @@ paseo-pi-team/
 │   ├── install.ps1 / install.sh    # installers
 │   ├── lib-common.mjs              # shared helpers: exec/shim resolution, entrypoint, versions
 │   ├── model-routing.mjs           # stateless resolver: single-host + cluster (+ validate/resolve CLI)
+│   ├── pi-models-sync.mjs          # rebuilds ~/.pi/agent/models.json from a probed endpoint
 │   ├── remote-paseo.mjs            # remote-host executor: Paseo CLI --host by HOST_ID (Lead REMOTE cycle)
 │   ├── reliability.mjs             # retry classification/backoff + stale predicates
 │   ├── team-communication.mjs      # parent-scoped Peer → Lead messaging
@@ -114,6 +118,12 @@ paseo-pi-team/
 │   ├── watchdog.test.mjs           # stale-agent classification
 │   ├── ocr-review.test.mjs         # OCR delegation preflight contract
 │   ├── ocr-setup.test.mjs          # capability probe + version comparison
+│   ├── instruction-budget.test.mjs # standing-instruction size ratchet
+│   ├── preflight.test.mjs          # which checks run, and at what severity
+│   ├── uninstall.test.mjs          # removes what install wrote, and nothing else
+│   ├── tools/mutate.mjs            # mutation harness: would these tests catch the bug?
+│   ├── workspace-protocol.test.mjs # protocol admission states + digest
+│   ├── install-drift.test.mjs      # installed copies vs this release
 │   ├── ocr-integrity.test.mjs      # skill/reference/authority integrity
 │   ├── patch-paseo-mcp.test.mjs    # the MCP protocol-header patch for Paseo's bundled SDK
 │   ├── installer-contract.test.mjs # shipped files must exist and carry their dependencies
@@ -125,8 +135,11 @@ paseo-pi-team/
 │   └── fixtures/                   # fake CLIs (paseo, ocr) + version-pinned OCR output
 └── docs/
     ├── demonthorn-agent-orchestration-deep-dive.md   # original design
+    ├── claude-runtime.md           # Claude Code as the second runtime: hooks, MCP, install
+    ├── downstream-doctrine-review.md   # what Paseo's own Foundation does that we don't
     ├── model-routing.md            # the 4 model-routing layers, verified commands
     ├── multi-host.md               # N-host routing + cross-host test plan
+    ├── multi-supervisor-topology.md    # domains, clusters, and who may seat whom
     ├── ocr-integration.md          # OpenCodeReview Phase 1 single-machine setup
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
 ```
@@ -553,6 +566,98 @@ source agent. `verify` reads `runtimeInfo` (never the stale creation-time
 Peers stay with the source: there is no reparent API, and `detach` is a Human
 action that leaves a Peer unable to escalate.
 
+## The workspace protocol
+
+`WORKSPACE_PROTOCOL.md` in the **root** of the repository being orchestrated is
+the repository tactics layer — the instruction source between the role contract
+(which this pack owns) and the assignment (which the Lead writes per task).
+`prompts/lead.md` makes reading it invariant 1. Readership is part of the
+contract: the Lead reads it in full before orchestrating, a Peer never does (the
+Lead extracts the relevant constraints into the V3 brief), and the Supervisor
+reads it only under a governance mandate to create, audit or update it.
+
+Copy [`templates/WORKSPACE_PROTOCOL.example.md`](templates/WORKSPACE_PROTOCOL.example.md)
+to get started, then:
+
+```bash
+pteam protocol status                  # grade the repo in the current directory
+pteam protocol status --path /some/repo
+```
+
+Four states, not a boolean:
+
+| State | Meaning |
+|---|---|
+| `valid` | present, versioned, no unresolved conflict — reported with a sha256 digest and any still-blank keys |
+| `missing` | no protocol; the Lead has no tactics layer |
+| `invalid` | present but not usable: blank, NUL bytes, an unresolved merge conflict (`<<<<<<<` or `>>>>>>>`; the ambiguous `=======` is deliberately not matched, since it is also a Markdown setext underline), or no `WORKSPACE_PROTOCOL_VERSION` |
+| `unreadable` | the path exists and cannot be read as a file |
+
+`invalid` is the state that earns the module. `missing` a Lead can act on; a
+protocol carrying an unresolved merge conflict is *worse* than absent, because
+the Lead opens it and reads both sides of the conflict as rules. Preflight fails
+on `invalid` and `unreadable` for that reason, and warns on `missing`.
+
+Blank recommended keys are reported, never fatal — the deep dive is explicit
+that a tight repo and a loose side project both get to write one, and a prose
+protocol is a legitimate protocol. The digest is recorded because it is what
+makes "did the protocol change since the Lead read it?" answerable at all.
+
+A protocol at the legacy `.orchestration/WORKSPACE_PROTOCOL.md` (where an older
+version of the template pointed) is still found, and reported AS legacy — the
+Lead reads the repository root, so telling someone their protocol is "missing"
+while it sits on disk is the least useful true statement available.
+
+This reports; it does not gate. Turning a missing protocol into a delegation
+blocker is a decision for whoever operates a fleet, not something a release
+should switch on underneath them.
+
+## Skill admission
+
+The pack ships two skills, and both land in a directory every seat on the
+machine can see. Role is a property of the **seat** — an environment variable
+Paseo sets on the agent process — not of the directory, so there is no per-role
+folder to install into: a Peer could open the Lead's orchestration procedure,
+and a Supervisor the review harness, purely because both were on disk.
+
+That is not an authority hole. Every tool those procedures need is already
+denied to the wrong role by the tool policy. It is an **attention** hole, and
+the expensive kind: a Peer that has read the orchestration procedure starts
+reasoning about topology and delegation instead of its own bounded task, and
+nothing in its output says where the drift came from.
+
+So the admission table is the third thing the two runtimes share, next to the
+tool policy and the brief parser — one table in `policy-core.ts`, two
+enforcement points:
+
+| Skill | Lead | Peer | Supervisor |
+|---|---|---|---|
+| `paseo-team-lead` | active | disabled | disabled |
+| `paseo-ocr-reviewer` | disabled | active under an independent-reviewer `DISPOSITION` | disabled |
+
+- **Claude Code** gates the `Skill` tool per call in the PreToolUse hook. The
+  tool itself stays available to every role — the user's own skills go through
+  it — and only the pack's own package names are checked. It gates the `Read`
+  family on the same table too: a Peer refused `Skill(paseo-team-lead)` that
+  could still `Read ~/.claude/skills/paseo-team-lead/SKILL.md` would be exactly
+  the cross-runtime asymmetry the shared core exists to prevent.
+- **pi** has no `skill` tool: its agent loads a skill by *reading* the full
+  `SKILL.md`, so the `tool_call` guard matches the read path instead. The skill
+  still appears in pi's listing for every seat; what the gate withholds is the
+  procedure itself. Only the **installed** copies are gated — under
+  `~/.pi/agent/skills`, `~/.claude/skills` or `~/.agents/skills`. A Peer
+  assigned to edit `skills/paseo-team-lead/SKILL.md` in a repository checkout
+  (this repo is one, and editing that file is ordinary work) reads it normally.
+
+Two deliberate leniencies, because this gate protects attention rather than
+authority and being wrong in the closed direction costs more than it saves: a
+skill this pack does not ship is never blocked, and neither is a call whose
+skill name cannot be read.
+
+`test/policy.test.mts` asserts that every directory under `skills/` is
+classified in the table — a new skill nobody classified would default to
+visible-for-everyone, which is exactly the failure the table exists to prevent.
+
 ## OpenCodeReview delegation (Phase 1)
 
 `paseo-ocr-reviewer` is a strictly read-only Reviewer Peer skill.
@@ -611,9 +716,28 @@ What the installers copy:
 | `extensions/paseo-team-policy.ts` | `~/.pi/agent/extensions/` |
 | `extensions/paseo-team-core/` | `~/.pi/agent/extensions/paseo-team-core/` |
 | `prompts/*.md` | `~/.pi/agent/extensions/prompts/` |
-| `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` |
-| `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` |
+| `skills/paseo-team-lead/` | `~/.pi/agent/skills/paseo-team-lead/` and `~/.claude/skills/paseo-team-lead/` |
+| `skills/paseo-ocr-reviewer/` | `~/.pi/agent/skills/paseo-ocr-reviewer/` and `~/.claude/skills/paseo-ocr-reviewer/` |
 | support scripts (see below) | `~/.pi/agent/extensions/paseo-team-scripts/` |
+
+`~/.claude/skills/` is the user's own directory, and the names this pack ships
+are ordinary English, so a skill already sitting there under one of those names
+may well be one the user wrote. Install refuses to overwrite such a directory —
+it reports the collision by name, installs the rest, and `pteam preflight` then
+reports the refused one as a missing skill, because from the Lead's point of
+view it is: the role prompt sends it to this pack's procedure and it would find
+somebody else's. Uninstall is the same rule in reverse; it removes only the
+directories the pack can prove it wrote, either by the `.paseo-pi-team` marker
+it leaves inside each one or by a `SKILL.md` byte-identical to the shipped copy
+(which is how installs from before the marker existed are still recognised).
+Edit an installed skill and it becomes yours, and the pack stops touching it.
+
+The Claude copies are installed by `scripts/claude-setup.mjs --install` and only
+when the `claude` CLI is present. They matter: `prompts/lead.md` makes loading
+the orchestration procedure invariant 1, and until the pack installed them a
+Claude Lead's `Skill(paseo-team-lead)` call was allowed and simply found
+nothing. Which role may load which package is decided per call — see
+[Skill admission](#skill-admission).
 
 It installs no browser: both runtimes use one they already have — see
 [The browser surface](#the-browser-surface). An earlier version registered an
@@ -646,8 +770,22 @@ profile.
 
 | Browser | Tool names | Available on |
 |---|---|---|
-| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes |
-| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected |
+| **Paseo Browser Control** | `browser_navigate`, `browser_click`, `browser_snapshot`, … | every seat, both runtimes — no extension, no flag |
+| **Claude in Chrome** | `mcp__claude-in-chrome__*` | Claude seats, when the Chrome extension is connected **and** the provider sets `CLAUDE_CODE_ENABLE_CFC=1` |
+
+Browser Control is the one that needs nothing: the daemon injects it, so it is
+there on every seat of either runtime without an extension to install or a flag
+to set.
+
+Claude in Chrome needs the environment variable, and the `claude-lead` and
+`claude-peer` provider blocks this pack generates set it. Without it a Paseo seat
+gets **no** `mcp__claude-in-chrome__*` tools at all, no matter what
+`~/.claude.json` says: a seat is non-interactive, and Claude Code's enablement
+order turns the integration off for a non-interactive session *before* it ever
+reads that config file. `CLAUDE_CODE_ENABLE_CFC` is checked above that gate,
+which is what makes it work. The Supervisor is excluded on purpose — its policy
+denies it the browser. See
+[Why Claude in Chrome needs an env var on a seat](docs/claude-runtime.md#why-claude-in-chrome-needs-an-env-var-on-a-seat).
 
 Paseo registers Browser Control on its own `/mcp/agents` server — the same one
 that carries `create_agent` — gated on `daemon.browserTools.enabled` plus a
@@ -708,17 +846,38 @@ policy already allows `mcp` for Lead/Supervisor and blocks it for Peers.
 
 ### Paseo configuration
 
-The installers **do not merge** `~/.paseo/config.json` — do it by hand, so the
-change stays under your control:
+The installers **do not merge** `~/.paseo/config.json` on their own — applying it
+is a separate, explicit step, so that writing the file is always a decision you
+made rather than a side effect of installing. Note that this controls *whether*
+the change is written, not *when* it takes effect; see step 2:
 
 1. Merge `config/paseo.providers.example.json` into `~/.paseo/config.json`
    (`agents.providers.pi-*` and `claude-*` + `daemon.mcp.injectIntoAgents: true`
-   — required for agents to receive Paseo orchestration tools). Regenerate the
-   `claude-*` block from the code with
-   `pteam claude-setup --print-providers`, so the static tool policy in the
-   config can never drift from the policy the hook enforces.
-2. Restart the Paseo daemon (this kills every running agent — do it when
-   ready). Derived providers do NOT appear in `paseo provider ls` until then.
+   — required for agents to receive Paseo orchestration tools).
+   For the `claude-*` half, `pteam claude-setup --apply` does that merge for you,
+   generating the block from the code so the static tool policy in the config can
+   never drift from the policy the hook enforces. It backs the file up, refuses
+   to overwrite a provider you wrote, leaves an unparseable file alone, and does
+   not reload anything. `--force` opts into overwriting, and records what it
+   replaced so `--uninstall` can put your original back exactly **while the entry
+   is still the one it wrote** — edit it afterwards and it is yours, so uninstall
+   leaves your version in place instead of reverting it. The recorded original
+   survives every later `--apply`, including ones that skip the name; uninstall
+   then deletes the ledger along with the claim, so after it your entry is simply
+   yours. `--print-providers` still prints the block if
+   you would rather merge it yourself. The `pi-*` providers are not generated —
+   copy those from the example file.
+2. Reload the Paseo daemon. A reload is enough: `agents.providers` is reloadable
+   and the registry is rebuilt live, so a full restart — which kills every
+   running agent — is not needed. Providers do NOT appear in
+   `paseo provider ls` until then, and because a seat reads its provider at
+   spawn, only agents created *after* the reload pick the change up.
+
+   Writing the file is the step you control; **when it takes effect is not.** A
+   written-but-unloaded config is not dormant — it activates at the next reload
+   *or restart*, whoever causes one, including an unattended restart or a crash
+   recovery. Treat it as live from the moment you write it. See
+   [the Install section](docs/claude-runtime.md#install) for the long form.
 3. Run `/reload` in pi to load the new extension.
 
 With no `PASEO_PI_ROLE`, both adapters are passive: they inject nothing and
@@ -759,7 +918,23 @@ For the 4-layer architecture and the no-silent-fallback mechanism see
 [`docs/model-routing.md`](docs/model-routing.md). In short:
 
 1. Per host (layer 1, never committed): pi + credentials + `~/.pi/agent/models.json`
-   when using a custom provider.
+   when using a custom provider. pi has no model discovery, so that file IS the
+   catalog. For an OpenAI-compatible endpoint, copy
+   `config/pi-models.example.json` → `~/.paseo-pi-team/pi-models.local.json` and
+   run `pteam models sync`: it probes every model each endpoint lists, writes only
+   the ones that answer, and derives each model's `reasoning` flag from that
+   answer rather than from its name (`--no-probe`, or `probe: false` on one
+   endpoint, skips all of that and keeps whatever an earlier run proved) — a wrong flag there makes Paseo report
+   `thinkingOptions: "none"` and refuse every route above `thinking: off`. As many
+   endpoints as you like can be configured under `providers`; they are written in
+   one pass, and one whose endpoint is down keeps the models it already had
+   instead of losing them (`--only <name>` syncs just one). The
+   API key never enters that file: it names the env var and the file holding it.
+   The daemon caches the catalog for its whole lifetime, so `models sync` ends by
+   refreshing it; `pteam models refresh` does that step alone. A refresh that
+   succeeds is what removes the need to restart the daemon — when it is skipped
+   (`--dry-run`, `--no-refresh`) or fails, both commands say so and name the
+   restart that finishes the job.
 2. Copy `config/model-routing.example.json` →
    `~/.paseo-pi-team/model-routing.local.json` and fill in the host's REAL model
    IDs (5 classes: `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`,
@@ -831,6 +1006,72 @@ Lead skill (LOCAL_CREATE_CYCLE vs REMOTE_CREATE_CYCLE).
 | pi-mcp-adapter | 2.19.0 | **pinned**; lazy lifecycle, tool names prefixed `paseo_` |
 | Node | ≥ 22.18 | type stripping on by default; CI runs 22.18 and 24 on ubuntu/windows/macos |
 
+### Testing the tests
+
+`npm test` answers "do the tests pass?". It cannot answer "would these tests
+have caught the bug?", and on this repo the two came apart badly: a review of
+one branch found nine real defects while all 139 tests were green.
+
+```bash
+npm run coverage    # which files does the suite never execute?
+npm run mutate <mutations.json>   # break the code on purpose; does the suite notice?
+```
+
+Measured with both, the shape of the gap was consistent and is worth knowing
+before adding a test here:
+
+| Layer | Coverage when measured | Mutations killed |
+|---|---|---|
+| Rule modules (`policy-core`, `claude-policy`, `install-drift`, `workspace-protocol`) | 94–99% | 14 / 14 |
+| Wiring (`paseo-team-policy.ts`, `preflight.mjs`, `uninstall.mjs`) | 0–48% | 6 / 12 |
+| CLI error paths (`paseo-team.mjs`) | 82% line / **62% branch** | — |
+
+Both wiring layers are covered now — `preflight.mjs` went from *never executed*
+to ~80% including the whole N-host lane, `uninstall.mjs` from 0 to 94% — and 50
+more defect-shaped mutations against them all die. Writing those tests turned up
+four more defects of the same family, each one a place where two parts of the
+pack answered the same question differently:
+
+- preflight hardcoded `~/.pi/agent` while the installers honour
+  `PI_HOME`/`PI_CODING_AGENT_DIR`, so an override made a correct install report
+  three missing artifacts;
+- `config-walker` read `PST_TEAM_CONFIG_DIR` while `model-routing.mjs` read
+  `PASEO_TEAM_HOME`, so `pteam status` and `pteam preflight` could name
+  different routing files on one host;
+- the Pi adapter never asserted that the role prompt reaches the model at all;
+- and preflight, whose own header says *"Never prints secret values"*, printed
+  the remote pairing endpoint into the report whenever a remote daemon was
+  unreachable — `execFileSync` puts the whole command line in its error
+  message. `scripts/remote-paseo.mjs` already redacted exactly this; the second
+  place running the same command with the same secret had not inherited it.
+
+The CLI's own error paths were the last of it: 82% of lines but 62% of
+branches, and almost every uncovered region an error path. `pteam models` with
+the daemon down answered `{"ok": true}` and exit 0 — "unreachable" and "there
+are no models" were the same answer — while `pteam models --provider X` failed
+loudly on the same daemon. A bad role name printed a JavaScript stack trace. A
+usage error exited 1 from most dispatchers and 2 from the top level and
+`seats`. And the WebUI cache, which says it stores only successful answers,
+keyed that on the exit code alone — so a graph taken while the daemon was down
+was remembered for its whole window, which is the stale error the comment says
+it avoids.
+
+Every one of the nine defects was a **wiring** defect: a rule that exists, is
+correct, is unit-tested, and is never called — or is called at the wrong
+severity. Deleting preflight's whole workspace-protocol block, deleting its
+whole install-drift block, and stopping the Pi adapter from injecting the role
+prompt at all each passed the entire suite.
+
+So when you add an enforcement rule here, the unit test for the rule is the
+easy half. The half that has actually failed in this repo is the call site:
+drive the real adapter or the real script, and assert the rule fires.
+
+`npm run coverage` is a screen, not a verdict. `policy.test.mts` loads the Pi
+adapter through a query-string specifier to get a fresh module per scenario,
+and the reporter does not attribute that back to the base file — so lines that
+demonstrably execute are still listed as uncovered there. Confirm with
+`npm run mutate`, and do not put a coverage floor on that file.
+
 ### Preflight
 
 ```bash
@@ -839,16 +1080,105 @@ node scripts/preflight.mjs --json     # machine-readable, exit 1 when any check 
 node scripts/preflight.mjs --strict --host-id <host-id>
                                       # cross-host gate: missing cluster config,
                                       # missing required remote endpoint env, or
-                                      # unverifiable thinking → FAIL (never warn-as-pass)
+                                      # unverifiable thinking → FAIL (never warn-as-pass).
+                                      # "Unverifiable" means the daemon said
+                                      # NOTHING about thinking. A model that
+                                      # reports it has none (thinkingSupported:
+                                      # false, or an empty option list — how
+                                      # claude-haiku-4-5 reports itself) is a
+                                      # verified fact, and routes fine at
+                                      # thinking: off. See docs/model-routing.md.
 ```
 
 Checks: node/git/paseo + version pins, the daemon, the adapter (pin), the
 extension, the shared policy modules, role prompts, the role providers of every
-runtime in scope, routing config (single-host + cluster contract), each route
-against the real inventory, provider status, empty model segments, pi's
-per-model `thinkingLevelMap` (a `null` level means the level gets clamped),
-endpoint env vars, and repository state (a writer host must be clean in strict
-mode). No secret is ever printed.
+runtime in scope, **each healthy provider's model inventory**, routing config
+(single-host + cluster contract), each route against the real inventory,
+provider status, empty model segments, pi's per-model `thinkingLevelMap` (a
+`null` level means the level gets clamped), endpoint env vars, **whether every
+installed copy still matches this release** (`install-drift`), **the target
+repository's protocol** (`workspace-protocol`), the pack's config directory
+after the two-variable unification (`team-config-dir`), and repository state (a
+writer host must be clean in strict mode).
+
+No secret is ever printed. That is a real invariant and not a hope: an endpoint
+is a pairing offer, it travels only inside argv, and `remoteExec` redacts it
+from anything a failing subprocess hands back — `execFileSync` puts the whole
+command line into its error message, which is how the value used to reach the
+report on the single most likely failure of the remote lane.
+`test/preflight.test.mjs` asserts the value appears nowhere in the JSON report,
+on the healthy path and on the unreachable one.
+
+**Upgrading the package is only half an upgrade.** The policy core, the role
+prompts and the Lead skill are COPIED into `~/.pi/agent/` at install time, and
+that copy is what a running agent loads. `pteam update` (or `npm i -g`)
+replaces the binary and leaves those copies alone — so an upgrade that stops
+there runs a new CLI over the previous release's rules, with both halves
+reporting the new version number and nothing disagreeing out loud. Always
+follow an update with:
+
+```bash
+pteam install     # refresh the copies under ~/.pi/agent
+pteam preflight   # confirm they match this version
+```
+
+`pteam update` says this in its `nextSteps`, and on stderr when it upgrades.
+
+The second line is a real check, not a hope. `install-drift` hashes every
+installed artifact — the pi adapter, the shared policy core, the three role
+prompts, both skills on both runtimes, and the support scripts — against the
+package preflight is running from, and reports each file as `changed`,
+`missing` or `unexpected`. That last one is the leftover case: a support script
+or a built `.js` from an older release, still sitting in a directory this pack
+replaces wholesale.
+
+It has to be a byte comparison. The `policy-core` check above proves the
+installed module loads and exports the policy API — which a core from three
+releases ago does just as well, which is exactly how a half-upgraded host looks
+healthy. `pteam prompts write` and `pteam skills write` deliberately edit the
+installed copies; a difference there is still drift — the rules a running agent
+enforces are not this release's — but the remedy line says that `pteam install`
+will overwrite the edit, because a check that tells someone to destroy their own
+customization without saying so is worse than one that says nothing.
+
+Drift is a warning by default and a failure under `--strict`, because
+"the rules a running agent enforces are not the rules this CLI reports" is the
+unverifiable state `--strict` exists to reject. Two things are deliberately not
+drift: an unknown file in `~/.pi/agent/extensions/prompts/`, which is a shared
+directory, and a CRLF copy of otherwise identical content.
+
+No manifest is written at install time. Upstream Paseo ships one
+(`foundation/manifest.json`, a sha256 per distributed file) because the source
+bytes are not on the target host; ours are, since preflight runs from the
+package itself — so a manifest would be a third copy that can go stale on its
+own.
+
+The Claude half registers an ABSOLUTE node path in `~/.claude/settings.json`
+(hooks) and `~/.claude.json` (MCP), because a hook may run without the user's
+`PATH`. That path is chosen at install time and is the one thing the installer
+references rather than writes, so it is also the one thing that can rot: under
+a version manager, `process.execPath` is an exact patch directory
+(`.../installs/node/22.23.2/bin/node`) and the next `mise upgrade node` deletes
+it. The pack is fail-closed — a hook that cannot start DENIES — so a retired
+node version would take every Claude seat on the host offline with no message
+naming the cause.
+
+Two things keep that from being silent. `--install` prefers the most durable
+version-alias of the running interpreter that still satisfies `engines`
+(`.../installs/node/22/bin/node`), never trading the major version away, and
+`PASEO_TEAM_NODE_EXEC` overrides the choice outright. And `--verify` checks the
+registered interpreter, not just the script — so `pteam preflight` reports
+`missing interpreter:<path>` with the fix, instead of the host quietly denying
+everything.
+
+**A provider reporting `available` is not a promise that anything is routable
+through it.** `available` describes the provider; the model inventory is a
+separate question, and `list_models` can come back EMPTY on a provider that
+passes every health check — observed on `pi-peer`. That is the same shape of
+trap as a permission that looks granted while the daemon never registered the
+tool. Preflight now calls `list_models` for every healthy role provider and
+warns (fails under `--strict`) when the answer is empty, so always check the
+inventory before routing to a provider — never the status alone.
 
 `--runtime pi|claude|both` selects which families the host is expected to
 serve; with no flag it detects them from the installed CLIs, so a Claude-only
@@ -899,9 +1229,14 @@ README.
 node cli/paseo-team.mjs --help          # or `npm link` once, then `pteam`
 pteam status                            # paths + presence, machine readable
 pteam graph                             # agents, spawn tree, pending permits
+pteam cost --cluster <id>               # per-agent + summed cost for one cluster
+pteam activity <ref> --tail 5 --max-chars 2000
+                                        # one agent's activity, capped PER ENTRY
 pteam permits list
 pteam seats list                        # custom seats + the providers they generate
 pteam seats apply                       # write those providers into ~/.paseo/config.json
+pteam models sync                       # rebuild pi's catalogs from their endpoints, then refresh
+pteam models refresh                    # daemon re-reads the catalog, without a restart
 pteam web --port 4321 --open            # prints http://127.0.0.1:PORT/#token=...
 ```
 
@@ -925,6 +1260,41 @@ Two different things are called "permission", and the UI keeps them apart:
   and a seat grants only capabilities from a catalog that lives in code. There
   is still no way to type a tool name into the browser and have it granted, and
   no "grant everything" button.
+
+Three of those commands exist because Paseo's own surface answers the wrong
+shape of question for a fifteen-Peer project:
+
+- **`pteam cost`** — `list_agents` has no cost field and `get_agent_status`
+  has one per agent, so the only way to total a project's spend was to call
+  inspect once per seat and add the numbers by hand. `pteam cost --cluster <id>`
+  does it in one command, sorted most expensive first. The cluster is the unit
+  because it is already the pack's authority boundary. A seat Paseo reports no
+  usage for is named in `unavailable`, never counted as zero — a total that
+  silently omits a seat is worse than one that admits the gap. The numbers come
+  from `paseo inspect → LastUsage` and are reported under that name rather than
+  relabelled, because the daemon's own framing is the only thing the pack can
+  vouch for.
+- **`pteam models refresh`** (and the last step of `models sync`) — Paseo caches
+  each provider's model list for the daemon's whole process lifetime. Rewrite
+  `~/.pi/agent/models.json` and `paseo provider models pi-peer` keeps answering
+  with the old list; `paseo reload` does not help either, because it reloads
+  daemon config rather than the provider snapshot. The only documented cure was
+  restarting the daemon, which drops every live agent connection over a
+  read-only change. The daemon does accept a `refresh_providers_snapshot_request`
+  (permission `daemon.read`) — the `paseo` CLI simply never exposed it. This is
+  the one command in the pack that reaches Paseo through its client SDK instead
+  of argv, and `cli/lib/paseo-bridge.mjs` still owns it so the rule that holds is
+  "one place talks to Paseo", by any transport. It fails closed: an unreachable
+  daemon, a missing SDK or a Paseo too old to know the message all report the
+  catalog as still stale and name the restart that would finish the job.
+- **`pteam activity`** — `get_agent_activity`'s `limit` bounds how many entries
+  come back and says nothing about how big one is. One entry can be a Peer's
+  whole `PEER_MESSAGE_V1` report, so `limit: 3` routinely returns hundreds of
+  kilobytes of text that is usually already in a file on disk. `--max-chars`
+  caps each entry INDEPENDENTLY, reports the original size and what it withheld,
+  and leaves short entries whole. The other half of that fix is a convention,
+  not a flag: a Peer's report points at its artifact instead of resending it
+  (`prompts/peer.md`, and the Peer output contract in the Lead skill).
 
 Cost note, because it shapes the whole design: every `paseo` invocation costs
 ~3s of process startup on Windows regardless of the query. `paseo-team graph`

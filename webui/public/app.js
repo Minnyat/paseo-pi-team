@@ -841,9 +841,6 @@ loaders.graph = async () => {
 
 $("graph-refresh").addEventListener("click", () => refreshGraph());
 $("graph-all").addEventListener("change", () => refreshGraph());
-// A room read costs a round trip, so it fires on commit (blur/Enter), not on
-// every keystroke.
-$("graph-rooms").addEventListener("change", () => refreshGraph());
 // The domain filter is a local view change: no request, just a redraw.
 $("graph-domain").addEventListener("change", () => {
 	teamRenderedSig = "";
@@ -1193,6 +1190,10 @@ function mapControl(field, path) {
 		if (isFixed) {
 			head.appendChild(el("span", { class: "cfg-card-title", text: key }));
 		} else {
+			// A bare text box at the top of a card says nothing about what goes
+			// in it, and the placeholder that would have is hidden the moment
+			// the box has a value.
+			if (field.keyLabel) head.appendChild(el("span", { class: "cfg-card-keylabel", text: field.keyLabel }));
 			const keyInput = el("input", { type: "text", class: "cfg-input cfg-card-key", placeholder: field.keyLabel ?? "Khóa" });
 			keyInput.value = key;
 			keyInput.addEventListener("change", () => {
@@ -1226,7 +1227,7 @@ function mapControl(field, path) {
 		}
 		card.appendChild(head);
 		const body = el("div", { class: "cfg-card-body" });
-		for (const child of field.item?.fields ?? []) body.appendChild(fieldRow(child, joinPath(path, key)));
+		appendFields(body, field.item?.fields, joinPath(path, key));
 		card.appendChild(body);
 		return card;
 	};
@@ -1269,16 +1270,39 @@ function fieldControl(field, path, prefix) {
 	return stringControl(field, path, prefix);
 }
 
+/**
+ * Lay fields out, folding the ones marked `advanced` into a disclosure.
+ *
+ * Most of these forms have two or three fields somebody actually sets and a
+ * tail of tuning knobs nobody touches. Showing all of them at once makes the
+ * card twice as tall and buries the two that matter, so the tail is collapsed —
+ * still one click away, and still saved whether it is open or shut.
+ */
+function appendFields(container, fields, prefix) {
+	const plain = [];
+	const advanced = [];
+	for (const field of fields ?? []) (field.advanced ? advanced : plain).push(field);
+	for (const field of plain) container.appendChild(fieldRow(field, prefix));
+	if (advanced.length === 0) return;
+	const more = el("details", { class: "cfg-more" });
+	more.appendChild(el("summary", { text: `Tuỳ chọn nâng cao (${advanced.length})` }));
+	for (const field of advanced) more.appendChild(fieldRow(field, prefix));
+	container.appendChild(more);
+}
+
 function fieldRow(field, prefix) {
 	const path = joinPath(prefix, field.path);
 	const row = el("div", { class: `cfg-field${field.type === "map" || field.type === "flags" ? " cfg-field-wide" : ""}` });
+	// Label, its default and its hint all live in the FIRST column. They used
+	// to be three stacked rows, which made a six-field card taller than the
+	// screen and hid the control the row is actually about.
 	row.appendChild(
 		el("div", { class: "cfg-label" }, [
 			el("label", { text: field.label }),
 			field.default !== undefined ? el("span", { class: "cfg-default", text: defaultValueLabel(field) }) : null,
+			field.hint && field.type !== "map" ? el("p", { class: "cfg-hint", text: field.hint }) : null,
 		]),
 	);
-	if (field.hint && field.type !== "map") row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
 	row.appendChild(fieldControl(field, path, prefix));
 	if (field.type === "map" && field.hint) row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
 	if (field.showIf) {
@@ -1339,14 +1363,134 @@ function renderConfigForm() {
 		);
 	}
 
+	renderConfigActions(schema);
+
 	for (const group of schema.groups ?? []) {
 		const fieldset = el("fieldset", { class: "cfg-group" });
 		fieldset.appendChild(el("legend", { text: group.label }));
 		if (group.hint) fieldset.appendChild(el("p", { class: "cfg-hint", text: group.hint }));
-		for (const field of group.fields ?? []) fieldset.appendChild(fieldRow(field, ""));
+		appendFields(fieldset, group.fields, "");
 		form.appendChild(fieldset);
 	}
 	refreshDependents();
+}
+
+/**
+ * Buttons a section declares for itself, plus the last result underneath.
+ *
+ * These run a `pteam` command rather than editing the document, so they are
+ * kept visibly apart from the fields: the form's Lưu writes a file, an action
+ * goes and does something to the machine. One runs at a time, and the running
+ * one says what it is doing — a model sweep can take minutes, and a button that
+ * looks idle for three minutes reads as broken.
+ */
+function renderConfigActions(schema) {
+	const host = clear($("config-actions"));
+	const actions = schema?.actions ?? [];
+	host.classList.toggle("hidden", actions.length === 0);
+	if (actions.length === 0) return;
+
+	const row = el("div", { class: "cfg-actions-row" });
+	const output = el("div", { class: "cfg-actions-out hidden" });
+	const buttons = [];
+
+	for (const action of actions) {
+		const button = el("button", {
+			type: "button",
+			class: action.primary ? "primary" : "",
+			text: action.label,
+			onclick: async () => {
+				for (const other of buttons) other.disabled = true;
+				const idle = button.textContent;
+				button.textContent = action.busy ?? "Đang chạy…";
+				host.classList.add("running");
+				clear(output).classList.remove("hidden", "bad", "good");
+				output.appendChild(el("p", { class: "cfg-hint", text: action.busy ?? "Đang chạy…" }));
+				try {
+					const { data } = await api(action.api, { method: "POST", body: {} });
+					paintActionResult(output, action, data);
+				} catch (error) {
+					// A partial failure still answers with a full report, and the
+					// server now carries it through a non-zero exit. Show which
+					// part failed rather than one flat "command failed".
+					const report = error?.payload?.data;
+					if (report && typeof report === "object") {
+						paintActionResult(output, action, report);
+						// api() paints "mất kết nối" for any non-ok answer, but a
+						// report that came back in full is the server working,
+						// not failing. The panel below already says which part
+						// went wrong.
+						paintConnection("ok", "vừa xong");
+					} else {
+						output.classList.add("bad");
+						clear(output).appendChild(el("p", { class: "cfg-actions-head", text: errorLine(error?.payload ?? { message: error?.message }) }));
+					}
+				} finally {
+					button.textContent = idle;
+					host.classList.remove("running");
+					for (const other of buttons) other.disabled = false;
+				}
+			},
+		});
+		buttons.push(button);
+		row.appendChild(el("div", { class: "cfg-action" }, [button, action.hint ? el("span", { class: "cfg-hint", text: action.hint }) : null]));
+	}
+	host.appendChild(row);
+	host.appendChild(output);
+}
+
+/** humanizeError returns a {title, advice} pair; a list row needs one line. */
+function errorLine(payload) {
+	const info = humanizeError(payload);
+	return info.title === "Có lỗi xảy ra" ? (payload?.message ?? info.technical) : `${info.title}. ${info.advice}`;
+}
+
+/**
+ * Say what the run actually did, in the terms the person pressing the button
+ * cares about: which endpoint, how many models still answer, and — when it did
+ * not work — what to do next. A bare "ok" would hide a provider that failed
+ * while its neighbour succeeded.
+ */
+function paintActionResult(output, action, data) {
+	const box = clear(output);
+	const failed = data?.ok === false;
+	output.classList.toggle("bad", failed);
+	output.classList.toggle("good", !failed);
+
+	if (Array.isArray(data?.providers)) {
+		box.appendChild(
+			el("p", {
+				class: "cfg-actions-head",
+				text: failed ? "Có điểm cuối không cập nhật được" : "Đã cập nhật xong",
+			}),
+		);
+		const list = el("ul", { class: "cfg-actions-list" });
+		for (const entry of data.providers) {
+			const dead = (entry.probed ?? []).filter((x) => !x.live).length;
+			list.appendChild(
+				el("li", { class: entry.ok ? "ok" : "no" }, [
+					el("b", { text: entry.provider }),
+					el("span", {
+						text: entry.ok
+							? ` — giữ lại ${entry.written} model` + (dead > 0 ? `, bỏ ${dead} model không trả lời` : "")
+							: ` — ${errorLine({ code: entry.code, message: entry.message })}`,
+					}),
+				]),
+			);
+		}
+		box.appendChild(list);
+		if (data.refresh && data.refresh.ok === false) {
+			box.appendChild(el("p", { class: "cfg-hint", text: data.refresh.hint ?? data.refresh.message }));
+		}
+		return;
+	}
+
+	box.appendChild(
+		el("p", {
+			class: "cfg-actions-head",
+			text: failed ? (data?.hint ?? data?.message ?? "Không chạy được") : "Paseo đã đọc lại danh sách model.",
+		}),
+	);
 }
 
 /** Flip visibility only. `loadConfig` uses this directly: the freshly loaded

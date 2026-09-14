@@ -26,8 +26,24 @@ const PARENTS = {
 
 if (argv[0] === "ls") say(AGENTS);
 
+// Usage is reported per agent and only per agent — that asymmetry (no cost on
+// `ls`, cost on `inspect`) is the reason `pteam cost` exists. The third agent
+// deliberately reports NO usage, so the summing path has to distinguish "zero"
+// from "not reported".
+const USAGE = {
+	"11111111-1111-1111-1111-111111111111": { InputTokens: 10, OutputTokens: 100, CachedTokens: 1000, CostUsd: 1.5 },
+	"22222222-2222-2222-2222-222222222222": { InputTokens: 20, OutputTokens: 200, CachedTokens: 2000, CostUsd: 2.25 },
+	"33333333-3333-3333-3333-333333333333": null,
+};
+
 if (argv[0] === "inspect") {
 	const id = argv[1];
+	// The real paseo CLI answers some daemon failures with exit 0 and an
+	// `{ error }` body. A cost report that reads that as "no usage" would
+	// silently drop a seat out of the total.
+	if (process.env.FAKE_INSPECT === "envelope") {
+		say({ error: { code: "UNKNOWN_ERROR", message: "Connection timed out" } });
+	}
 	say({
 		Id: id,
 		Name: AGENTS.find((agent) => agent.id === id)?.name ?? "unknown",
@@ -35,7 +51,23 @@ if (argv[0] === "inspect") {
 		Status: "running",
 		PendingPermissions: [],
 		ParentAgentId: PARENTS[id] ?? null,
+		LastUsage: USAGE[id] ?? null,
 	});
+}
+
+// `paseo logs` answers with a transcript, not JSON, and one entry can be the
+// whole of a Peer's report — which is what `pteam activity` has to cap.
+if (argv[0] === "logs") {
+	const entries = [
+		"[User] short opening line",
+		`[Assistant] ${"x".repeat(5000)}`,
+		"[Tool]",
+		"[Assistant] final answer",
+	];
+	const tailIndex = argv.indexOf("--tail");
+	const tail = tailIndex < 0 ? entries.length : Number(argv[tailIndex + 1]);
+	process.stdout.write(entries.slice(-tail).join("\n") + "\n");
+	process.exit(0);
 }
 
 if (argv[0] === "permit" && argv[1] === "ls") {

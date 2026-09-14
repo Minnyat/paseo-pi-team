@@ -361,6 +361,181 @@ export function denyReason(
 }
 
 // ---------------------------------------------------------------------------
+// Skill admission
+//
+// The pack ships two skills and installs both into a directory every seat on
+// the machine can see — `~/.pi/agent/skills/` for pi, `~/.claude/skills/` for
+// Claude Code. Role is a per-seat environment variable, not a per-directory
+// fact, so there is no filesystem split to install into: a Peer could open the
+// Lead's 900-line orchestration procedure, and a Supervisor could open the
+// review harness, purely because both were on disk.
+//
+// That is not an authority hole — every tool those procedures need is already
+// denied to the wrong role by the tables above. It is an ATTENTION hole, and
+// the expensive kind: a Peer that has read the orchestration procedure starts
+// reasoning about topology and delegation instead of its own bounded task, and
+// nothing in its output says where the drift came from.
+//
+// So the table below is the third thing the two runtimes share, next to the
+// tool policy and the brief parser: one admission map, two enforcement points.
+//
+//   `active`            the role may load it, subject to the guard below
+//   `packaged-disabled` bytes ship for review and provenance; not loadable
+//
+// The upstream doctrine this mirrors (Paseo's own Foundation `role-bundles.json`)
+// carries a third state, `explicit-only` — loadable only when the Human names
+// the skill. We do not: neither runtime hands us a signal for "the Human asked
+// for this by name", so a third state here would be a label we could not
+// enforce. Two states, both enforced, is the honest version.
+// ---------------------------------------------------------------------------
+
+export type SkillAdmission = "active" | "packaged-disabled";
+
+/** Skills this pack installs. Anything else belongs to the user; see below. */
+export const PACK_SKILL_NAMES = ["paseo-team-lead", "paseo-ocr-reviewer"];
+
+const SKILL_ADMISSION: Record<string, Record<TeamRole, SkillAdmission>> = {
+	"paseo-team-lead": {
+		lead: "active",
+		peer: "packaged-disabled",
+		supervisor: "packaged-disabled",
+	},
+	"paseo-ocr-reviewer": {
+		// The Lead routes a review and reads the reviewer's report; it never runs
+		// the harness itself (skills/paseo-team-lead/SKILL.md tells the REVIEWER
+		// to load this, in the brief it writes).
+		lead: "packaged-disabled",
+		peer: "active",
+		supervisor: "packaged-disabled",
+	},
+};
+
+export function skillAdmission(role: TeamRole, skill: string): SkillAdmission {
+	return SKILL_ADMISSION[normalizeSkillName(skill)]?.[role] ?? "active";
+}
+
+/** Trim, lowercase, and drop a `plugin:skill` namespace or a `Skill(x)` wrapper. */
+function normalizeSkillName(raw: unknown): string {
+	if (typeof raw !== "string") return "";
+	const inner = /^\s*skill\s*\(\s*(.+?)\s*\)\s*$/i.exec(raw)?.[1] ?? raw;
+	const trimmed = inner.trim().toLowerCase().replace(/^\/+/, "");
+	const colon = trimmed.lastIndexOf(":");
+	return colon < 0 ? trimmed : trimmed.slice(colon + 1);
+}
+
+/**
+ * Directories a role skill is INSTALLED into, lowercased and slash-normalised.
+ *
+ * The distinction this draws is load-bearing. A Peer assigned to edit
+ * `skills/paseo-team-lead/SKILL.md` **in a repository checkout** — this repo is
+ * one, and editing that file is ordinary work — must be able to read it. What
+ * is gated is loading the INSTALLED copy as a procedure to follow, which is a
+ * different act on a different path, and the only one the admission table is
+ * about.
+ */
+function installedSkillRoots(
+	env: Record<string, string | undefined> = process.env,
+): string[] {
+	const home = env.HOME?.trim() || env.USERPROFILE?.trim() || "";
+	const piAgent =
+		env.PI_CODING_AGENT_DIR?.trim() ||
+		join(env.PI_HOME?.trim() || join(home, ".pi"), "agent");
+	const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude");
+	return [
+		join(piAgent, "skills"),
+		join(claudeHome, "skills"),
+		// pi also discovers ~/.agents/skills, the cross-harness location.
+		join(home, ".agents", "skills"),
+	].map(normalizePathForMatch);
+}
+
+function normalizePathForMatch(path: string): string {
+	return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * The pack skill an INSTALLED filesystem path names, or null.
+ *
+ * pi has no `skill` tool: the agent loads a skill by READING its SKILL.md
+ * (pi's own docs describe exactly that), so the path is the only handle the Pi
+ * adapter gets. A relative path is resolved against `cwd` first, which is what
+ * keeps a repository checkout out of this: `skills/paseo-team-lead/SKILL.md`
+ * under a workspace resolves under that workspace and is not an installed copy.
+ */
+export function packSkillFromPath(
+	path: unknown,
+	{
+		cwd = process.cwd(),
+		env = process.env,
+	}: { cwd?: string; env?: Record<string, string | undefined> } = {},
+): string | null {
+	if (typeof path !== "string" || path.trim() === "") return null;
+	const absolute = /^(?:[a-z]:[\\/]|[\\/])/i.test(path) ? path : join(cwd, path);
+	const normalized = normalizePathForMatch(absolute);
+	const root = installedSkillRoots(env).find(
+		(candidate) => candidate !== "" && normalized.startsWith(`${candidate}/`),
+	);
+	if (!root) return null;
+	const segments = normalized.slice(root.length + 1).split("/");
+	// The first segment under the skills root is the package; a bare directory
+	// listing of the root itself is not a load.
+	const name = segments[0] ?? "";
+	if (!PACK_SKILL_NAMES.includes(name) || segments.length < 2) return null;
+	return name;
+}
+
+/**
+ * Why this role may not load this skill, or null.
+ *
+ * Two deliberate leniencies, both because this gate protects attention rather
+ * than authority, and a gate that is wrong in the closed direction here costs
+ * more than it saves:
+ *
+ *   - a skill this pack does not ship is never blocked. The user's own skills
+ *     share the same directory, and a pack that silently ate them would be a
+ *     worse neighbour than the drift it is preventing;
+ *   - an unreadable skill name is not blocked. Every tool the procedure needs
+ *     is already denied to the wrong role, so the downside is one stale
+ *     procedure in context — against breaking every skill call on the day a
+ *     runtime renames the field we read.
+ */
+export function skillBlockReason(
+	role: TeamRole,
+	skill: unknown,
+	brief: ParsedTaskBrief | null = null,
+): string | null {
+	const name = normalizeSkillName(skill);
+	if (!PACK_SKILL_NAMES.includes(name)) return null;
+	if (skillAdmission(role, name) === "packaged-disabled") {
+		return name === "paseo-team-lead"
+			? `"${name}" is the Lead's orchestration procedure and is not admitted for the ${role} role. Reading it will not give you delegation authority — every tool it uses is already denied to you — and it will pull your attention onto topology that is not your task. ${
+					role === "peer"
+						? "Work the brief you were given; send a DEPENDENCY_REQUEST to your Lead if it is not enough."
+						: "Observe and advise the Lead instead."
+				}`
+			: `"${name}" is the independent-review harness and is not admitted for the ${role} role. ${
+					role === "lead"
+						? "You route a review and read its report; the Reviewer Peer loads this skill under its own brief."
+						: "Send an observation to the Lead instead."
+				}`;
+	}
+	// The one disposition-scoped admission. The skill's own first paragraph says
+	// it is loaded by a Peer with DISPOSITION: independent-reviewer, and a Peer
+	// that reads a read-only review harness mid-implementation is the same
+	// attention drift one row up. Substring match, like the fork guard below:
+	// real briefs spell the disposition several ways.
+	if (name === "paseo-ocr-reviewer" && role === "peer") {
+		const disposition = (brief?.fields.get("DISPOSITION") ?? "").toLowerCase();
+		if (!disposition.includes("reviewer")) {
+			return `"${name}" is admitted for a Peer whose brief sets DISPOSITION to an independent reviewer${
+				disposition ? `; this brief says "${disposition}"` : ", and this brief sets no DISPOSITION"
+			}. It is a read-only review harness, not a way to check your own work — ask the Lead to route a review instead.`;
+		}
+	}
+	return null;
+}
+
+// ---------------------------------------------------------------------------
 // Bash CLI guard — peers must not drive Paseo from the shell to bypass the
 // tool policy. Heuristic only; not an authorization boundary.
 // ---------------------------------------------------------------------------
@@ -1710,9 +1885,28 @@ export interface PeerBlock {
 	/** Uppercase FIELD -> first occurrence value. */
 	fields: Map<string, string>;
 	malformed: string[];
+	/**
+	 * Repetitions that changed nothing. Surfaced to the Lead but NOT a reason
+	 * to refuse the message — see `parsePeerBlock`.
+	 */
+	warnings: string[];
 }
 
 const PEER_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
+
+/**
+ * The fields of the envelope itself — the only ones any receiver acts on, and
+ * therefore the only ones where two different values are a real ambiguity
+ * rather than ordinary prose. `scripts/team-communication.mjs` writes exactly
+ * these (its `PEER_MESSAGE_FIELD_NAMES`), and team-communication.test.mjs pins
+ * the two together.
+ */
+export const PEER_ENVELOPE_FIELDS: ReadonlySet<string> = new Set([
+	"KIND",
+	"CORRELATION_ID",
+	"TASK_ID",
+	"FROM_AGENT_ID",
+]);
 
 /**
  * Parse a PEER_MESSAGE_V1 message.
@@ -1720,8 +1914,35 @@ const PEER_FIELD_RE = /^([A-Z][A-Z0-9_]*):\s*(.*)$/;
  * Same two rules as `parseSupervisorBlock`, for the same two reasons. The
  * header must be a line of its OWN, because this repo's prompts discuss the
  * contract in prose and a mention of it is not an instance of it. And a
- * duplicate field becomes an entry in `malformed` rather than a quietly
- * chosen value, because the receiving Lead is about to act on it.
+ * CONFLICTING duplicate field becomes an entry in `malformed` rather than a
+ * quietly chosen value, because the receiving Lead is about to act on it.
+ *
+ * A repetition that agrees with itself is a different thing, and the
+ * difference is worth a rule of its own. Everything after the header line is
+ * scanned, body included, so a Peer whose report restates `TASK_ID: T-4` in
+ * its own prose — the natural way to write a report, and how the same id
+ * already appears in the artifact it points at — used to get the WHOLE message
+ * refused as malformed. That cost a full round trip of the Lead's context to
+ * recover a value nobody actually disagreed about. Observed twice in one
+ * fifteen-Peer project.
+ *
+ * So: same value → a warning the Lead can see and ignore; DIFFERENT value →
+ * still malformed, because that is the case where the receiver would have to
+ * guess which one the Peer meant, and guessing is the thing this parser exists
+ * not to do.
+ *
+ * "Which one the Peer meant" only bites for a field somebody READS, and this
+ * parser has no allowlist — any `WORD:` line in free prose becomes a field. A
+ * report legitimately writes `STATUS: DONE` near the top and `STATUS: blocked
+ * on review` further down, and refusing the message over it protects nothing:
+ * `peerMessageTurnNotice` reads KIND, TASK_ID and FROM_AGENT_ID, and the sender
+ * uses CORRELATION_ID to deduplicate. Those four are the envelope, and a
+ * conflict in one of them stays fatal. A conflict in a name nobody acts on is a
+ * warning, because the alternative is a full resend round trip to fix prose.
+ *
+ * Fail-closed is preserved exactly where it was load-bearing.
+ * `parseSupervisorBlock` deliberately keeps the stricter rule for EVERY field:
+ * there, a duplicate is a question about AUTHORITY, not about tidiness.
  */
 export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 	if (typeof prompt !== "string" || prompt.trim() === "") return null;
@@ -1731,6 +1952,7 @@ export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 
 	const fields = new Map<string, string>();
 	const malformed: string[] = [];
+	const warnings: string[] = [];
 
 	for (const line of lines.slice(start + 1)) {
 		const trimmed = line.trim();
@@ -1741,7 +1963,17 @@ export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 		const key = match[1] as string;
 		const value = (match[2] ?? "").trim();
 		if (fields.has(key)) {
-			malformed.push(`duplicate field ${key}`);
+			if (fields.get(key) === value) {
+				warnings.push(`repeated field ${key} (same value)`);
+			} else if (PEER_ENVELOPE_FIELDS.has(key)) {
+				malformed.push(
+					`conflicting envelope field ${key} ("${fields.get(key)}" then "${value}")`,
+				);
+			} else {
+				warnings.push(
+					`repeated body line ${key} with a different value (kept the first: "${fields.get(key)}")`,
+				);
+			}
 			continue;
 		}
 		fields.set(key, value);
@@ -1759,7 +1991,7 @@ export function parsePeerBlock(prompt: unknown): PeerBlock | null {
 		);
 	}
 
-	return { kind, fields, malformed };
+	return { kind, fields, malformed, warnings };
 }
 
 /**
@@ -1787,6 +2019,14 @@ export function peerMessageTurnNotice({
 		block.malformed.length
 			? `The message is malformed (${block.malformed.join("; ")}). Treat it as unverified: ask the Peer to resend rather than acting on a field you cannot trust.`
 			: peerMessageDirective(block.kind),
+		// Appended, never substituted: a harmless repetition must not displace
+		// the directive that says what this turn obliges the Lead to do.
+		...(block.malformed.length === 0 && block.warnings.length
+			? [
+					"",
+					`Note (no action needed): ${block.warnings.join("; ")}. These are repeated lines in the Peer's prose, not a disagreement about the envelope, so the message was accepted as sent.`,
+				]
+			: []),
 	].join("\n");
 }
 

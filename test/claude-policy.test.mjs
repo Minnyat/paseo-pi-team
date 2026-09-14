@@ -6,6 +6,7 @@
 // disallowedTools layer that must not overlap with the per-turn decisions.
 
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
 import {
 	claudeBaseTools,
 	claudeDisallowedTools,
@@ -13,9 +14,14 @@ import {
 	classifyClaudeTool,
 	describeClaudePolicy,
 	teamToolName,
+	claudeReadPath,
+	claudeSkillName,
 	CLAUDE_PASEO_TOOL_NAMES,
 } from "../extensions/paseo-team-core/claude-policy.ts";
-import { parseTaskBrief } from "../extensions/paseo-team-core/policy-core.ts";
+import {
+	parseTaskBrief,
+	skillBlockReason,
+} from "../extensions/paseo-team-core/policy-core.ts";
 
 const brief = (lines) => parseTaskBrief(lines.join("\n"));
 
@@ -726,6 +732,108 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 		),
 		/Peer cannot orchestrate/,
 	);
+}
+
+// --- Skill admission, Claude dialect -----------------------------------------
+//
+// `Skill` itself stays allowed for every role — the user's own skills go
+// through it — so what is pinned here is the package-level gate and the fact
+// that it reads the same table the Pi adapter does.
+{
+	const skillCall = (role, skill, brief = null) =>
+		claudeToolBlockReason({ role, toolName: "Skill", toolInput: { skill }, brief });
+
+	assert.ok(claudeBaseTools("peer").includes("Skill"), "the tool stays available");
+	assert.ok(!claudeDisallowedTools("peer").includes("Skill"));
+
+	assert.equal(skillCall("lead", "paseo-team-lead"), null);
+	assert.match(String(skillCall("peer", "paseo-team-lead")), /not admitted for the peer/);
+	assert.match(
+		String(skillCall("supervisor", "paseo-team-lead")),
+		/not admitted for the supervisor/,
+	);
+
+	// The user's own skills are untouched, and so is a call whose name we
+	// cannot read — see the leniency note on skillBlockReason.
+	assert.equal(skillCall("peer", "anthropic-skills:pdf"), null);
+	assert.equal(
+		claudeToolBlockReason({ role: "peer", toolName: "Skill", toolInput: {}, brief: null }),
+		null,
+	);
+	assert.equal(
+		claudeToolBlockReason({ role: "peer", toolName: "Skill", toolInput: null, brief: null }),
+		null,
+	);
+
+	// The reviewer harness follows the brief, exactly as on Pi.
+	const reviewerBrief = brief([
+		"PASEO_TEAM_TASK_V3_BEGIN",
+		"TASK_ID: T-900",
+		"MODE: read-only",
+		"DISPOSITION: independent-reviewer",
+		"PASEO_TEAM_TASK_V3_END",
+	]);
+	assert.equal(skillCall("peer", "paseo-ocr-reviewer", reviewerBrief), null);
+	assert.match(String(skillCall("peer", "paseo-ocr-reviewer", readOnlyBrief)), /reviewer/i);
+	assert.match(String(skillCall("lead", "paseo-ocr-reviewer")), /Reviewer Peer/);
+
+	// Same verdict on both runtimes, for every role and both pack skills. This
+	// is the asymmetry guard the shared core exists for.
+	for (const role of ["lead", "peer", "supervisor"]) {
+		for (const skill of ["paseo-team-lead", "paseo-ocr-reviewer"]) {
+			assert.equal(
+				skillCall(role, skill, reviewerBrief),
+				skillBlockReason(role, skill, reviewerBrief),
+				`${role} + ${skill} must resolve identically on both runtimes`,
+			);
+		}
+	}
+
+	// The OTHER door, and the one that makes the first mean anything: pi has no
+	// `Skill` tool and gates the READ of the installed SKILL.md, so a Claude Peer
+	// refused Skill(paseo-team-lead) must not simply Read the same bytes. That is
+	// the cross-runtime asymmetry the shared table exists to prevent.
+	const readCall = (role, file_path, toolName = "Read") =>
+		claudeToolBlockReason({ role, toolName, toolInput: { file_path }, brief: null });
+	const installed = `${homedir()}/.claude/skills/paseo-team-lead/SKILL.md`;
+
+	assert.match(String(readCall("peer", installed)), /not admitted for the peer/);
+	assert.match(String(readCall("supervisor", installed)), /not admitted/);
+	assert.equal(readCall("lead", installed), null, "the Lead's own procedure stays readable");
+	assert.match(
+		String(readCall("peer", `${homedir()}/.pi/agent/skills/paseo-team-lead/SKILL.md`)),
+		/not admitted/,
+		"the pi install location is gated on Claude too — one machine, both copies",
+	);
+	// Glob/Grep carry a `path` rather than a `file_path`.
+	assert.match(
+		String(
+			claudeToolBlockReason({
+				role: "peer",
+				toolName: "Grep",
+				toolInput: { pattern: "x", path: installed },
+				brief: null,
+			}),
+		),
+		/not admitted/,
+	);
+	// A repository checkout of the same file is ordinary work — this repo is one,
+	// and a Peer assigned to edit the Lead skill has to be able to read it.
+	assert.equal(readCall("peer", `${process.cwd()}/skills/paseo-team-lead/SKILL.md`), null);
+	assert.equal(readCall("peer", "skills/paseo-team-lead/SKILL.md"), null);
+	// Everything else a seat reads is untouched.
+	assert.equal(readCall("peer", `${homedir()}/.claude/skills/my-own-skill/SKILL.md`), null);
+	assert.equal(readCall("peer", "README.md"), null);
+	assert.equal(claudeReadPath({ path: "a" }), "a");
+	assert.equal(claudeReadPath({ file_path: "a", path: "b" }), "a");
+	assert.equal(claudeReadPath("nope"), "");
+
+	// The field the name is read from, and the wrapper spellings.
+	assert.equal(claudeSkillName({ skill: "a" }), "a");
+	assert.equal(claudeSkillName({ name: "b" }), "b");
+	assert.equal(claudeSkillName({ skill_name: "c" }), "c");
+	assert.equal(claudeSkillName({ skill: "   " }), "");
+	assert.equal(claudeSkillName("paseo-team-lead"), "");
 }
 
 console.log("claude policy tests passed");

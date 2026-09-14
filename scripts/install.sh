@@ -77,9 +77,16 @@ TEAM_SUPPORT_FILES=(
 POLICY_CORE_DIR="paseo-team-core"
 
 mkdir -p "$EXT_DIR" "$PROMPT_DIR" "$SKILLS_DIR"
-# Routing configs live here (model-routing.local.json, cluster-routing.local.json);
-# create it so the documented copy commands work out of the box.
-mkdir -p "$HOME/.paseo-pi-team"
+# Routing configs, the seat ledger, the permit log and the Claude session state
+# live here; create it so the documented copy commands work out of the box.
+#
+# Resolved the same way every reader resolves it — PST_TEAM_CONFIG_DIR first,
+# then the PASEO_TEAM_HOME legacy alias, then the default. Creating and
+# advertising $HOME/.paseo-pi-team unconditionally would name a directory no
+# reader uses on a host with either override set: the same mistake preflight
+# used to make in the other direction.
+TEAM_CONFIG_DIR="${PST_TEAM_CONFIG_DIR:-${PASEO_TEAM_HOME:-$HOME/.paseo-pi-team}}"
+mkdir -p "$TEAM_CONFIG_DIR"
 
 cp -f "$ROLE_PACK_ROOT/extensions/paseo-team-policy.ts" "$EXT_DIR/paseo-team-policy.ts"
 rm -rf "$EXT_DIR/$POLICY_CORE_DIR"
@@ -121,7 +128,7 @@ if command -v claude >/dev/null 2>&1; then
     PASEO_TEAM_MCP_SCRIPT="$TEAM_SCRIPTS_DIR/claude-team-mcp.mjs" \
     PASEO_TEAM_POLICY_DIR="$EXT_DIR/$POLICY_CORE_DIR" \
     node "$ROLE_PACK_ROOT/scripts/claude-setup.mjs" "${CLAUDE_SETUP_ARGS[@]}"; then
-    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server)"
+    CLAUDE_SETUP_STATUS="installed (hooks + paseo-team MCP server + role skills)"
   else
     echo "[paseo-team] claude setup failed" >&2
     exit 1
@@ -151,11 +158,13 @@ echo "  4. Merge config/paseo.providers.example.json into ~/.paseo/config.json"
 echo "     (agents.providers.pi-* + claude-* + daemon.mcp.injectIntoAgents: true)."
 echo "     Regenerate the claude-* block any time with:"
 echo "       node \"$ROLE_PACK_ROOT/scripts/claude-setup.mjs\" --print-providers"
-echo "  5. Copy config/model-routing.example.json to ~/.paseo-pi-team/model-routing.local.json"
+echo "  5. Copy config/model-routing.example.json to $TEAM_CONFIG_DIR/model-routing.local.json"
+echo "  6. Routing to pi? Copy config/pi-models.example.json to $TEAM_CONFIG_DIR/pi-models.local.json"
+echo "     (note the different filename), fill in the endpoint, then: pteam models sync"
 echo "     and fill in REAL model IDs from: paseo provider models pi-peer --json"
 echo "     Cross-host controller: also copy config/cluster-routing.example.json to"
-echo "     ~/.paseo-pi-team/cluster-routing.local.json (endpoint values live in env)"
-echo "  6. Restart the Paseo daemon (kills running agents — do it when ready)."
-echo "  7. In pi, run /reload to load the new extension, then /team-role."
-echo "  8. Verify host readiness (repo-root independent):"
+echo "     $TEAM_CONFIG_DIR/cluster-routing.local.json (endpoint values live in env)"
+echo "  7. Restart the Paseo daemon (kills running agents — do it when ready)."
+echo "  8. In pi, run /reload to load the new extension, then /team-role."
+echo "  9. Verify host readiness (repo-root independent):"
 echo "     node \"$ROLE_PACK_ROOT/scripts/preflight.mjs\""

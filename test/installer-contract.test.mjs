@@ -41,6 +41,62 @@ for (const installer of ["install.sh", "install.ps1"]) {
   }
 }
 
+// The installers must CREATE and ADVERTISE the same config directory every
+// reader resolves. Advertising $HOME/.paseo-pi-team unconditionally names a
+// directory no reader uses on a host with PST_TEAM_CONFIG_DIR or the
+// PASEO_TEAM_HOME alias set — the mirror image of the bug preflight had, where
+// the reader looked somewhere the installer never wrote.
+//
+// The shell line is EXECUTED rather than pattern-matched: a test that only
+// checks the file mentions both variable names passes on an installer whose
+// comment mentions them and whose code ignores them, which is exactly what the
+// first version of this check did.
+{
+  const sh = readFileSync(join(root, "scripts", "install.sh"), "utf8");
+  const assignment = /^TEAM_CONFIG_DIR=.*$/m.exec(sh)?.[0];
+  assert.ok(assignment, "install.sh must resolve the config dir into TEAM_CONFIG_DIR");
+  // Executed on POSIX only. install.sh is the POSIX installer — Windows runs
+  // install.ps1 — and the env below is replaced rather than merged so the
+  // variables under test are the only ones set, which leaves no PATH for
+  // Windows to resolve `bash` through. The shape check on install.ps1 below is
+  // the cross-platform half.
+  const runnable = process.platform !== "win32";
+  const resolve = (vars) =>
+    execFileSync("bash", ["-c", `${assignment}; printf %s "$TEAM_CONFIG_DIR"`], {
+      encoding: "utf8",
+      env: { HOME: "/home/fake", PST_TEAM_CONFIG_DIR: "", PASEO_TEAM_HOME: "", ...vars },
+    });
+  if (!runnable) {
+    // Still assert the assignment references both names, so a Windows-only run
+    // is not a run that checks nothing.
+    assert.match(assignment, /PST_TEAM_CONFIG_DIR/);
+    assert.match(assignment, /PASEO_TEAM_HOME/);
+  } else {
+  assert.equal(resolve({ PST_TEAM_CONFIG_DIR: "/srv/team" }), "/srv/team");
+  assert.equal(resolve({ PASEO_TEAM_HOME: "/srv/legacy" }), "/srv/legacy", "the alias still works");
+  assert.equal(
+    resolve({ PST_TEAM_CONFIG_DIR: "/srv/team", PASEO_TEAM_HOME: "/srv/legacy" }),
+    "/srv/team",
+    "the documented name wins, exactly as it does in lib-common",
+  );
+  assert.equal(resolve({}), "/home/fake/.paseo-pi-team");
+  }
+
+  // Whatever it resolved is what gets created and advertised — not a literal.
+  assert.match(sh, /mkdir -p "\$TEAM_CONFIG_DIR"/);
+  assert.doesNotMatch(sh, /~\/\.paseo-pi-team\//, "advertises a path the readers may not use");
+}
+{
+  // PowerShell is not on every runner, so this half stays shape-based — but it
+  // is the ASSIGNMENT that is checked, not a mention anywhere in the file.
+  const ps = readFileSync(join(root, "scripts", "install.ps1"), "utf8");
+  const assignment = /\$teamConfigDir\s*=[\s\S]*?\n\n/.exec(ps)?.[0] ?? "";
+  assert.match(assignment, /\$env:PST_TEAM_CONFIG_DIR/, "install.ps1: honours the documented override");
+  assert.match(assignment, /\$env:PASEO_TEAM_HOME/, "install.ps1: honours the legacy alias");
+  assert.match(ps, /-Path \$teamConfigDir/, "install.ps1: creates what it resolved");
+  assert.doesNotMatch(ps, /~\/\.paseo-pi-team\//);
+}
+
 const env = { ...process.env, PASEO_TEAM_SCRIPTS_DIR: installed };
 assert.equal(resolveTeamScriptsDir({ PASEO_TEAM_SCRIPTS_DIR: installed }), installed);
 assert.equal(
