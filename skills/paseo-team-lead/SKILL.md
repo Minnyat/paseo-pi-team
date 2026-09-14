@@ -400,8 +400,8 @@ Hard rules for a mixed fleet:
   supports, never `bypassPermissions`.
 
   Seats already running on the wrong mode show up in `pteam watchdog` under
-  `parked`, each with the `paseo agent mode <id> auto` that fixes it where
-  `auto` exists, and a `fixNote` for the seats where it does not.
+  `parked`. Every row carries the `paseo agent mode <id> auto` that fixes it
+  where `auto` exists, and a `fixNote` naming the fallback where it does not.
 
 Model classes (decided by task risk + disposition, not by role name):
 
