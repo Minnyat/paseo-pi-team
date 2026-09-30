@@ -81,7 +81,10 @@ implementation still goes to an Engineer Peer.
    controller-local `cluster-routing.local.json`, verify with
    `list_providers`/`list_models` on the EXACT target daemon, create the agent
    with the exact `<role-provider>/<model-ref>` string +
-   `settings.thinkingOptionId` — plus `settings.modeId` on every `claude-*`
+   `settings.thinkingOptionId` + `labels["team.model-class"]: "<MODEL_CLASS>"`
+   (the policy refuses a create_agent whose provider, model or thinking differs
+   from that class's route on this host, and names the expected values) — plus
+   `settings.modeId` on every `claude-*`
    route, because Paseo never inherits a permission mode across providers, a
    top-level `mode` is ignored, and the provider's own `defaultMode=auto` is
    never applied at create time (a seat created without a mode comes up on

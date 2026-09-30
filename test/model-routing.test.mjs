@@ -985,4 +985,56 @@ assert.equal(
 assert.equal(cmdPercentExpansionRisk("192.168.1.20:6767"), false);
 assert.equal(cmdPercentExpansionRisk("https://app.paseo.sh/#offer=xyz"), false);
 
+// --- optional classes + the route-gate vocabulary shared with policy-core -------
+{
+	const routing = await import("../scripts/model-routing.mjs");
+	const core = await import("../extensions/paseo-team-core/policy-core.ts");
+	// The class lists, label and opt-out variable are siblings across the
+	// boundary for the same reason as the descriptors: the gate compares what
+	// the router validated, so a class that exists on one side only is a class
+	// the gate refuses (or, worse, one the router never validates).
+	assert.deepEqual([...routing.MODEL_CLASSES], [...core.PEER_MODEL_CLASSES]);
+	assert.deepEqual([...routing.OPTIONAL_MODEL_CLASSES], [...core.OPTIONAL_MODEL_CLASSES]);
+	assert.deepEqual([...routing.ALL_MODEL_CLASSES], [...core.ALL_MODEL_CLASSES]);
+	assert.deepEqual([...routing.OPTIONAL_MODEL_CLASSES], ["SUPERVISOR_GOVERNANCE", "LEAD_RECOVERY"]);
+	assert.equal(routing.MODEL_CLASS_LABEL, core.MODEL_CLASS_LABEL);
+	assert.equal(routing.MODEL_CLASS_LABEL, "team.model-class");
+	assert.equal(routing.ROUTE_ENFORCE_ENV, core.ROUTE_ENFORCE_ENV);
+	assert.equal(routing.CLASS_REQUIRED_ROLE.SUPERVISOR_GOVERNANCE, "supervisor");
+	assert.equal(routing.CLASS_REQUIRED_ROLE.LEAD_RECOVERY, "lead");
+
+	const base = {
+		version: 1,
+		hostId: "h",
+		routes: Object.fromEntries(
+			MODEL_CLASSES.map((c) => [c, { paseoProvider: "pi-peer", model: "p/m", thinking: "low" }]),
+		),
+	};
+	// Every file written before the optional classes existed must still load.
+	assert.deepEqual(Object.keys(validateRoutingConfig(base).routes), [...MODEL_CLASSES]);
+	const withOptional = structuredClone(base);
+	withOptional.routes.SUPERVISOR_GOVERNANCE = { paseoProvider: "claude-supervisor", model: "claude-opus-5", thinking: "max" };
+	withOptional.routes.LEAD_RECOVERY = { paseoProvider: "pi-lead", model: "p/m", thinking: "high" };
+	assert.equal(validateRoutingConfig(withOptional).routes.LEAD_RECOVERY.paseoProvider, "pi-lead");
+	// ...and an optional class must route to the role it seats.
+	const wrongRole = structuredClone(base);
+	wrongRole.routes.SUPERVISOR_GOVERNANCE = { paseoProvider: "pi-peer", model: "p/m", thinking: "low" };
+	assert.throws(() => validateRoutingConfig(wrongRole), /SUPERVISOR_GOVERNANCE.*must be a supervisor role provider/);
+	const wrongLead = structuredClone(base);
+	wrongLead.routes.LEAD_RECOVERY = { paseoProvider: "claude-supervisor", model: "claude-opus-5", thinking: "high" };
+	assert.throws(() => validateRoutingConfig(wrongLead), /LEAD_RECOVERY.*must be a lead role provider/);
+	const unknown = structuredClone(base);
+	unknown.routes.GOVERNANCE = { paseoProvider: "pi-supervisor", model: "p/m", thinking: "low" };
+	assert.throws(() => validateRoutingConfig(unknown), /unknown MODEL_CLASS "GOVERNANCE"/);
+	// An absent optional class is HOST_ROUTE_UNAVAILABLE at resolution — never
+	// a fallback to another class's route.
+	assert.throws(
+		() => resolveRoute(validateRoutingConfig(base), "LEAD_RECOVERY", { providers: [], models: [] }),
+		(error) => error.code === "HOST_ROUTE_UNAVAILABLE" && /no route for LEAD_RECOVERY/.test(error.message),
+	);
+	assert.equal(routing.providerRole("claude-supervisor"), "supervisor");
+	assert.equal(routing.providerRole("pi-peer"), "peer");
+	assert.equal(routing.providerRole("codex-peer"), null);
+}
+
 console.log("[paseo-team] model-routing tests passed");

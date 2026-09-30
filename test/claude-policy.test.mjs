@@ -23,6 +23,13 @@ import {
 	skillBlockReason,
 } from "../extensions/paseo-team-core/policy-core.ts";
 
+// The create_agent ROUTE gate is off for this file: the cases below pin the
+// SHAPE gates (cluster label, recovery labels, mode, lease), and their passing
+// create_agent calls declare no model class. The route gate is pinned with
+// enforcement ON — for both runtimes and all three flows — in
+// test/route-gate.test.mts.
+process.env.PASEO_TEAM_ROUTE_ENFORCE = "off";
+
 const brief = (lines) => parseTaskBrief(lines.join("\n"));
 
 const writeBrief = brief([

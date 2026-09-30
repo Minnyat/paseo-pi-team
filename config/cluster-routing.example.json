@@ -1,5 +1,5 @@
 {
-  "$comment": "COPY → ~/.paseo-pi-team/cluster-routing.local.json on the CONTROLLER host. Never commit the local copy. This is the single controller-local route file: every host in the cluster is described here, each with its own connection, capabilities, concurrency limits and per-class routes. Endpoint VALUES (pairing offers / remote targets) live ONLY in environment variables referenced by NAME via 'endpointEnv' — never inside this file. Run 'pteam models' ON EACH HOST to list what every role provider actually offers (or 'pteam models --provider <role-provider>' for one, with its thinking options). Route shapes follow the family exactly as in model-routing.example.json: pi = '<pi-provider>/<model-id>' with thinking ∈ off|minimal|low|medium|high|xhigh|max, claude = a bare model id with thinking ∈ off|low|medium|high|xhigh|max|ultracode. For custom pi models in ~/.pi/agent/models.json, a thinkingLevelMap entry of null means the level is silently clamped by pi — treat it as unsupported.",
+  "$comment": "COPY → ~/.paseo-pi-team/cluster-routing.local.json on the CONTROLLER host. Never commit the local copy. This is the single controller-local route file: every host in the cluster is described here, each with its own connection, capabilities, concurrency limits and per-class routes. Endpoint VALUES (pairing offers / remote targets) live ONLY in environment variables referenced by NAME via 'endpointEnv' — never inside this file. Run 'pteam models' ON EACH HOST to list what every role provider actually offers (or 'pteam models --provider <role-provider>' for one, with its thinking options). Route shapes follow the family exactly as in model-routing.example.json: pi = '<pi-provider>/<model-id>' with thinking ∈ off|minimal|low|medium|high|xhigh|max, claude = a bare model id with thinking ∈ off|low|medium|high|xhigh|max|ultracode. For custom pi models in ~/.pi/agent/models.json, a thinkingLevelMap entry of null means the level is silently clamped by pi — treat it as unsupported. OPTIONAL classes SUPERVISOR_GOVERNANCE (must name a *-supervisor provider: the route a Lead seats its Supervisor from) and LEAD_RECOVERY (must name a *-lead provider: the route a Supervisor recovers a Lead from) may be omitted — the file still validates, preflight warns, and the create_agent gate refuses that flow until the class is configured (pteam routing set <CLASS> ...). Every create_agent by a Lead or Supervisor declares its class in labels[\"team.model-class\"] and must match that class's route exactly: provider family+role, model id and thinking level. A class routed to a *-supervisor provider (MONITOR_ECONOMY below) cannot be used to seat a Peer. The create_agent gate reads the routes of the ONE host whose connection.type is \"local\" (MCP create_agent always lands on the local daemon); 'mac-review' below omits the optional classes to show they are per host.",
   "version": 1,
   "hosts": {
     "win-primary": {
@@ -41,6 +41,16 @@
         },
         "REVIEW_HIGH": {
           "paseoProvider": "pi-peer",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "high"
+        },
+        "SUPERVISOR_GOVERNANCE": {
+          "paseoProvider": "pi-supervisor",
+          "model": "<pi-provider>/<model-id>",
+          "thinking": "high"
+        },
+        "LEAD_RECOVERY": {
+          "paseoProvider": "pi-lead",
           "model": "<pi-provider>/<model-id>",
           "thinking": "high"
         }

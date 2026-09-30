@@ -19,6 +19,7 @@ import {
 } from "../cli/lib/config-schema.mjs";
 import {
 	MODEL_CLASSES,
+	OPTIONAL_MODEL_CLASSES,
 	ROLE_PROVIDERS,
 	RUNTIME_DESCRIPTORS,
 	RUNTIME_FAMILIES,
@@ -67,6 +68,11 @@ for (const section of ROUTING_SECTIONS) {
 			card.fixedKeys,
 			[...MODEL_CLASSES],
 			`${section}: route keys must be exactly the MODEL_CLASSES the resolver requires`,
+		);
+		assert.deepEqual(
+			card.optionalKeys,
+			[...OPTIONAL_MODEL_CLASSES],
+			`${section}: the optional classes are offered, never as required keys`,
 		);
 		const fields = card.item?.fields ?? [];
 

@@ -1144,4 +1144,48 @@ test("cluster-remote: the remote inventory is the remote's, not the local one", 
 	// failure this file exists to catch, committed inside the test itself.
 });
 
+// --- the create_agent route gate ------------------------------------------------
+//
+// preflight reads the gate's own loader at the DEFAULT paths (never --routes),
+// because what an operator needs to see is the file every create_agent will be
+// compared against.
+
+test("route-gate: no local route file warns (strict fails) and says every create_agent is refused", { skip: !POSIX }, () => {
+	const env = { PASEO_TEAM_ROUTE_ENFORCE: "" };
+	const lax = preflight([], env).of("route-gate");
+	assert.equal(lax.status, "warn");
+	assert.match(lax.detail, /EVERY Lead\/Supervisor create_agent is refused/);
+	assert.equal(preflight(["--strict"], env).of("route-gate").status, "fail");
+});
+
+test("route-gate: names the file it reads; optional classes absent WARN even with --skip-models", { skip: !POSIX }, () => {
+	const defaultRoutes = join(home, "model-routing.local.json");
+	writeRoutes();
+	cpSync(routesFile, defaultRoutes);
+	try {
+		const run = preflight(["--routes", defaultRoutes], { PASEO_TEAM_ROUTE_ENFORCE: "" });
+		const gate = run.of("route-gate");
+		assert.equal(gate.status, "pass", gate.detail);
+		assert.match(gate.detail, /model-routing\.local\.json \(host "stub-host"\)/);
+		for (const cls of ["SUPERVISOR_GOVERNANCE", "LEAD_RECOVERY"]) {
+			const check = run.of(`route:${cls}`);
+			assert.equal(check?.status, "warn", `${cls} absent must warn`);
+			assert.match(check.detail, new RegExp(`pteam routing set ${cls}`));
+		}
+		// A warning, not a failure: every route file written before the optional
+		// classes existed must keep a clean --strict run.
+		assert.equal(preflight(["--strict", "--routes", defaultRoutes], {}).of("route:LEAD_RECOVERY").status, "warn");
+	} finally {
+		rmSync(defaultRoutes, { force: true });
+	}
+});
+
+test("route-enforcement: the opt-out is a WARN, and --strict FAILS it", { skip: !POSIX }, () => {
+	assert.equal(preflight([], { PASEO_TEAM_ROUTE_ENFORCE: "" }).of("route-enforcement").status, "pass");
+	const off = preflight([], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-enforcement");
+	assert.equal(off.status, "warn");
+	assert.match(off.detail, /never a default/);
+	assert.equal(preflight(["--strict"], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-enforcement").status, "fail");
+});
+
 test.after(() => rmSync(home, { recursive: true, force: true }));

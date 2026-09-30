@@ -411,6 +411,29 @@ async function leasesForDecision({ core, claude }, role, toolName, toolInput, en
 	}
 }
 
+/**
+ * The local route table for the create_agent route gate, loaded in-process
+ * through the same model-routing.mjs the Pi adapter spawns (this hook ships
+ * beside it in both the checkout and the installed support directory).
+ *
+ * Undefined when the call is not a Lead/Supervisor create_agent (the core never
+ * looks at it); a load failure is returned AS the table's `ok: false` answer, and
+ * an import failure as null — both refused by the core, never read as "no
+ * routes to check".
+ */
+async function routeTableForDecision({ core, claude }, role, toolName, env) {
+	if (role !== "lead" && role !== "supervisor") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
+	try {
+		const { gateRouteTable } = await import("./model-routing.mjs");
+		return gateRouteTable({ env });
+	} catch {
+		return null;
+	}
+}
+
 export async function handleEvent(event, payload, env = process.env, now = Date.now()) {
 	const { core, claude } = await loadPolicy(env);
 	const role = core.detectRole(env);
@@ -429,11 +452,14 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			env,
 		);
 		const rolePrompt = core.loadRolePrompt(role);
-		if (!rolePrompt) return null;
+		const routeNotice = core.routeEnforcementNotice?.(role, env) ?? null;
+		if (!rolePrompt && !routeNotice) return null;
 		return {
 			hookSpecificOutput: {
 				hookEventName: "SessionStart",
-				additionalContext: roleContextBlock(rolePrompt, role),
+				additionalContext: [rolePrompt ? roleContextBlock(rolePrompt, role) : "", routeNotice ?? ""]
+					.filter(Boolean)
+					.join("\n\n"),
 			},
 		};
 	}
@@ -492,6 +518,10 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		if (peerNotice) blocks.push(peerNotice);
 		const consultNotice = leadConsultBlockNotice(core, role, consultTurn, env);
 		if (consultNotice) blocks.push(consultNotice);
+		// Every turn, not once: an opt-out left on after an emergency is exactly
+		// the state nobody remembers by turn fifty.
+		const routeNotice = core.routeEnforcementNotice?.(role, env) ?? null;
+		if (routeNotice) blocks.push(routeNotice);
 		if (blocks.length === 0) return null;
 		return {
 			hookSpecificOutput: {
@@ -518,6 +548,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 			cluster: core.selfCluster(env),
+			routeTable: await routeTableForDecision({ core, claude }, role, toolName, env),
+			env,
 			promptTarget: promptTargetForDecision(
 				{ core, claude },
 				role,

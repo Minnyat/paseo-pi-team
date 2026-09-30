@@ -24,6 +24,7 @@ import {
 	dependentOptions,
 	getPath,
 	numberRangeProblems,
+	optionalEntryProblems,
 	parseLines,
 	pruneEmpty,
 	setPath,
@@ -1253,13 +1254,31 @@ function kvControl(field, path) {
 function mapControl(field, path) {
 	const wrap = el("div", { class: "cfg-map" });
 	const fixed = field.fixedKeys ?? null;
+	// Keys the schema names but a document may leave out (the routing forms'
+	// SUPERVISOR_GOVERNANCE / LEAD_RECOVERY). Never renamed, only configured or
+	// removed — a half-filled one is caught by optionalEntryProblems at save.
+	const optional = field.optionalKeys ?? [];
 	const existing = () => getPath(configState.doc, path) ?? {};
 
-	const cardForKey = (key, isFixed) => {
+	const cardForKey = (key, isFixed, isOptional = false) => {
 		const card = el("div", { class: "cfg-card" });
 		card.dataset.key = key;
 		const head = el("div", { class: "cfg-card-head" });
-		if (isFixed) {
+		if (isOptional) {
+			head.appendChild(el("span", { class: "cfg-card-title", text: `${key} (tuỳ chọn)` }));
+			head.appendChild(
+				el("button", {
+					type: "button",
+					class: "cfg-icon",
+					text: "×",
+					title: "Bỏ cấu hình lớp này (luồng dùng nó sẽ bị chặn cho tới khi cấu hình lại)",
+					onclick: () => {
+						deletePath(configState.doc, joinPath(path, key));
+						renderConfigForm();
+					},
+				}),
+			);
+		} else if (isFixed) {
 			head.appendChild(el("span", { class: "cfg-card-title", text: key }));
 		} else {
 			// A bare text box at the top of a card says nothing about what goes
@@ -1307,7 +1326,22 @@ function mapControl(field, path) {
 	const keys = fixed
 		? [...fixed, ...Object.keys(existing()).filter((key) => !fixed.includes(key))]
 		: Object.keys(existing());
-	for (const key of keys) wrap.appendChild(cardForKey(key, fixed?.includes(key) === true));
+	for (const key of keys) {
+		wrap.appendChild(cardForKey(key, fixed?.includes(key) === true, optional.includes(key)));
+	}
+	for (const key of optional.filter((name) => !(name in existing()))) {
+		wrap.appendChild(
+			el("button", {
+				type: "button",
+				class: "cfg-add",
+				text: `+ Cấu hình ${key} (tuỳ chọn)`,
+				onclick: () => {
+					setPath(configState.doc, joinPath(path, key), clone(field.item?.seed ?? {}));
+					renderConfigForm();
+				},
+			}),
+		);
+	}
 	if (!fixed) {
 		wrap.appendChild(
 			el("button", {
@@ -1657,6 +1691,7 @@ $("config-save").addEventListener("click", async () => {
 		const problems = [
 			...numberRangeProblems(configState.schema, configState.doc),
 			...dependentOptionProblems(configState.schema, configState.doc),
+			...optionalEntryProblems(configState.schema, configState.doc),
 		];
 		if (problems.length > 0) {
 			toast(problems.join(" · "), true);

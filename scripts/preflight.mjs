@@ -58,6 +58,10 @@ import {
 	validateRemoteEndpoint,
 	cmdPercentExpansionRisk,
 	MODEL_CLASSES,
+	OPTIONAL_MODEL_CLASSES,
+	CLASS_REQUIRED_ROLE,
+	ROUTE_ENFORCE_ENV,
+	loadLocalRouteTable,
 	PROVIDER_OK_STATUSES,
 	providerFamily,
 	runtimeDescriptor,
@@ -601,10 +605,37 @@ if (!existsSync(routesPath)) {
 	try {
 		routing = loadRoutingConfig(routesPath);
 		pass("routing-config", `hostId=${routing.hostId}`);
+		warnOptionalClasses(routing.routes, "route:");
 	} catch (error) {
 		if (error instanceof RoutingError) fail("routing-config", error.message);
 		else fail("routing-config", String(error));
 	}
+}
+
+/**
+ * An absent optional class is a WARN, never a failure — every route file
+ * written before those classes existed lacks them — but the warning says what
+ * the gap costs: the create_agent gate refuses the flow that needs it rather
+ * than borrowing another class's route. Reported where the file is LOADED, so
+ * --skip-models does not hide it.
+ */
+function warnOptionalClasses(routes, checkPrefix) {
+	for (const modelClass of OPTIONAL_MODEL_CLASSES) {
+		if (routes[modelClass]) continue;
+		const role = CLASS_REQUIRED_ROLE[modelClass];
+		warn(
+			`${checkPrefix}${modelClass}`,
+			`optional class not configured — ${role === "supervisor" ? "a Lead cannot seat a Supervisor" : "a Supervisor cannot recover a Lead"} on this host until it is: pteam routing set ${modelClass} --provider <family>-${role} --model <model-id> --thinking <level>`,
+		);
+	}
+}
+
+/** The classes to resolve for one host: the required five plus each configured optional one. */
+function classesToResolve(routes) {
+	return [
+		...MODEL_CLASSES,
+		...OPTIONAL_MODEL_CLASSES.filter((modelClass) => routes[modelClass]),
+	];
 }
 
 // Per-model thinkingLevelMap from ~/.pi/agent/models.json (level null = unsupported).
@@ -625,7 +656,7 @@ function piModelLevelUnreachable(piProvider, modelId, level) {
 }
 
 if (routing && daemonUp && !skipModels) {
-	for (const modelClass of MODEL_CLASSES) {
+	for (const modelClass of classesToResolve(routing.routes)) {
 		const route = routing.routes[modelClass];
 		const models = listModels(route.paseoProvider);
 		if (models === null) {
@@ -679,6 +710,40 @@ if (routing && daemonUp && !skipModels) {
 	}
 } else if (routing && skipModels) {
 	warn("routes", "model inventory checks skipped (--skip-models)");
+}
+
+// --- the create_agent route gate ------------------------------------------------
+//
+// What the policy gate will compare every Lead/Supervisor create_agent against.
+// Read through the gate's OWN loader and the default paths (never --routes /
+// --cluster): an operator must see the file the gate reads, not the one this
+// run was pointed at.
+{
+	const table = loadLocalRouteTable();
+	if (table.ok) {
+		pass(
+			"route-gate",
+			`create_agent is checked against ${table.path} (host "${table.hostId}")${table.shadowed ? ` — ${table.shadowed} is NOT read while the cluster file has a local host` : ""}`,
+		);
+	} else if (table.code === "ROUTE_FILE_MISSING") {
+		strictCheck(
+			"route-gate",
+			`${table.message}. Until then EVERY Lead/Supervisor create_agent is refused (ROUTE_TABLE_UNAVAILABLE).`,
+		);
+	} else {
+		fail(
+			"route-gate",
+			`${table.message}. Until it loads, every Lead/Supervisor create_agent is refused.`,
+		);
+	}
+	if (process.env[ROUTE_ENFORCE_ENV] === "off") {
+		strictCheck(
+			"route-enforcement",
+			`${ROUTE_ENFORCE_ENV}=off in this environment — create_agent is NOT checked against the model routes. An emergency opt-out, never a default; unset it.`,
+		);
+	} else {
+		pass("route-enforcement", "on (create_agent must match the route of the class it declares)");
+	}
 }
 
 // --- legacy hosts.local.json migration notice ------------------------------------
@@ -885,7 +950,7 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	const inventoryProviders = buildProviderInventory([
 		...remoteProviders.values(),
 	]);
-	for (const modelClass of MODEL_CLASSES) {
+	for (const modelClass of classesToResolve(host.routes)) {
 		const route = host.routes[modelClass];
 		const models = listModelsRemote(hostId, endpointValue, route.paseoProvider);
 		if (models === null) {
@@ -1014,6 +1079,7 @@ if (cluster) {
 	clusterVerifyHostId = verifyHostId;
 	if (verifyHostId !== undefined) {
 		const host = cluster.hosts[verifyHostId];
+		if (host) warnOptionalClasses(host.routes, `cluster-route:${verifyHostId}:`);
 		if (!host) {
 			fail(
 				`cluster-host:${verifyHostId}`,
@@ -1026,7 +1092,7 @@ if (cluster) {
 			);
 		} else if (host.connection.type === "local" && daemonUp && !skipModels) {
 			// Local host: full route resolution against the live daemon, strict.
-			for (const modelClass of MODEL_CLASSES) {
+			for (const modelClass of classesToResolve(host.routes)) {
 				const route = host.routes[modelClass];
 				const models = listModels(route.paseoProvider);
 				if (models === null) {

@@ -3203,6 +3203,235 @@ export function isLeadRecoveryProvider(provider: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Route gate — the model a create_agent seats must be the host's route for
+// the class it declares
+// ---------------------------------------------------------------------------
+//
+// Every other create_agent gate checks SHAPE: a model segment is present, a
+// thinking level is set, a mode is set. None of them asked WHICH model — so a
+// Lead could seat a Peer, and a Supervisor a Lead, on anything that parses. This
+// gate closes that: the creator declares a class in labels["team.model-class"],
+// and provider family+role, model id and thinking level must equal that class's
+// route on THIS host, or the call is refused naming the expected values.
+//
+// The route table is read by scripts/model-routing.mjs (`loadLocalRouteTable`,
+// the only route parser in the pack) and handed in: the Claude hook loads it
+// in-process, the Pi adapter through `model-routing.mjs gate-routes --json`.
+// This module cannot import the .mjs (it loads inside pi's runtime, from a
+// directory the support scripts do not share), so only the COMPARISON lives
+// here — which is also what keeps both runtimes deciding identically.
+
+/** Mirrors MODEL_CLASS_LABEL in scripts/model-routing.mjs (test-locked). */
+export const MODEL_CLASS_LABEL = "team.model-class";
+/** Mirrors ROUTE_ENFORCE_ENV in scripts/model-routing.mjs (test-locked). */
+export const ROUTE_ENFORCE_ENV = "PASEO_TEAM_ROUTE_ENFORCE";
+
+/**
+ * The classes a Lead seats a Peer from — MODEL_CLASSES in
+ * scripts/model-routing.mjs, required in every route file. A sibling list, not
+ * an import, for the same reason as RUNTIME_DESCRIPTORS; locked by
+ * test/model-routing.test.mjs.
+ */
+export const PEER_MODEL_CLASSES: readonly string[] = [
+	"MONITOR_ECONOMY",
+	"FAST_READ",
+	"CODING_MEDIUM",
+	"REASONING_HIGH",
+	"REVIEW_HIGH",
+];
+export const SUPERVISOR_GOVERNANCE_CLASS = "SUPERVISOR_GOVERNANCE";
+export const LEAD_RECOVERY_CLASS = "LEAD_RECOVERY";
+/** Optional in a route file; see OPTIONAL_MODEL_CLASSES in model-routing.mjs. */
+export const OPTIONAL_MODEL_CLASSES: readonly string[] = [
+	SUPERVISOR_GOVERNANCE_CLASS,
+	LEAD_RECOVERY_CLASS,
+];
+export const ALL_MODEL_CLASSES: readonly string[] = [
+	...PEER_MODEL_CLASSES,
+	...OPTIONAL_MODEL_CLASSES,
+];
+
+export interface RouteEntry {
+	paseoProvider: string;
+	model: string;
+	thinking: string;
+}
+
+/** The shape `gateRouteTable()` in scripts/model-routing.mjs returns. */
+export type RouteTable =
+	| {
+			ok: true;
+			source: "cluster" | "routing";
+			path: string;
+			hostId: string;
+			routes: Record<string, RouteEntry | undefined>;
+			shadowed?: string | null;
+	  }
+	| { ok: false; code: string; message: string; paths?: string[] };
+
+export type RouteEnforcement = "on" | "off";
+
+/**
+ * On unless the variable is EXACTLY "off". Any other value — "OFF", "0",
+ * "false", a typo — keeps the gate on: a mistyped opt-out costs one refused
+ * call with an explicit reason, a mistyped opt-in would silently disarm it.
+ */
+export function routeEnforcement(
+	env: Record<string, string | undefined> = process.env,
+): RouteEnforcement {
+	return env[ROUTE_ENFORCE_ENV] === "off" ? "off" : "on";
+}
+
+/**
+ * The loud half of the opt-out: injected into every Lead/Supervisor turn on
+ * both runtimes while it is set, so nobody forgets it was left off after an
+ * emergency. Null when enforcement is on or the role creates no agents.
+ */
+export function routeEnforcementNotice(
+	role: TeamRole | undefined,
+	env: Record<string, string | undefined> = process.env,
+): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (routeEnforcement(env) === "on") return null;
+	return [
+		"## ⚠ Paseo Team Route Enforcement: OFF",
+		"",
+		`${ROUTE_ENFORCE_ENV}=off is set for this seat. create_agent is NOT checked against the host's model routes: a seat created now can run on any model, which is the silent fallback docs/model-routing.md exists to prevent. Still declare labels["${MODEL_CLASS_LABEL}"] and route from the route file exactly as if the gate were on, and tell the Human the opt-out is active — it is meant for an emergency, never as a default.`,
+	].join("\n");
+}
+
+/**
+ * The classes a create_agent may declare, by who creates what. The three
+ * flows the pack has:
+ *   Lead → Peer (or Lead)       the five base classes
+ *   Lead → Supervisor           SUPERVISOR_GOVERNANCE only
+ *   Supervisor → Lead recovery  LEAD_RECOVERY only
+ */
+export function modelClassesForFlow(
+	creator: TeamRole,
+	target: RoleProvider,
+): readonly string[] {
+	if (creator === "supervisor") return [LEAD_RECOVERY_CLASS];
+	if (target.role === "supervisor") return [SUPERVISOR_GOVERNANCE_CLASS];
+	return PEER_MODEL_CLASSES;
+}
+
+function routeSetHint(modelClass: string, family: RuntimeFamily, role: TeamRole): string {
+	return `pteam routing set ${modelClass} --provider ${family}-${role} --model <model-id> --thinking <level>`;
+}
+
+/**
+ * Refuse a Lead/Supervisor create_agent whose provider, model or thinking level
+ * is not the host's route for the class it declares. Null when it matches, when
+ * the creator is not a Lead/Supervisor, or when the explicit opt-out is set.
+ *
+ * `routeTable` undefined/null means the caller could not load it, and is
+ * refused like an unreadable file: an unverifiable route is not a pass.
+ *
+ * Matching is exact on purpose. The provider head must be written lowercase and
+ * unpadded (a "Claude-Peer" or " claude-peer" is refused with the canonical
+ * spelling rather than normalised — this gate must never approve a string the
+ * daemon might read differently); model and thinking must equal the route
+ * byte for byte, because Paseo silently runs an unknown thinking level at
+ * "medium" and pi treats a model id as a pattern (docs/model-routing.md).
+ * Seat variants ("claude-peer-audit") count as their base family+role.
+ */
+export function createAgentRouteBlockReason({
+	role,
+	args,
+	routeTable,
+	env = process.env,
+}: {
+	role: TeamRole;
+	args: unknown;
+	routeTable?: RouteTable | null;
+	env?: Record<string, string | undefined>;
+}): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (routeEnforcement(env) === "off") return null;
+	if (typeof args !== "object" || args === null) {
+		return "BLOCKED: ROUTE_UNVERIFIABLE — create_agent requires an args object (provider, settings, labels) to be checked against the host's model routes. Refusing fail-closed.";
+	}
+	const rec = args as Record<string, unknown>;
+	const provider = typeof rec.provider === "string" ? rec.provider : "";
+	const target = parseRoleProvider(provider);
+	if (!target) {
+		return `BLOCKED: ROUTE_PROVIDER_UNKNOWN — provider "${provider || "<missing>"}" is not a role provider this pack routes (${ROLE_PROVIDERS.join(", ")}, or a seat variant of one), so it cannot be matched to a model route. Write it as "<role-provider>/<model-id>" from the route file.`;
+	}
+	const slash = provider.indexOf("/");
+	const head = slash < 0 ? provider : provider.slice(0, slash);
+	const tail = slash < 0 ? "" : provider.slice(slash + 1);
+	const canonicalHead = head.trim().toLowerCase();
+	if (head !== canonicalHead) {
+		return `BLOCKED: ROUTE_PROVIDER_NONCANONICAL — provider "${head}" must be written exactly "${canonicalHead}" (lowercase, no padding). The route gate compares the string the daemon receives, and will not approve a spelling the daemon might resolve differently.`;
+	}
+	const labels =
+		typeof rec.labels === "object" && rec.labels !== null
+			? (rec.labels as Record<string, unknown>)
+			: {};
+	const allowed = modelClassesForFlow(role, target);
+	const declared = labels[MODEL_CLASS_LABEL];
+	if (typeof declared !== "string" || declared === "") {
+		return `BLOCKED: ROUTE_CLASS_MISSING — labels["${MODEL_CLASS_LABEL}"] is required on every create_agent by a ${role}: it names the model class you routed from, and the gate checks provider, model and thinking against that class's route on this host. For this seat use one of: ${allowed.join(", ")}.`;
+	}
+	if (!ALL_MODEL_CLASSES.includes(declared)) {
+		return `BLOCKED: ROUTE_CLASS_UNKNOWN — labels["${MODEL_CLASS_LABEL}"] is "${declared}", which is not a model class (${ALL_MODEL_CLASSES.join(", ")}). Class names are exact and uppercase.`;
+	}
+	const flow =
+		role === "supervisor"
+			? "a Supervisor's Lead recovery"
+			: target.role === "supervisor"
+				? "a Lead seating its Supervisor"
+				: `a Lead seating a ${target.role}`;
+	if (!allowed.includes(declared)) {
+		return `BLOCKED: ROUTE_CLASS_WRONG_FLOW — ${flow} routes from ${allowed.join(" or ")}, not ${declared}. Each flow has its own class so that the governance and recovery seats never borrow a Peer's route.`;
+	}
+	if (!routeTable) {
+		return "BLOCKED: ROUTE_UNVERIFIABLE — the host's route table could not be loaded, so this create_agent cannot be checked against it. Run `pteam routing check`. Unverifiable is not a pass.";
+	}
+	if (!routeTable.ok) {
+		return `BLOCKED: ROUTE_TABLE_UNAVAILABLE (${routeTable.code}) — ${routeTable.message}. No create_agent is routed until the route file loads; it is never guessed around.`;
+	}
+	const route = routeTable.routes[declared];
+	if (!route) {
+		const optional = OPTIONAL_MODEL_CLASSES.includes(declared);
+		return `BLOCKED: ROUTE_CLASS_UNCONFIGURED — ${declared} has no route on host "${routeTable.hostId}" (${routeTable.path})${optional ? `; it is an optional class, so this host cannot seat that flow until it is configured` : ""}. Configure it with: ${routeSetHint(declared, target.family, target.role)}. The gate does not fall back to another class.`;
+	}
+	const expected = `${route.paseoProvider}/${route.model}`;
+	const where = `on host "${routeTable.hostId}" (${routeTable.path})`;
+	const routed = parseRoleProvider(route.paseoProvider);
+	if (!routed || routed.family !== target.family || routed.role !== target.role) {
+		const roleNote =
+			routed && routed.role !== target.role
+				? ` A class routed to a *-${routed.role} provider cannot be used to seat a ${target.role}: pick a class whose route names a ${target.role} provider, or change this class's route.`
+				: "";
+		return `BLOCKED: ROUTE_PROVIDER_MISMATCH — ${declared} routes ${where} to "${route.paseoProvider}", but provider "${head}" is ${target.family}/${target.role}. Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".${roleNote}`;
+	}
+	if (tail !== route.model) {
+		return `BLOCKED: ROUTE_MODEL_MISMATCH — ${declared} routes ${where} to model "${route.model}", but provider "${provider}" asks for "${tail || "<missing>"}". Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".`;
+	}
+	const settings =
+		typeof rec.settings === "object" && rec.settings !== null
+			? (rec.settings as Record<string, unknown>)
+			: {};
+	const thinking = settings.thinkingOptionId;
+	if (thinking !== route.thinking) {
+		return `BLOCKED: ROUTE_THINKING_MISMATCH — ${declared} routes ${where} at thinking "${route.thinking}", but settings.thinkingOptionId is ${typeof thinking === "string" ? `"${thinking}"` : "<missing>"}. Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".`;
+	}
+	return null;
+}
+
+/** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
+export function createAgentRouteBlockReasonForInput(
+	role: TeamRole,
+	input: unknown,
+	routeTable?: RouteTable | null,
+	env: Record<string, string | undefined> = process.env,
+): string | null {
+	return createAgentRouteBlockReason({ role, args: extractMcpArgs(input), routeTable, env });
+}
+
+// ---------------------------------------------------------------------------
 // Permission mode — the mode a seat actually comes up in
 // ---------------------------------------------------------------------------
 
@@ -3666,6 +3895,14 @@ export interface GovernanceContext extends SupervisorRecoveryContext {
 	promptTarget?: AgentOwnership | null;
 	/** This seat's own cluster; see selfCluster. Undefined disables the gate. */
 	cluster?: string | null;
+	/**
+	 * The local route table (gateRouteTable in scripts/model-routing.mjs).
+	 * Only consulted for a create_agent, and there undefined/null is REFUSED —
+	 * unlike the cluster gate, the route gate has no "could not tell" pass.
+	 */
+	routeTable?: RouteTable | null;
+	/** Where PASEO_TEAM_ROUTE_ENFORCE is read from; defaults to process.env. */
+	env?: Record<string, string | undefined>;
 }
 
 export function mcpBlockReason(
@@ -3726,6 +3963,16 @@ export function mcpBlockReason(
 		// authority, not about a mode it was never going to get to use.
 		const modeBlock = createAgentModeBlockReason(input);
 		if (modeBlock) return modeBlock;
+		// Which MODEL the seat runs. After the shape gates, so a call they refuse
+		// is told about its authority or its mode first; runs for all three
+		// flows (Lead→Peer, Lead→Supervisor, Supervisor→Lead recovery).
+		const routeBlock = createAgentRouteBlockReasonForInput(
+			role,
+			input,
+			context.routeTable,
+			context.env ?? process.env,
+		);
+		if (routeBlock) return routeBlock;
 	}
 	if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 		const argBlock = leadCreateWorkspaceBlockReason(input);

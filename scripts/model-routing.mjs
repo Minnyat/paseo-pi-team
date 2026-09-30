@@ -12,10 +12,15 @@
 // database, hold API keys, or fall back to another model/host on its own.
 // Paseo remains the only control plane; git SHA remains the artifact anchor.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
 
+/**
+ * The REQUIRED classes: every route file must carry all five. Kept under its
+ * old name because every loop that walks "the classes a host must route"
+ * (preflight, the routing form, the resolver CLI) means exactly these.
+ */
 export const MODEL_CLASSES = Object.freeze([
 	"MONITOR_ECONOMY",
 	"FAST_READ",
@@ -23,6 +28,45 @@ export const MODEL_CLASSES = Object.freeze([
 	"REASONING_HIGH",
 	"REVIEW_HIGH",
 ]);
+
+/**
+ * Classes a route file MAY carry. They exist so the two create_agent flows that
+ * do not seat a Peer — a Lead seating its Supervisor, a Supervisor recovering a
+ * Lead — have a route to be checked against. Optional so every route file
+ * written before them still validates; preflight warns while they are absent,
+ * and the create_agent gate refuses the flow that needs one (it never borrows
+ * another class's route — that silent substitution is what this pack exists to
+ * prevent).
+ */
+export const OPTIONAL_MODEL_CLASSES = Object.freeze([
+	"SUPERVISOR_GOVERNANCE",
+	"LEAD_RECOVERY",
+]);
+
+export const ALL_MODEL_CLASSES = Object.freeze([
+	...MODEL_CLASSES,
+	...OPTIONAL_MODEL_CLASSES,
+]);
+
+/**
+ * The role an optional class must route to. A SUPERVISOR_GOVERNANCE route that
+ * named a peer provider could never satisfy the gate, so it is refused where the
+ * author made the mistake — at validation — instead of at the first seating.
+ */
+export const CLASS_REQUIRED_ROLE = Object.freeze({
+	SUPERVISOR_GOVERNANCE: "supervisor",
+	LEAD_RECOVERY: "lead",
+});
+
+/**
+ * Label a Lead or Supervisor puts on every create_agent to declare which class
+ * it routed from. Mirrored in policy-core.ts (MODEL_CLASS_LABEL), locked by
+ * test/model-routing.test.mjs.
+ */
+export const MODEL_CLASS_LABEL = "team.model-class";
+
+/** The one explicit opt-out of the create_agent route gate. */
+export const ROUTE_ENFORCE_ENV = "PASEO_TEAM_ROUTE_ENFORCE";
 
 /**
  * RUNTIME DESCRIPTORS — the single source of every per-runtime fact this
@@ -178,6 +222,13 @@ export function providerFamily(paseoProvider) {
 	return family ?? null;
 }
 
+/** "claude-peer" → "peer"; null when the name is not a role provider. */
+export function providerRole(paseoProvider) {
+	const family = providerFamily(paseoProvider);
+	if (!family) return null;
+	return String(paseoProvider).trim().slice(family.length + 1);
+}
+
 /**
  * Model reference shape per family, resolved through the descriptor's
  * `model.carriesProvider` rather than a hard-coded family name — the whole
@@ -302,7 +353,7 @@ export function validateRoutingConfig(data) {
 	}
 	const validated = {};
 	for (const [modelClass, route] of Object.entries(routes)) {
-		if (!MODEL_CLASSES.includes(modelClass)) {
+		if (!ALL_MODEL_CLASSES.includes(modelClass)) {
 			throw fail(`unknown MODEL_CLASS "${modelClass}"`, { modelClass });
 		}
 		if (typeof route !== "object" || route === null) {
@@ -313,6 +364,13 @@ export function validateRoutingConfig(data) {
 			throw fail(
 				`route ${modelClass}: paseoProvider "${paseoProvider}" is not one of the durable role profiles (${ROLE_PROVIDERS.join(", ")})`,
 				{ modelClass, paseoProvider },
+			);
+		}
+		const requiredRole = CLASS_REQUIRED_ROLE[modelClass];
+		if (requiredRole && providerRole(paseoProvider) !== requiredRole) {
+			throw fail(
+				`route ${modelClass}: paseoProvider "${paseoProvider}" must be a ${requiredRole} role provider (${ROLE_PROVIDERS.filter((name) => providerRole(name) === requiredRole).join(" or ")}) — this class seats a ${requiredRole}, nothing else`,
+				{ modelClass, paseoProvider, requiredRole },
 			);
 		}
 		if (typeof model !== "string" || model.trim() === "") {
@@ -601,6 +659,120 @@ export function resolveClusterRoute(
 }
 
 // ---------------------------------------------------------------------------
+// The LOCAL daemon's route table — what the create_agent gate compares against
+// ---------------------------------------------------------------------------
+//
+// A create_agent made through MCP always lands on the local daemon (MCP is
+// local-only, see skills/paseo-team-lead/SKILL.md "The hard rule"), so the gate
+// needs exactly one host's routes: this one. Two files can hold them, and the
+// choice is made here, once, so the Claude hook (in-process) and the Pi adapter
+// (through `gate-routes --json`) cannot pick differently.
+
+/**
+ * Where the local route table comes from — the file, and inside a cluster file
+ * the host — without reading any route. Shared by the gate loader and by
+ * `pteam routing set`, which must write the file the gate will read.
+ *
+ * - cluster-routing.local.json present → it is the single source of truth. Its
+ *   one `connection.type: "local"` host is this daemon. None means the cluster
+ *   file describes remote hosts only, and the single-host file holds the local
+ *   routes; more than one is ambiguous and refused. An INVALID cluster file is
+ *   an error, never a reason to read the other file instead.
+ * - otherwise model-routing.local.json.
+ *
+ * @returns {{ok: true, source: "cluster"|"routing", path: string, hostId: string,
+ *   routes: object, config: object, shadowed: string|null}
+ *   | {ok: false, code: string, message: string, paths: string[]}}
+ */
+export function loadLocalRouteTable(options = {}) {
+	const env = options.env ?? process.env;
+	const dir = teamConfigDir(env);
+	const routingPath = options.routingPath ?? join(dir, "model-routing.local.json");
+	const clusterPath = options.clusterPath ?? join(dir, "cluster-routing.local.json");
+	const failed = (code, message, paths) => ({ ok: false, code, message, paths });
+	const routingExists = existsSync(routingPath);
+	if (existsSync(clusterPath)) {
+		let cluster;
+		try {
+			cluster = loadClusterConfig(clusterPath);
+		} catch (error) {
+			return failed(
+				"CONFIG_INVALID",
+				`${withPath(clusterPath, error)} — fix it (pteam routing check) before seating anything; the gate does not fall back to ${routingPath}`,
+				[clusterPath],
+			);
+		}
+		const locals = Object.entries(cluster.hosts).filter(
+			([, host]) => host.connection.type === "local",
+		);
+		if (locals.length > 1) {
+			return failed(
+				"LOCAL_HOST_AMBIGUOUS",
+				`${clusterPath} declares ${locals.length} hosts with connection.type "local" (${locals.map(([id]) => id).join(", ")}); exactly one of them can be this daemon — mark the others "remote"`,
+				[clusterPath],
+			);
+		}
+		if (locals.length === 1) {
+			const [hostId, host] = locals[0];
+			return {
+				ok: true,
+				source: "cluster",
+				path: clusterPath,
+				hostId,
+				routes: host.routes,
+				config: cluster,
+				shadowed: routingExists ? routingPath : null,
+			};
+		}
+		// Zero local hosts: the controller's local routes live in the single-host
+		// file, if anywhere.
+	}
+	if (!routingExists) {
+		return failed(
+			"ROUTE_FILE_MISSING",
+			`no local route file: neither ${routingPath} nor a "local" host in ${clusterPath} — copy config/model-routing.example.json there and fill it in (pteam routing check verifies it)`,
+			[routingPath, clusterPath],
+		);
+	}
+	try {
+		const config = loadRoutingConfig(routingPath);
+		return {
+			ok: true,
+			source: "routing",
+			path: routingPath,
+			hostId: config.hostId,
+			routes: config.routes,
+			config,
+			shadowed: null,
+		};
+	} catch (error) {
+		return failed(
+			"CONFIG_INVALID",
+			`${withPath(routingPath, error)} — fix it (pteam routing check) before seating anything`,
+			[routingPath],
+		);
+	}
+}
+
+/** A load error that always names the file — a schema error alone does not. */
+function withPath(path, error) {
+	const message = String(error?.message ?? error);
+	return message.includes(path) ? message : `${path}: ${message}`;
+}
+
+/**
+ * The JSON the gate is handed: the table minus the parsed config object, so
+ * the Pi adapter's subprocess and the Claude hook's in-process call produce
+ * byte-identical inputs for policy-core.
+ */
+export function gateRouteTable(options = {}) {
+	const table = loadLocalRouteTable(options);
+	if (!table.ok) return table;
+	const { config: _config, ...rest } = table;
+	return rest;
+}
+
+// ---------------------------------------------------------------------------
 // Composition — mirrors Paseo resolveRequiredProviderModel (split FIRST "/")
 // ---------------------------------------------------------------------------
 
@@ -774,7 +946,7 @@ export function buildProviderInventory(entries) {
  */
 export function resolveRoute(config, modelClass, inventory, options = {}) {
 	const strict = options.strict === true;
-	if (!MODEL_CLASSES.includes(modelClass)) {
+	if (!ALL_MODEL_CLASSES.includes(modelClass)) {
 		throw new RoutingError(
 			"HOST_ROUTE_UNAVAILABLE",
 			`unknown MODEL_CLASS "${modelClass}"`,
@@ -1022,6 +1194,7 @@ export function verifyObserved(requested, runtimeInfo) {
 // JSON by hand. Usage:
 //   node scripts/model-routing.mjs validate [--routes <path>]
 //   node scripts/model-routing.mjs resolve --class <MODEL_CLASS> [--routes <path>] [--json]
+//   node scripts/model-routing.mjs gate-routes   (the local route table, JSON; used by the Pi adapter)
 // Exit code 0 ok, 1 config error, 2 route unavailable (structured stdout).
 // ---------------------------------------------------------------------------
 
@@ -1060,6 +1233,12 @@ if (isMainModule()) {
 		console.error(payload.message);
 		process.exit(code);
 	};
+	if (command === "gate-routes") {
+		// The Pi adapter's half of the create_agent route gate: the same table
+		// the Claude hook loads in-process. Always exit 0 with JSON — a load
+		// failure is DATA the gate refuses on, not a crash to be retried.
+		emit(gateRouteTable(), 0);
+	}
 	try {
 		const config = loadRoutingConfig(optArg("--routes"));
 		if (command === "validate") {

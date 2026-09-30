@@ -62,6 +62,7 @@ import { readAgentStates, isAgentId } from "./lib/agent-state.mjs";
 import { agentCluster, normalizeCluster } from "../extensions/paseo-team-core/policy-core.js";
 import * as su from "./lib/self-update.mjs";
 import * as un from "./lib/uninstall.mjs";
+import * as routing from "./lib/routing.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -1342,6 +1343,64 @@ async function cmdSeatsApply(rest = []) {
 	});
 }
 
+// ---------------------------------------------------------------------------
+// routing — the route file the create_agent gate reads (cli/lib/routing.mjs)
+// ---------------------------------------------------------------------------
+
+function emitRouting(result, asJson, format) {
+	if (asJson) json(result);
+	else process.stdout.write(format ? format(result) : `${JSON.stringify(result, null, 2)}\n`);
+	if (!result.ok) process.exit(1);
+}
+
+/** A refusal is exit 1 with its code named; a usage error stays exit 2. */
+async function runRouting(asJson, work, format) {
+	try {
+		emitRouting(await work(), asJson, format);
+	} catch (error) {
+		if (!(error instanceof routing.RoutingCommandError)) throw error;
+		if (asJson) json({ ok: false, code: error.code, message: error.message, ...error.details });
+		fail(`routing: ${error.code}: ${error.message}`);
+	}
+}
+
+function dispatchRouting(argv) {
+	const [sub, ...rest] = argv;
+	const asJson = flag(rest, "--json");
+	switch (sub) {
+		case "show":
+			rejectUnknownFlags(rest, ["--json"]);
+			return runRouting(asJson, () => routing.routingShow(), routing.formatShow);
+		case "check":
+			rejectUnknownFlags(rest, ["--json"]);
+			return runRouting(asJson, () => routing.routingCheck(), routing.formatCheck);
+		case "set": {
+			const [modelClass] = rest;
+			if (!modelClass || modelClass.startsWith("-")) usageFail("routing set: missing <CLASS>");
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--provider", "--model", "--thinking", "--host-id", "--json"]);
+			const provider = flagValue(options, "--provider");
+			const model = flagValue(options, "--model");
+			const thinking = flagValue(options, "--thinking");
+			if (provider === undefined || model === undefined || thinking === undefined) {
+				usageFail("routing set: --provider, --model and --thinking are all required");
+			}
+			return runRouting(asJson, () =>
+				routing.routingSet({ modelClass, provider, model, thinking, hostId: flagValue(options, "--host-id") }),
+			);
+		}
+		case "unset": {
+			const [modelClass] = rest;
+			if (!modelClass || modelClass.startsWith("-")) usageFail("routing unset: missing <CLASS>");
+			const options = rest.slice(1);
+			rejectUnknownFlags(options, ["--host-id", "--json"]);
+			return runRouting(asJson, () => routing.routingUnset({ modelClass, hostId: flagValue(options, "--host-id") }));
+		}
+		default:
+			usageFail(`routing: ${sub ? `unknown subcommand '${sub}'` : "missing subcommand"} (expected show|check|set|unset)`);
+	}
+}
+
 function dispatchSeats(argv) {
 	const [sub, ...rest] = argv;
 	if (sub === "list") return cmdSeatsList(rest);
@@ -1368,6 +1427,12 @@ usage:
   pteam skills write <name>                (markdown body on stdin)
   pteam protocol status [--path <repo>]    (grade a repo's WORKSPACE_PROTOCOL.md)
   pteam env list
+  pteam routing show [--json]              (the route per class the create_agent gate reads; unset optional classes marked)
+  pteam routing check [--json]             (the routing half of preflight: schemas + strict live resolution)
+  pteam routing set <CLASS> --provider <role-provider> --model <id> --thinking <level> [--host-id <id>] [--json]
+                                           (strict-validated against the live inventory; <file>.bak-<epoch> + atomic write)
+  pteam routing unset <CLASS> [--host-id <id>] [--json]
+                                           (SUPERVISOR_GOVERNANCE | LEAD_RECOVERY only)
   pteam seats list                         (custom seats + the providers they generate)
   pteam seats apply [--dry-run]            (write those providers into ~/.paseo/config.json)
   pteam install
@@ -1461,6 +1526,7 @@ async function main() {
 		case "permits": return dispatchPermits(argv);
 		case "models": return cmdModels(argv);
 		case "seats": return dispatchSeats(argv);
+		case "routing": return dispatchRouting(argv);
 		case "cost": return cmdCost(argv);
 		case "activity": return cmdActivity(argv);
 		case "graph": return cmdGraph(argv);

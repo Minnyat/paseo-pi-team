@@ -27,6 +27,7 @@
 import { join } from "node:path";
 import {
 	MODEL_CLASSES,
+	OPTIONAL_MODEL_CLASSES,
 	ROLE_PROVIDERS,
 	RUNTIME_DESCRIPTORS,
 	RUNTIME_FAMILIES,
@@ -89,6 +90,14 @@ function thinkingByProvider() {
 		]),
 	);
 }
+
+/**
+ * The two optional classes, said once for both routing forms. Absent is valid
+ * (every route file written before them lacks them); what absence costs is that
+ * the create_agent gate refuses the flow that needs one.
+ */
+const OPTIONAL_ROUTES_HINT =
+	"Hai lớp tuỳ chọn: SUPERVISOR_GOVERNANCE (vai trò supervisor — Lead dựng Supervisor) và LEAD_RECOVERY (vai trò lead — Supervisor khôi phục Lead). Để trống thì hợp lệ, nhưng luồng tương ứng bị chặn cho tới khi cấu hình; không bao giờ mượn route của lớp khác.";
 
 /** Shared shape of one route card inside routing and every cluster host. */
 function routeFields() {
@@ -441,13 +450,14 @@ export const CONFIG_SCHEMAS = {
 			{
 				id: "routes",
 				label: "Lớp việc → mô hình",
-				hint: "Năm lớp việc cố định; điền đủ để agent không phải đoán khi nhận việc.",
+				hint: `Năm lớp việc bắt buộc; điền đủ để agent không phải đoán khi nhận việc. ${OPTIONAL_ROUTES_HINT}`,
 				fields: [
 					{
 						path: "routes",
 						type: "map",
 						keyLabel: "Lớp việc",
 						fixedKeys: [...MODEL_CLASSES],
+						optionalKeys: [...OPTIONAL_MODEL_CLASSES],
 						item: { fields: routeFields() },
 					},
 				],
@@ -601,6 +611,8 @@ export const CONFIG_SCHEMAS = {
 									type: "map",
 									keyLabel: "Lớp việc",
 									fixedKeys: [...MODEL_CLASSES],
+									optionalKeys: [...OPTIONAL_MODEL_CLASSES],
+									hint: OPTIONAL_ROUTES_HINT,
 									item: { fields: routeFields() },
 								},
 							],

@@ -210,7 +210,13 @@ This is the exact failure mode the cluster config exists to prevent.
    review-marked workspace that requests local isolation.
 9. Call `create_agent` with the exact provider string, the runtime settings
    under `settings`: `{ thinkingOptionId, modeId }`, **and**
-   `labels: { "team.cluster": "<your own cluster>" }`. `modeId` is REQUIRED on
+   `labels: { "team.cluster": "<your own cluster>", "team.model-class": "<MODEL_CLASS from step 1>" }`.
+   The model class label is REQUIRED and is the route gate's key: the policy
+   looks that class up in this host's route file and refuses the call unless
+   provider family+role, model id and `thinkingOptionId` equal the route
+   exactly (the refusal names the expected values — copy them, do not
+   improvise). A class whose route names a `*-supervisor` provider (the
+   example's `MONITOR_ECONOMY`) cannot seat a Peer. `modeId` is REQUIRED on
    every `claude-*` route and goes inside `settings` — a top-level `mode` is
    ignored (see "Every `claude-*` agent you create needs `settings.modeId`").
    NEVER omit the model to inherit a daemon default.
@@ -412,6 +418,13 @@ Model classes (decided by task risk + disposition, not by role name):
 | CODING_MEDIUM | bounded implementation, clear-ownership bugfix, tests |
 | REASONING_HIGH | architect, lifecycle/ownership/concurrency, migration, security design |
 | REVIEW_HIGH | independent reviewer, proof auditor, exact-SHA acceptance |
+| SUPERVISOR_GOVERNANCE | *optional* — ONLY for seating your Supervisor (route names a `*-supervisor` provider) |
+| LEAD_RECOVERY | *optional* — ONLY for a Supervisor's Lead recovery (route names a `*-lead` provider) |
+
+The two optional classes may be absent from a host's route file; the flow that
+needs one is then refused (`ROUTE_CLASS_UNCONFIGURED`) until the Human runs
+`pteam routing set <CLASS> ...`. Never borrow another class's route for it.
+`pteam routing show` prints what the gate reads on this host.
 
 Record every routing decision verbatim in your report:
 
@@ -521,7 +534,7 @@ Failure answers from the tool itself, and what each one means:
 
 Not a contradiction — the seat you create still judges you, and it is better
 than having no delegation path at all. Same routing cycle as any other
-`create_agent` (steps 1–4 above for `MODEL_CLASS`/`HOST_ID`), plus four things
+`create_agent` (steps 1–4 above; the class is always `SUPERVISOR_GOVERNANCE`), plus five things
 the policy enforces:
 
 ```text
@@ -529,6 +542,7 @@ create_agent {
   provider: "<family>-supervisor/<…>/<model-id>",   # never a bare "pi-supervisor"
   labels: {
     "purpose": "governance",
+    "team.model-class": "SUPERVISOR_GOVERNANCE",   # provider/model/thinking must equal its route
     "team.cluster": "<your own cluster>",
     "team.domain": "<your own domain, or one inside it>"   # required under multi
   },

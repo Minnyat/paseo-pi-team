@@ -29,6 +29,8 @@ import {
 	callsPaseoCli,
 	clusterLabelBlockReason,
 	createAgentModeArgsBlockReason,
+	createAgentRouteBlockReason,
+	type RouteTable,
 	leaseBlockReason,
 	sendAgentPromptBlockReason,
 	sendAgentPromptTargetId,
@@ -292,6 +294,11 @@ export interface ClaudeToolDecisionInput {
 	 *  lease board and the coordinator-to-coordinator prompt rule to one
 	 *  workspace. Undefined leaves both exactly as they were. */
 	cluster?: string | null;
+	/** The local route table, loaded by the hook through model-routing.mjs.
+	 *  Consulted only for a create_agent, where undefined/null is refused. */
+	routeTable?: RouteTable | null;
+	/** Where PASEO_TEAM_ROUTE_ENFORCE is read from; defaults to process.env. */
+	env?: Record<string, string | undefined>;
 }
 
 function bashCommand(toolInput: unknown): string {
@@ -432,6 +439,16 @@ export function claudeToolBlockReason(
 			// seat that parks every tool call it makes.
 			const modeBlock = createAgentModeArgsBlockReason(input.toolInput);
 			if (modeBlock) return modeBlock;
+			// Same route gate, same position (after the mode gate) as the Pi
+			// adapter: the model a seat runs must be the host's route for the
+			// class it declares, whichever runtime the creator is on.
+			const routeBlock = createAgentRouteBlockReason({
+				role,
+				args: input.toolInput,
+				routeTable: input.routeTable,
+				env: input.env ?? process.env,
+			});
+			if (routeBlock) return routeBlock;
 		}
 		if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 			return leadCreateWorkspaceArgsBlockReason(input.toolInput);
