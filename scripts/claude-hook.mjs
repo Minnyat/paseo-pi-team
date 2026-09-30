@@ -421,14 +421,38 @@ async function leasesForDecision({ core, claude }, role, toolName, toolInput, en
  * an import failure as null — both refused by the core, never read as "no
  * routes to check".
  */
-async function routeTableForDecision({ core, claude }, role, toolName, env) {
+async function routeTableForDecision({ core, claude }, role, toolName, toolInput, env) {
 	if (role !== "lead" && role !== "supervisor") return undefined;
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
 	if (classified?.kind !== "paseo-mcp") return undefined;
-	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
+	const target = classified.target ?? "";
+	// Same rule as the Pi adapter: create_agent always, update_agent only when
+	// it touches the route.
+	const needed =
+		core.matchesPaseoToolName(target, ["create_agent"]) ||
+		(core.matchesPaseoToolName(target, ["update_agent"]) && core.updateAgentTouchesRoute(toolInput));
+	if (!needed) return undefined;
 	try {
 		const { gateRouteTable } = await import("./model-routing.mjs");
 		return gateRouteTable({ env });
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The seat an update_agent re-routes, read off Paseo's agent state the same way
+ * the Pi adapter reads it. Undefined when the call is not a route-touching
+ * update_agent; null when the state could not be read (refused by the core).
+ */
+function updateTargetForDecision({ core, claude }, role, toolName, toolInput, env) {
+	if (role !== "lead" && role !== "supervisor") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["update_agent"])) return undefined;
+	if (!core.updateAgentTouchesRoute(toolInput)) return undefined;
+	try {
+		return core.routeTargetFor(toolInput?.agentId, env);
 	} catch {
 		return null;
 	}
@@ -548,7 +572,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 			cluster: core.selfCluster(env),
-			routeTable: await routeTableForDecision({ core, claude }, role, toolName, env),
+			routeTable: await routeTableForDecision({ core, claude }, role, toolName, payload?.tool_input, env),
+			updateTarget: updateTargetForDecision({ core, claude }, role, toolName, payload?.tool_input, env),
 			env,
 			promptTarget: promptTargetForDecision(
 				{ core, claude },

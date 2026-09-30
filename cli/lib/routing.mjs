@@ -168,14 +168,15 @@ function editTarget(env, hostIdArg) {
 				`--host-id targets a host in ${p.cluster}, which does not exist (copy config/cluster-routing.example.json)`,
 			);
 		}
-		const raw = readJson(p.cluster);
+		const text = readText(p.cluster);
+		const raw = parseJson(p.cluster, text);
 		if (!raw?.hosts || typeof raw.hosts !== "object" || !(hostIdArg in raw.hosts)) {
 			throw new RoutingCommandError(
 				"HOST_UNKNOWN",
 				`host "${hostIdArg}" is not in ${p.cluster} (hosts: ${Object.keys(raw?.hosts ?? {}).join(", ") || "none"})`,
 			);
 		}
-		return { kind: "cluster", path: p.cluster, hostId: hostIdArg, raw };
+		return { kind: "cluster", path: p.cluster, hostId: hostIdArg, raw, text };
 	}
 	const table = loadLocalRouteTable({ env });
 	if (!table.ok) {
@@ -187,17 +188,27 @@ function editTarget(env, hostIdArg) {
 			{ paths: table.paths },
 		);
 	}
+	const text = readText(table.path);
 	return {
 		kind: table.source,
 		path: table.path,
 		hostId: table.hostId,
-		raw: readJson(table.path),
+		raw: parseJson(table.path, text),
+		text,
 	};
 }
 
-function readJson(path) {
+function readText(path) {
 	try {
-		return JSON.parse(readFileSync(path, "utf8"));
+		return readFileSync(path, "utf8");
+	} catch (error) {
+		throw new RoutingCommandError("CONFIG_INVALID", `${path} is not readable: ${String(error?.message ?? error)}`);
+	}
+}
+
+function parseJson(path, text) {
+	try {
+		return JSON.parse(text);
 	} catch (error) {
 		throw new RoutingCommandError("CONFIG_INVALID", `${path} is not readable JSON: ${String(error?.message ?? error)}`);
 	}
@@ -226,7 +237,27 @@ function validateCandidate(target) {
 	}
 }
 
+/**
+ * Write the edited document — but only over the exact bytes it was read from.
+ * `set` awaits the live inventory between reading and writing (seconds, on a
+ * cold daemon); an edit made meanwhile — another `routing set`, the WebUI, a
+ * hand edit — would otherwise be overwritten with no trace. Compared on the
+ * CONTENT, not mtime+size: a same-size edit within one mtime tick is exactly
+ * the case a stat comparison misses.
+ */
 function writeTarget(target) {
+	let current;
+	try {
+		current = readFileSync(target.path, "utf8");
+	} catch (error) {
+		throw new RoutingCommandError("CONCURRENT_EDIT", `${target.path} could not be re-read before writing (${String(error?.message ?? error)}) — nothing written`);
+	}
+	if (current !== target.text) {
+		throw new RoutingCommandError(
+			"CONCURRENT_EDIT",
+			`${target.path} changed while this command was validating the route — nothing written, so that edit is not lost. Re-run the command against the file as it is now.`,
+		);
+	}
 	const backup = cw.atomicWrite(target.path, `${JSON.stringify(target.raw, null, 2)}\n`);
 	return backup;
 }

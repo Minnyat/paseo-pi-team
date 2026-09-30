@@ -26,6 +26,9 @@ import { fileURLToPath } from "node:url";
 import {
 	createAgentRouteBlockReason,
 	mcpBlockReason,
+	routeTargetFor,
+	updateAgentRouteBlockReason,
+	type RouteTarget,
 	routeEnforcement,
 	routeEnforcementNotice,
 	type RouteTable,
@@ -201,8 +204,8 @@ test("Lead→Peer: model, thinking, provider role and class mismatches are refus
 		);
 		blocked(
 			decide(runtime, "lead", peerArgs("pi-lead/Mx/mid", "medium", "CODING_MEDIUM"), routingOnly),
-			/ROUTE_PROVIDER_MISMATCH.*cannot be used to seat a lead/,
-			`${runtime}: a different role`,
+			/ROUTE_CLASS_WRONG_FLOW.*a Lead seating a lead routes from LEAD_RECOVERY/,
+			`${runtime}: a different role (a Lead seat routes from LEAD_RECOVERY only)`,
 		);
 		blocked(
 			decide(runtime, "lead", peerArgs("pi-peer/Mx/cheap", "low", "CODING_MEDIUM"), routingOnly),
@@ -268,7 +271,7 @@ test("Lead→Supervisor: matches SUPERVISOR_GOVERNANCE on the cluster host; refu
 		);
 		blocked(
 			decide(runtime, "lead", supervisorArgs(undefined, undefined, "REASONING_HIGH"), clusterHost),
-			/ROUTE_CLASS_WRONG_FLOW.*a Lead seating its Supervisor routes from SUPERVISOR_GOVERNANCE/,
+			/ROUTE_CLASS_WRONG_FLOW.*a Lead seating a supervisor routes from SUPERVISOR_GOVERNANCE/,
 			`${runtime}: supervisor from a Peer class`,
 		);
 	}
@@ -566,4 +569,310 @@ test("Claude hook end to end: the route gate runs in pre-tool-use, and the opt-o
 	assert.match(String(turn?.hookSpecificOutput?.additionalContext), /Route Enforcement: OFF/);
 	const quiet = await handleEvent("user-prompt-submit", { session_id: "route-gate", prompt: "next" }, leadEnv);
 	assert.doesNotMatch(String(quiet?.hookSpecificOutput?.additionalContext ?? ""), /Route Enforcement: OFF/);
+});
+
+// --- update_agent: the second door to a seat's model --------------------------
+
+const AGENT_PEER = "11111111-aaaa-4aaa-8aaa-111111111111";
+const AGENT_UNLABELLED = "22222222-bbbb-4bbb-8bbb-222222222222";
+const AGENT_LEAD = "33333333-cccc-4ccc-8ccc-333333333333";
+const AGENT_MISSING = "44444444-dddd-4ddd-8ddd-444444444444";
+
+/** A PASEO_HOME with agent state files, read back through routeTargetFor. */
+const paseoHome = join(sandbox, "paseo-home");
+{
+	const dir = join(paseoHome, "agents", "D--repo");
+	mkdirSync(dir, { recursive: true });
+	const write = (id: string, provider: string, labels: Record<string, string>) =>
+		writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, provider, labels, runtimeInfo: {} }));
+	write(AGENT_PEER, "pi-peer/Mx/mid", { "team.model-class": "CODING_MEDIUM" });
+	write(AGENT_UNLABELLED, "pi-peer/Mx/mid", {});
+	write(AGENT_LEAD, "pi-lead/Mx/big", { "team.model-class": "LEAD_RECOVERY" });
+}
+const PASEO_ENV = { PASEO_HOME: paseoHome };
+const target = (id: string) => routeTargetFor(id, PASEO_ENV);
+
+function decideUpdate(
+	runtime: Runtime,
+	role: TeamRole,
+	args: unknown,
+	updateTarget: RouteTarget | null | undefined,
+	routeTable: RouteTable | null | undefined,
+	env: Record<string, string | undefined> = ENFORCED,
+): string | null {
+	if (runtime === "pi") {
+		return mcpBlockReason(role, { tool: "update_agent", args }, { updateTarget, routeTable, env });
+	}
+	return claudeToolBlockReason({
+		role,
+		toolName: "mcp__paseo__update_agent",
+		toolInput: args,
+		brief: null,
+		updateTarget,
+		routeTable,
+		env,
+	});
+}
+
+test("update_agent: routeTargetFor reads the class off Paseo's own agent state", () => {
+	assert.deepEqual(target(AGENT_PEER), { agentId: AGENT_PEER, provider: "pi-peer/Mx/mid", modelClass: "CODING_MEDIUM" });
+	assert.equal(target(AGENT_UNLABELLED)?.modelClass, null);
+	assert.equal(target(AGENT_MISSING), null, "an agent with no state is null, never a classless target");
+	assert.equal(target("not-an-id"), null);
+});
+
+test("update_agent: model/thinking on the target's own route pass; anything else is refused naming the route", () => {
+	for (const runtime of RUNTIMES) {
+		const peer = target(AGENT_PEER);
+		const upd = (settings: Record<string, unknown>) => ({ agentId: AGENT_PEER, settings });
+		assert.equal(decideUpdate(runtime, "lead", upd({ model: "Mx/mid" }), peer, routingOnly), null, `${runtime}: route model`);
+		assert.equal(decideUpdate(runtime, "lead", upd({ model: "Mx/mid", thinkingOptionId: "medium" }), peer, routingOnly), null);
+		assert.equal(decideUpdate(runtime, "lead", upd({ thinkingOptionId: "medium" }), peer, clusterHost), null);
+		blocked(
+			decideUpdate(runtime, "lead", upd({ model: "Mx/big" }), peer, routingOnly),
+			/ROUTE_MODEL_MISMATCH.*CODING_MEDIUM seat.*"Mx\/mid".*Expected settings \{ model: "Mx\/mid", thinkingOptionId: "medium" \}/,
+			`${runtime}: another model`,
+		);
+		blocked(
+			decideUpdate(runtime, "lead", upd({ thinkingOptionId: "high" }), peer, routingOnly),
+			/ROUTE_THINKING_MISMATCH.*"medium"/,
+			`${runtime}: another thinking level`,
+		);
+		blocked(
+			decideUpdate(runtime, "lead", upd({ model: null }), peer, routingOnly),
+			/ROUTE_MODEL_MISMATCH.*null \(clears it to the daemon default\)/,
+			`${runtime}: clearing the model is moving it`,
+		);
+		blocked(
+			decideUpdate(runtime, "lead", upd({ thinkingOptionId: null }), peer, routingOnly),
+			/ROUTE_THINKING_MISMATCH.*null/,
+			`${runtime}: clearing thinking`,
+		);
+		// Lead recovery seat on a model-routing-only host: its class is optional
+		// and absent there, so it cannot be re-routed at all.
+		blocked(
+			decideUpdate(runtime, "lead", { agentId: AGENT_LEAD, settings: { model: "Mx/big" } }, target(AGENT_LEAD), routingOnly),
+			/ROUTE_CLASS_UNCONFIGURED.*LEAD_RECOVERY/,
+			`${runtime}: class not configured`,
+		);
+		assert.equal(
+			decideUpdate(runtime, "lead", { agentId: AGENT_LEAD, settings: { model: "Mx/big" } }, target(AGENT_LEAD), clusterHost),
+			null,
+			`${runtime}: configured on the cluster host`,
+		);
+	}
+});
+
+test("update_agent: fail-closed — unreadable target, no class on the target, unloadable table", () => {
+	for (const runtime of RUNTIMES) {
+		const upd = (id: string) => ({ agentId: id, settings: { model: "Mx/mid" } });
+		for (const unreadable of [undefined, null, target(AGENT_MISSING)]) {
+			blocked(
+				decideUpdate(runtime, "lead", upd(AGENT_MISSING), unreadable, routingOnly),
+				/ROUTE_TARGET_UNREADABLE.*44444444/,
+				`${runtime}: unreadable target (${String(unreadable)})`,
+			);
+		}
+		blocked(
+			decideUpdate(runtime, "lead", upd(AGENT_UNLABELLED), target(AGENT_UNLABELLED), routingOnly),
+			/ROUTE_CLASS_MISSING.*created before the route gate or outside it/,
+			`${runtime}: no class on the target`,
+		);
+		for (const table of [undefined, null, { ok: false, code: "CONFIG_INVALID", message: "broken" } as RouteTable]) {
+			blocked(
+				decideUpdate(runtime, "lead", upd(AGENT_PEER), target(AGENT_PEER), table),
+				/ROUTE_UNVERIFIABLE|ROUTE_TABLE_UNAVAILABLE/,
+				`${runtime}: route table ${JSON.stringify(table)}`,
+			);
+		}
+	}
+});
+
+test("update_agent: the class label is fixed — it cannot be rewritten to borrow another class's route", () => {
+	for (const runtime of RUNTIMES) {
+		blocked(
+			decideUpdate(runtime, "lead", { agentId: AGENT_PEER, labels: { "team.model-class": "REASONING_HIGH" } }, target(AGENT_PEER), routingOnly),
+			/ROUTE_CLASS_IMMUTABLE.*"CODING_MEDIUM"/,
+			`${runtime}: relabel alone`,
+		);
+		blocked(
+			decideUpdate(
+				runtime,
+				"lead",
+				{ agentId: AGENT_PEER, labels: { "team.model-class": "REASONING_HIGH" }, settings: { model: "claude-opus-5" } },
+				target(AGENT_PEER),
+				routingOnly,
+			),
+			/ROUTE_CLASS_IMMUTABLE/,
+			`${runtime}: relabel + move in one call`,
+		);
+		blocked(
+			decideUpdate(runtime, "lead", { agentId: AGENT_UNLABELLED, labels: { "team.model-class": "CODING_MEDIUM" } }, target(AGENT_UNLABELLED), routingOnly),
+			/ROUTE_CLASS_IMMUTABLE.*unset/,
+			`${runtime}: stamping a class onto an unlabelled seat`,
+		);
+		assert.equal(
+			decideUpdate(runtime, "lead", { agentId: AGENT_PEER, labels: { "team.model-class": "CODING_MEDIUM", note: "x" } }, target(AGENT_PEER), routingOnly),
+			null,
+			`${runtime}: repeating the same class is not a change`,
+		);
+	}
+});
+
+test("update_agent that changes neither model nor thinking works unchanged — no state read, no route table", () => {
+	for (const runtime of RUNTIMES) {
+		for (const args of [
+			{ agentId: AGENT_MISSING, name: "renamed" },
+			{ agentId: AGENT_MISSING, labels: { note: "anything", "team.domain": "x" } },
+			{ agentId: AGENT_MISSING, settings: { modeId: "plan" } },
+			{ agentId: AGENT_MISSING, settings: { features: { fast_mode: true } } },
+			{ agentId: AGENT_MISSING, name: "n", labels: { a: "b" }, settings: { modeId: "auto" } },
+		]) {
+			// undefined target AND undefined table: if the gate looked at either,
+			// it would refuse — so a pass proves it never needed them.
+			assert.equal(decideUpdate(runtime, "lead", args, undefined, undefined), null, `${runtime}: ${JSON.stringify(args)}`);
+		}
+	}
+});
+
+test("update_agent: the opt-out disables the update gate the same way, and only for the route", () => {
+	const off = { PASEO_TEAM_ROUTE_ENFORCE: "off" };
+	for (const runtime of RUNTIMES) {
+		assert.equal(
+			decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { model: "any/model" } }, undefined, undefined, off),
+			null,
+		);
+		blocked(
+			decideUpdate(runtime, "lead", { agentId: AGENT_PEER, settings: { model: "any/model" } }, target(AGENT_PEER), routingOnly, { PASEO_TEAM_ROUTE_ENFORCE: "OFF" }),
+			/ROUTE_MODEL_MISMATCH/,
+			`${runtime}: "OFF" is not the opt-out`,
+		);
+	}
+	assert.equal(
+		updateAgentRouteBlockReason({ role: "peer", args: { agentId: AGENT_PEER, settings: { model: "x" } }, env: ENFORCED }),
+		null,
+		"a Peer never reaches update_agent at all; the role policy refuses it",
+	);
+	assert.match(String(routeEnforcementNotice("lead", off)), /update_agent and team_fork are NOT checked/);
+});
+
+test("create_agent: a legacy top-level thinking cannot override the routed one", () => {
+	for (const runtime of RUNTIMES) {
+		blocked(
+			decide(runtime, "lead", { ...peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"), thinking: "max" }, routingOnly),
+			/ROUTE_THINKING_MISMATCH.*top-level "thinking"/,
+			`${runtime}: legacy thinking`,
+		);
+	}
+});
+
+// --- the Pi adapter itself: tool_call → gate-routes subprocess → core ----------
+
+type Handler = (event: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+
+async function piLead(env: Record<string, string>, tag: string) {
+	const handlers: Record<string, Handler[]> = {};
+	const saved: Record<string, string | undefined> = {};
+	const keys = [
+		"PASEO_PI_ROLE",
+		"PASEO_TEAM_ROUTE_ENFORCE",
+		"PST_TEAM_CONFIG_DIR",
+		"PASEO_TEAM_HOME",
+		"PASEO_TEAM_SCRIPTS_DIR",
+		"PASEO_TEAM_CLUSTER",
+		"PASEO_HOME",
+		...Object.keys(env),
+	];
+	for (const key of keys) saved[key] = process.env[key];
+	for (const key of keys) delete process.env[key];
+	Object.assign(process.env, { PASEO_PI_ROLE: "lead", PASEO_TEAM_CLUSTER: "route-gate", ...env });
+	const mod: { default: (pi: unknown) => void } = await import(`../extensions/paseo-team-policy.ts?routegate=${tag}`);
+	mod.default({
+		on: (name: string, fn: Handler) => (handlers[name] ??= []).push(fn),
+		getAllTools: () => [{ name: "mcp" }],
+		setActiveTools: () => {},
+		getActiveTools: () => [],
+		registerCommand: () => {},
+		registerTool: () => {},
+	});
+	const toolCall = handlers.tool_call?.[0];
+	assert.ok(toolCall, "the Pi extension registers tool_call");
+	const restore = () => {
+		for (const key of keys) {
+			if (saved[key] === undefined) delete process.env[key];
+			else process.env[key] = saved[key];
+		}
+	};
+	const mcp = (tool: string, args: unknown) => toolCall({ toolName: "mcp", input: { tool, args } });
+	return { mcp, restore };
+}
+
+const withCluster = (args: { labels: Record<string, string> }) => ({ ...args, labels: { ...args.labels, "team.cluster": "route-gate" } });
+
+test("Pi adapter tool_call, enforcement ON: accept, mismatch, and a failing gate-routes subprocess refuses", async () => {
+	const configDir = join(sandbox, "pi-adapter-config");
+	mkdirSync(configDir, { recursive: true });
+	writeFileSync(join(configDir, "model-routing.local.json"), JSON.stringify(ROUTING_ONLY));
+	const scripts = join(ROOT, "scripts");
+
+	const good = await piLead({ PST_TEAM_CONFIG_DIR: configDir, PASEO_TEAM_SCRIPTS_DIR: scripts, PASEO_HOME: paseoHome }, "good");
+	try {
+		assert.equal(
+			await good.mcp("create_agent", withCluster(peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM"))),
+			undefined,
+			"a create_agent on its route passes through the real subprocess",
+		);
+		const mismatch = await good.mcp("create_agent", withCluster(peerArgs("pi-peer/Mx/big", "medium", "CODING_MEDIUM")));
+		assert.equal(mismatch?.block, true);
+		assert.match(String(mismatch?.reason), /ROUTE_MODEL_MISMATCH.*Expected provider "pi-peer\/Mx\/mid"/);
+		// update_agent through the same handler: target resolved from PASEO_HOME.
+		assert.equal(await good.mcp("update_agent", { agentId: AGENT_PEER, settings: { model: "Mx/mid" } }), undefined);
+		const moved = await good.mcp("update_agent", { agentId: AGENT_PEER, settings: { model: "Mx/big" } });
+		assert.match(String(moved?.reason), /ROUTE_MODEL_MISMATCH/);
+		assert.equal(await good.mcp("update_agent", { agentId: AGENT_PEER, name: "renamed" }), undefined);
+	} finally {
+		good.restore();
+	}
+
+	// The support script cannot be found (an empty scripts dir): the adapter gets
+	// no table at all and the core must refuse, not wave the call through.
+	const emptyScripts = join(sandbox, "no-scripts");
+	mkdirSync(emptyScripts, { recursive: true });
+	const broken = await piLead({ PST_TEAM_CONFIG_DIR: configDir, PASEO_TEAM_SCRIPTS_DIR: emptyScripts, PASEO_HOME: paseoHome }, "broken");
+	try {
+		const refused = await broken.mcp("create_agent", withCluster(peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM")));
+		assert.equal(refused?.block, true);
+		assert.match(String(refused?.reason), /ROUTE_UNVERIFIABLE/);
+		const refusedUpdate = await broken.mcp("update_agent", { agentId: AGENT_PEER, settings: { model: "Mx/mid" } });
+		assert.match(String(refusedUpdate?.reason), /ROUTE_UNVERIFIABLE/);
+	} finally {
+		broken.restore();
+	}
+
+	// A subprocess that runs but answers garbage is the same refusal.
+	const garbageScripts = join(sandbox, "garbage-scripts");
+	mkdirSync(garbageScripts, { recursive: true });
+	writeFileSync(join(garbageScripts, "model-routing.mjs"), 'console.log("not json");\n');
+	const garbage = await piLead({ PST_TEAM_CONFIG_DIR: configDir, PASEO_TEAM_SCRIPTS_DIR: garbageScripts, PASEO_HOME: paseoHome }, "garbage");
+	try {
+		const refused = await garbage.mcp("create_agent", withCluster(peerArgs("pi-peer/Mx/mid", "medium", "CODING_MEDIUM")));
+		assert.match(String(refused?.reason), /ROUTE_UNVERIFIABLE/);
+	} finally {
+		garbage.restore();
+	}
+});
+
+test("Claude hook end to end: update_agent is gated off the target's own class", async () => {
+	const dir = join(sandbox, "hook-update-home");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "model-routing.local.json"), JSON.stringify(ROUTING_ONLY));
+	const env = { PASEO_TEAM_HOME: dir, PASEO_PI_ROLE: "lead", PASEO_TEAM_CLUSTER: "route-gate", PASEO_HOME: paseoHome };
+	const call = (toolInput: unknown) =>
+		handleEvent("pre-tool-use", { session_id: "route-gate-update", tool_name: "mcp__paseo__update_agent", tool_input: toolInput }, env);
+	assert.equal(await call({ agentId: AGENT_PEER, settings: { model: "Mx/mid" } }), null);
+	const refused = await call({ agentId: AGENT_PEER, settings: { model: "Mx/big" } });
+	assert.match(String(refused?.hookSpecificOutput?.permissionDecisionReason), /ROUTE_MODEL_MISMATCH/);
+	const unreadable = await call({ agentId: AGENT_MISSING, settings: { model: "Mx/mid" } });
+	assert.match(String(unreadable?.hookSpecificOutput?.permissionDecisionReason), /ROUTE_TARGET_UNREADABLE/);
+	assert.equal(await call({ agentId: AGENT_MISSING, name: "renamed" }), null, "a rename needs no state at all");
 });

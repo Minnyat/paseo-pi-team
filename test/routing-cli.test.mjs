@@ -265,6 +265,43 @@ test("set: refuses to invent a route file, and to rewrite one that does not load
 	assert.equal(readFileSync(broken.routingPath, "utf8"), "{ not json");
 });
 
+test("set: an edit made while the route is being validated is not silently overwritten", async () => {
+	const { routingSet } = await import("../cli/lib/routing.mjs");
+	const h = routingOnly();
+	const env = { PST_TEAM_CONFIG_DIR: h.dir };
+	const inventoryOk = async () => ({ ok: true, inventory: { providers: INVENTORY.providers, models: INVENTORY.models["pi-lead"] } });
+	// The concurrent edit lands DURING the inventory await — the window a cold
+	// daemon keeps open for seconds.
+	const concurrent = JSON.stringify({ version: 1, hostId: "minnyat", routes: { ...BASE_ROUTES, FAST_READ: { ...BASE_ROUTES.FAST_READ, thinking: "off" } } });
+	await assert.rejects(
+		routingSet(
+			{ modelClass: "LEAD_RECOVERY", provider: "pi-lead", model: "Mx/big", thinking: "high" },
+			{
+				env,
+				inventoryFor: async () => {
+					writeFileSync(h.routingPath, concurrent);
+					return inventoryOk();
+				},
+			},
+		),
+		(error) => {
+			assert.equal(error.code, "CONCURRENT_EDIT");
+			assert.match(error.message, /changed while this command was validating/);
+			return true;
+		},
+	);
+	assert.equal(readFileSync(h.routingPath, "utf8"), concurrent, "the concurrent edit survives");
+	assert.deepEqual(h.backups(), [], "nothing was written, so nothing was backed up");
+
+	// Without interference the same call writes.
+	const ok = await routingSet(
+		{ modelClass: "LEAD_RECOVERY", provider: "pi-lead", model: "Mx/big", thinking: "high" },
+		{ env, inventoryFor: inventoryOk },
+	);
+	assert.equal(ok.wrote, true);
+	assert.equal(h.read(h.routingPath).routes.FAST_READ.thinking, "off", "it wrote on top of the file as it now is");
+});
+
 // --- unset ---------------------------------------------------------------------
 
 test("unset: removes an optional class with a backup; a required class is refused; an absent one is a no-op", () => {

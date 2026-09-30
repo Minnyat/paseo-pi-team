@@ -720,20 +720,24 @@ if (routing && daemonUp && !skipModels) {
 // run was pointed at.
 {
 	const table = loadLocalRouteTable();
+	const enforced = process.env[ROUTE_ENFORCE_ENV] !== "off";
 	if (table.ok) {
 		pass(
 			"route-gate",
-			`create_agent is checked against ${table.path} (host "${table.hostId}")${table.shadowed ? ` — ${table.shadowed} is NOT read while the cluster file has a local host` : ""}`,
+			`create_agent / update_agent / team_fork are checked against ${table.path} (host "${table.hostId}")${table.shadowed ? ` — ${table.shadowed} is NOT read while the cluster file has a local host` : ""}`,
 		);
-	} else if (table.code === "ROUTE_FILE_MISSING") {
-		strictCheck(
-			"route-gate",
-			`${table.message}. Until then EVERY Lead/Supervisor create_agent is refused (ROUTE_TABLE_UNAVAILABLE).`,
-		);
-	} else {
+	} else if (enforced) {
+		// Not a strictCheck: with the gate on, a route table that does not load
+		// refuses EVERY Lead/Supervisor seating on this host — a broken host, not
+		// a degraded one, whether or not --strict was asked for.
 		fail(
 			"route-gate",
-			`${table.message}. Until it loads, every Lead/Supervisor create_agent is refused.`,
+			`${table.message}. Until it loads, EVERY Lead/Supervisor create_agent is refused (ROUTE_TABLE_UNAVAILABLE).`,
+		);
+	} else {
+		warn(
+			"route-gate",
+			`${table.message}. ${ROUTE_ENFORCE_ENV}=off, so nothing is refused for it — and nothing is route-checked either.`,
 		);
 	}
 	if (process.env[ROUTE_ENFORCE_ENV] === "off") {

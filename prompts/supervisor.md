@@ -322,9 +322,11 @@ you may create an agent:
 - `labels.recovery_for` MUST be the project id you govern — and under
   `PASEO_TEAM_TOPOLOGY=multi` it must be a domain INSIDE your own
   `team.domain` (see *Jurisdiction*), or the call is blocked;
-- `settings.thinkingOptionId` is MANDATORY — routed from
-  `~/.paseo-pi-team/cluster-routing.local.json` (never drop model/thinking and
-  let the daemon choose);
+- `settings.thinkingOptionId` is MANDATORY — routed from the file the route
+  gate reads on this host: the single `local` host of
+  `cluster-routing.local.json`, else `model-routing.local.json`
+  (`pteam routing show` names it). Never drop model/thinking and let the
+  daemon choose;
 - `labels["team.model-class"]` MUST be `LEAD_RECOVERY`, and provider, model and
   thinking must equal that class's route on this host exactly. A host without
   a LEAD_RECOVERY route cannot recover a Lead until the Human configures one

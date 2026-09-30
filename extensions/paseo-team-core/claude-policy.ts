@@ -30,7 +30,9 @@ import {
 	clusterLabelBlockReason,
 	createAgentModeArgsBlockReason,
 	createAgentRouteBlockReason,
+	updateAgentRouteBlockReason,
 	type RouteTable,
+	type RouteTarget,
 	leaseBlockReason,
 	sendAgentPromptBlockReason,
 	sendAgentPromptTargetId,
@@ -297,6 +299,9 @@ export interface ClaudeToolDecisionInput {
 	/** The local route table, loaded by the hook through model-routing.mjs.
 	 *  Consulted only for a create_agent, where undefined/null is refused. */
 	routeTable?: RouteTable | null;
+	/** The agent an update_agent re-routes, read by the hook (routeTargetFor).
+	 *  Undefined/null is refused when the update touches the route. */
+	updateTarget?: RouteTarget | null;
 	/** Where PASEO_TEAM_ROUTE_ENFORCE is read from; defaults to process.env. */
 	env?: Record<string, string | undefined>;
 }
@@ -449,6 +454,17 @@ export function claudeToolBlockReason(
 				env: input.env ?? process.env,
 			});
 			if (routeBlock) return routeBlock;
+		}
+		if (matchesPaseoToolName(target, ["update_agent"]) && (role === "lead" || role === "supervisor")) {
+			// Same update gate, same position, as the Pi adapter's mcpBlockReason.
+			const updateBlock = updateAgentRouteBlockReason({
+				role,
+				args: input.toolInput,
+				target: input.updateTarget,
+				routeTable: input.routeTable,
+				env: input.env ?? process.env,
+			});
+			if (updateBlock) return updateBlock;
 		}
 		if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
 			return leadCreateWorkspaceArgsBlockReason(input.toolInput);

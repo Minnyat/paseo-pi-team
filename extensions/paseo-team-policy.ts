@@ -99,6 +99,8 @@ import {
 	supervisorTurnVerdict,
 	teamTopology,
 	routeEnforcementNotice,
+	routeTargetFor,
+	updateAgentTouchesRoute,
 	type GovernanceContext,
 	type RouteTable,
 	type SupervisorSeat,
@@ -205,7 +207,13 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 async function createAgentRouteTable(input: unknown): Promise<RouteTable | null | undefined> {
 	const classified = classifyMcpInput(input);
 	if (classified.kind !== "target") return undefined;
-	if (!matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
+	const target = classified.target ?? "";
+	// create_agent always; update_agent only when it touches model, thinking or
+	// the class label — a rename or a mode change must not pay for a spawn.
+	const needed =
+		matchesPaseoToolName(target, ["create_agent"]) ||
+		(matchesPaseoToolName(target, ["update_agent"]) && updateAgentTouchesRoute(extractCreateAgentArgs(input)));
+	if (!needed) return undefined;
 	try {
 		const result = await runSupportScript("model-routing.mjs", ["gate-routes", "--json"]);
 		const parsed = JSON.parse(result.stdout || "null");
@@ -246,6 +254,16 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 	// cannot see. The cost is one local state-file read on `send_agent_prompt`
 	// calls only; every other tool still returns without touching the disk.
 	const classified = classifyMcpInput(input);
+	// The seat an update_agent re-routes, for the update route gate — read only
+	// when the update touches model, thinking or the class label.
+	if (classified.kind === "target" && matchesPaseoToolName(classified.target ?? "", ["update_agent"])) {
+		const args = extractCreateAgentArgs(input);
+		if (updateAgentTouchesRoute(args)) {
+			const agentId = (args as Record<string, unknown> | null)?.agentId;
+			context.updateTarget = routeTargetFor(agentId);
+		}
+		return context;
+	}
 	const isPrompt =
 		classified.kind === "target" &&
 		matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"]);
@@ -454,6 +472,8 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 				provider: { type: "string", maxLength: 256 },
 				model: { type: "string", maxLength: 128 },
 				thinkingOptionId: { type: "string", maxLength: 64 },
+				// Required by `fork`: the class whose route the fork is held to.
+				modelClass: { type: "string", maxLength: 64 },
 				// See the same field in claude-team-mcp.mjs: a claude-* fork is
 				// moved onto "auto" after import; this only narrows it on purpose.
 				modeId: { type: "string", maxLength: 32 },

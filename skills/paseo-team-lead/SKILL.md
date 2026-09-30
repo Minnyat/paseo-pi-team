@@ -419,7 +419,7 @@ Model classes (decided by task risk + disposition, not by role name):
 | REASONING_HIGH | architect, lifecycle/ownership/concurrency, migration, security design |
 | REVIEW_HIGH | independent reviewer, proof auditor, exact-SHA acceptance |
 | SUPERVISOR_GOVERNANCE | *optional* — ONLY for seating your Supervisor (route names a `*-supervisor` provider) |
-| LEAD_RECOVERY | *optional* — ONLY for a Supervisor's Lead recovery (route names a `*-lead` provider) |
+| LEAD_RECOVERY | *optional* — ONLY for seating a Lead: a Supervisor's recovery, a successor Lead, a fork of a Lead (route names a `*-lead` provider) |
 
 The two optional classes may be absent from a host's route file; the flow that
 needs one is then refused (`ROUTE_CLASS_UNCONFIGURED`) until the Human runs
@@ -790,21 +790,30 @@ The fork cycle, in order:
 2. ```text
    team_fork { action: "fork", agentId: "<source>", reason: "takeover",
                disposition: "lead", scope: "<scope>",
-               provider: "<role-provider>/<...>/<model-id>",
-               model: "<model-id>", thinkingOptionId: "<level>",
+               provider: "<role-provider>", modelClass: "<MODEL_CLASS>",
                labels: { "team.domain": "<domain>" } }
    ```
+   `modelClass` is REQUIRED and is route-checked like a `create_agent`: the
+   fork's role decides the classes it may use (a Lead fork → `LEAD_RECOVERY`,
+   a Peer fork → the five base classes), and the fork lands on that class's
+   route. Omit `model`/`thinkingOptionId` to take the route's; if you pass
+   them they must equal it. The class is stamped on the fork as
+   `team.model-class`.
    This copies the transcript (no LLM turn) and imports it. It returns the new
    `agentId`, a `seedPrompt`, and the `update_agent` call you must make next.
    `team.cluster` on the fork is derived from the SOURCE agent's own cluster
    (not from `labels` you pass) — a fork is a continuation of the source
    seat, so its cluster travels with it the same way `team.fork-of` does.
-3. **Route the model** with the returned `update_agent` args. The CLI has no
-   `--model`; only MCP moves it.
+3. **Route the model** with the returned `update_agent` args, unchanged. The
+   CLI has no `--model`; only MCP moves it. Every `update_agent` that sets
+   `settings.model` or `thinkingOptionId` is held to the route of the TARGET's
+   own `team.model-class` (and may not change that label) — so the returned
+   call passes, and any other model is refused naming the expected values.
 4. ```text
-   team_fork { action: "verify", agentId: "<fork>", model: "<model-id>",
-               thinkingOptionId: "<level>" }
+   team_fork { action: "verify", agentId: "<fork>" }
    ```
+   Compares against the route of the fork's own class, not against values
+   you repeat (a repeated value that differs from the route is refused).
    Reads `runtimeInfo` — never `persistence.metadata.model`, which is a stale
    creation-time snapshot. A mismatch is `BLOCKED: FORK_MODEL_UNROUTABLE` and
    the fork is **deleted**; fork again rather than keep an unrouted agent.

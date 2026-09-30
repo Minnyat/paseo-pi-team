@@ -249,9 +249,12 @@ implementation still goes to an Engineer Peer.
    - the old Lead's Peers are **not** transferred. There is no reparent API, and
      `detach` is a Human action that leaves the Peer unable to escalate. Let them
      finish under their current Lead.
-   - `team_fork fork` stops before the model is routed (the CLI cannot set it):
-     run the `update_agent` call it hands back, then `team_fork verify`. A fork
-     on the wrong model is deleted, not kept — `BLOCKED: FORK_MODEL_UNROUTABLE`.
+   - `team_fork fork` needs a `modelClass` and stops before the model is routed
+     (the CLI cannot set it): run the `update_agent` call it hands back, then
+     `team_fork verify`, which checks the fork against that class's route. A
+     fork on the wrong model is deleted, not kept — `BLOCKED: FORK_MODEL_UNROUTABLE`.
+     Any `update_agent` that changes a seat's model or thinking is held to the
+     route of that seat's own `team.model-class`.
 8. **Browser authority is explicit and narrow**: only grant
    `BROWSER_MCP_AUTHORITY: allowed` when the Peer needs browser automation;
    this does not grant Paseo MCP or unrelated MCP servers.

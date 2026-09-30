@@ -1150,12 +1150,22 @@ test("cluster-remote: the remote inventory is the remote's, not the local one", 
 // because what an operator needs to see is the file every create_agent will be
 // compared against.
 
-test("route-gate: no local route file warns (strict fails) and says every create_agent is refused", { skip: !POSIX }, () => {
-	const env = { PASEO_TEAM_ROUTE_ENFORCE: "" };
-	const lax = preflight([], env).of("route-gate");
-	assert.equal(lax.status, "warn");
+test("route-gate: no local route file FAILS with enforcement on (strict or not), WARNS with it off", { skip: !POSIX }, () => {
+	const on = { PASEO_TEAM_ROUTE_ENFORCE: "" };
+	const lax = preflight([], on).of("route-gate");
+	assert.equal(lax.status, "fail", "every Lead/Supervisor seating is refused: that is a failure, not a warning");
 	assert.match(lax.detail, /EVERY Lead\/Supervisor create_agent is refused/);
-	assert.equal(preflight(["--strict"], env).of("route-gate").status, "fail");
+	assert.equal(preflight(["--strict"], on).of("route-gate").status, "fail");
+	const off = preflight([], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-gate");
+	assert.equal(off.status, "warn", "with the gate off nothing is refused for it");
+	// An unreadable file is the same failure as an absent one.
+	const garbage = join(home, "model-routing.local.json");
+	writeFileSync(garbage, "{ not json");
+	try {
+		assert.equal(preflight([], on).of("route-gate").status, "fail");
+	} finally {
+		rmSync(garbage, { force: true });
+	}
 });
 
 test("route-gate: names the file it reads; optional classes absent WARN even with --skip-models", { skip: !POSIX }, () => {
