@@ -3,10 +3,6 @@ PASEO_TEAM_TASK_V3_BEGIN
 TASK_ID: T-003
 DISPOSITION: solution-architect
 MODE: read-only
-ASSIGNED_HOST_ID: win-primary
-ASSIGNED_PASEO_PROVIDER: pi-peer
-ASSIGNED_MODEL: <pi-provider>/<model-id>
-ASSIGNED_THINKING: high
 
 OWNED_SCOPE: src/upload/**, src/jobs/**, docs/architecture-notes.md
 EXCLUDED_SCOPE: All writes. No commits. Do not redesign unrelated modules.

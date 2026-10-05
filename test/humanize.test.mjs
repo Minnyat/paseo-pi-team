@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import {
+	agentKindLabel,
 	degradedSentence,
 	humanizeError,
 	missingSetup,
 	overallHealth,
+	permitDetail,
 	permitSentence,
+	projectLabel,
 	relativeTime,
 	roleLabel,
+	runtimeLabel,
 	statusLabel,
 	toolMeaning,
 } from "../webui/public/humanize.js";
@@ -136,6 +140,61 @@ assert.match(degradedSentence([], 5), /còn 5 agent chưa xếp xong/);
 	assert.equal(humanizeError({ code: "API_KEY_MISSING" }).title, "Chưa tìm thấy khoá API");
 	// ...while a genuine daemon fault still reads as one.
 	assert.equal(humanizeError({ code: "DAEMON_UNREACHABLE", message: "ECONNREFUSED" }).title, "Chưa kết nối được với Paseo");
+}
+
+// --- sub-agents of any runtime ---------------------------------------------
+// A Lead can start a plain `codex` or `gemini` agent through Paseo's own
+// providers. The board used to give such a node no runtime badge and the label
+// "Chưa rõ vai trò", which read as a fault on a perfectly normal setup.
+{
+	assert.equal(runtimeLabel({ runtime: "claude" }), "Claude");
+	assert.equal(runtimeLabel({ runtime: "pi" }), "Pi");
+	assert.equal(runtimeLabel({ runtime: "codex" }), "Codex");
+	assert.equal(runtimeLabel({ runtime: "somenewagent" }), "Somenewagent", "an unknown runtime is named, not hidden");
+	assert.equal(runtimeLabel({ family: "pi" }), "Pi", "an older payload with only `family` still gets its badge");
+	assert.equal(runtimeLabel({}), "");
+	assert.equal(runtimeLabel(null), "");
+
+	assert.equal(agentKindLabel({ role: "lead" }), "Trưởng nhóm");
+	assert.equal(agentKindLabel({ role: null, parentId: "p" }), "Agent phụ", "outside the role pack, but started by someone");
+	assert.equal(agentKindLabel({ role: null, parentId: null }), "Agent độc lập");
+	assert.doesNotMatch(agentKindLabel({ role: null }), /Chưa rõ/, "not a fault");
+}
+
+// --- project names -----------------------------------------------------------
+assert.equal(projectLabel("d:/code/shop"), "shop");
+assert.equal(projectLabel("D:\\Code\\Shop\\"), "Shop", "a Windows path, with a trailing separator");
+assert.equal(projectLabel("ws_shop"), "ws_shop", "a workspace id is already a name");
+assert.equal(projectLabel(""), "");
+assert.equal(projectLabel(null), "");
+
+// --- what an approval is actually about --------------------------------------
+// "chạy lệnh trên máy này" is not something a person can answer: the command is
+// the decision. It used to be reachable only in advanced mode.
+{
+	assert.deepEqual(permitDetail({ raw: { input: { command: "npm install left-pad" } } }), { label: "Lệnh", text: "npm install left-pad" });
+	assert.deepEqual(permitDetail({ raw: { input: { file_path: "/repo/a.ts", content: "x" } } }), { label: "File", text: "/repo/a.ts" });
+	assert.deepEqual(permitDetail({ raw: { rawInput: { url: "https://example.com" } } }), { label: "Địa chỉ", text: "https://example.com" });
+	assert.deepEqual(permitDetail({ raw: { command: "ls" } }), { label: "Lệnh", text: "ls" }, "a flat record works too");
+	assert.deepEqual(permitDetail({ raw: { input: "plain text" } }), { label: "Nội dung", text: "plain text" });
+	assert.equal(permitDetail({ raw: { tool: "bash" } }), null, "nothing to show is null, never an invented summary");
+	assert.equal(permitDetail({}), null);
+	assert.equal(permitDetail(null), null);
+	const long = permitDetail({ raw: { input: { command: "x".repeat(900) } } }, 100);
+	assert.equal(long.text.length, 101, "clipped, with an ellipsis");
+	assert.ok(long.text.endsWith("…"));
+}
+assert.equal(statusLabel("initializing"), "Đang khởi động");
+
+// --- a refused config write is explained, not shown as a generic fault --------
+{
+	const changed = humanizeError({
+		stderr: "[paseo-team] CONFIG_CHANGED: /home/u/.pi/agent/settings.json was modified after it was read, so this write would overwrite those changes.",
+		code: "CLI_FAILED",
+	});
+	assert.equal(changed.title, "File cấu hình đã bị sửa ở nơi khác");
+	assert.match(changed.advice, /Tải lại/, "and it says what to do next");
+	assert.match(changed.advice, /Pi/, "naming the usual culprit");
 }
 
 console.log("humanize tests passed");

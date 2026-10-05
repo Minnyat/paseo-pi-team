@@ -29,6 +29,7 @@ import {
 	callsPaseoCli,
 	clusterLabelBlockReason,
 	createAgentModeArgsBlockReason,
+	createAgentParamsBlockReason,
 	leaseBlockReason,
 	sendAgentPromptBlockReason,
 	sendAgentPromptTargetId,
@@ -42,7 +43,7 @@ import {
 	gitAuthorityBlockReason,
 	isBrowserMcpTarget,
 	isPaseoBrowserTool,
-	leadCreateWorkspaceArgsBlockReason,
+	leadWorkspaceMutationBlockReason,
 	leadWriteEnabled,
 	matchesPaseoToolName,
 	mcpAllowedTargets,
@@ -292,6 +293,9 @@ export interface ClaudeToolDecisionInput {
 	 *  lease board and the coordinator-to-coordinator prompt rule to one
 	 *  workspace. Undefined leaves both exactly as they were. */
 	cluster?: string | null;
+	/** This seat's own Paseo workspace, resolved by the hook; see selfWorkspaceId.
+	 *  Only the create_agent placement gate reads it. */
+	selfWorkspaceId?: string | null;
 }
 
 function bashCommand(toolInput: unknown): string {
@@ -386,6 +390,12 @@ export function claudeToolBlockReason(
 		if (role === "peer") {
 			return "Peer cannot orchestrate agents or manage workspaces. Report a DEPENDENCY_REQUEST to the Lead instead.";
 		}
+		if (role === "lead") {
+			// Same rule, same place as mcpBlockReason: the Lead hears the rule rather
+			// than "not in the allowlist".
+			const workspaceBlock = leadWorkspaceMutationBlockReason(target);
+			if (workspaceBlock) return workspaceBlock;
+		}
 		if (!matchesPaseoToolName(target, mcpAllowedTargets(role))) {
 			return role === "supervisor"
 				? `Supervisor may only call monitoring tools through MCP (${SUPERVISOR_ALLOWED_MCP_TARGETS.join(", ")}) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`
@@ -432,9 +442,14 @@ export function claudeToolBlockReason(
 			// seat that parks every tool call it makes.
 			const modeBlock = createAgentModeArgsBlockReason(input.toolInput);
 			if (modeBlock) return modeBlock;
-		}
-		if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
-			return leadCreateWorkspaceArgsBlockReason(input.toolInput);
+			// Placement and parameters, in the same position as the Pi adapter runs
+			// them: one workspace per job, and only parameters Paseo reads.
+			const paramsBlock = createAgentParamsBlockReason({
+				role,
+				args: input.toolInput,
+				selfWorkspaceId: input.selfWorkspaceId,
+			});
+			if (paramsBlock) return paramsBlock;
 		}
 		// Same ownership wall the Pi adapter puts in front of send_agent_prompt:
 		// a Lead that can prompt another Lead's Peer bypasses that Lead's brief,

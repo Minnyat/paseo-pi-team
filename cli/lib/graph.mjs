@@ -91,6 +91,23 @@ export function inferFamily(provider) {
 	return inferRoleProvider(provider)?.family ?? null;
 }
 
+/**
+ * Which coding agent executes this seat, for ANY provider Paseo can run.
+ *
+ * `family` only knows the two runtimes that carry the pack's roles, so a sub-agent
+ * created through Paseo's own providers ("codex/gpt-5.4", "opencode", a plain
+ * "claude") had no runtime at all and rendered as an anonymous node. The runtime
+ * is the provider's head segment, lower-cased; a role provider keeps answering
+ * with its family, so "claude-peer/claude-opus-5" and a plain "claude" are the
+ * same runtime.
+ */
+export function inferRuntime(provider) {
+	if (typeof provider !== "string") return null;
+	const head = provider.split("/")[0].trim().toLowerCase();
+	if (!head) return null;
+	return inferFamily(provider) ?? head;
+}
+
 const PEER_MESSAGE_HEADER = "PEER_MESSAGE_V1";
 const HEADER_LINE = /^([A-Z_]+):\s*(.+)$/;
 
@@ -365,6 +382,7 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// Which coding agent is executing this role. A mixed fleet is normal:
 			// the same role can run on pi and on Claude at the same time.
 			family: inferFamily(agent.provider),
+			runtime: inferRuntime(agent.provider),
 			// Seat variant ("researcher") when the provider is a custom seat, so
 			// the UI can say which variant of the role this node is.
 			seat: inferSeat(agent.provider),

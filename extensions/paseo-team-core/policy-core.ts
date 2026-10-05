@@ -62,7 +62,17 @@ export const role: TeamRole | undefined = detectRole();
 
 export const PASEO_TOOLS = {
 	discovery: ["list_providers", "list_models", "inspect_provider"],
-	workspace: ["create_workspace", "list_workspaces", "archive_workspace"],
+	/** Reading the workspace list is discovery; a Lead may do it. */
+	workspace: ["list_workspaces"],
+	/**
+	 * Creating or archiving a workspace is NOT a Lead act. Every create_workspace
+	 * was a new entry in the Human's Paseo sidebar, and a Lead that staffs a
+	 * writer, a reviewer and a scout from one job used to leave three of them
+	 * behind. Everything in one job lives in the workspace the Lead was started
+	 * in; see leadWorkspaceMutationBlockReason. Kept in ALL_PASEO_TOOLS so the
+	 * Peer and Supervisor deny lists still name them.
+	 */
+	workspaceMutation: ["create_workspace", "archive_workspace"],
 	monitoring: ["list_agents", "get_agent_status", "get_agent_activity"],
 	orchestration: [
 		"create_agent",
@@ -92,6 +102,7 @@ export const PASEO_TOOLS = {
 export const ALL_PASEO_TOOLS: string[] = [
 	...PASEO_TOOLS.discovery,
 	...PASEO_TOOLS.workspace,
+	...PASEO_TOOLS.workspaceMutation,
 	...PASEO_TOOLS.monitoring,
 	...PASEO_TOOLS.orchestration,
 	...PASEO_TOOLS.heartbeat,
@@ -1184,9 +1195,9 @@ export function domainConflicts(a: unknown, b: unknown): boolean {
 // records, so an existing deployment gets scoping without relabelling anything:
 //
 //   1. labels["team.cluster"]  — the operator's own grouping. Needed because a
-//      reviewer workspace is a LINKED WORKTREE (leadCreateWorkspaceBlockReason
-//      mandates it): same repo, different workspaceId AND different cwd. Only a
-//      declared label can keep that reviewer in its Lead's cluster.
+//      seat can still sit in a different workspaceId or cwd from its Lead (one a
+//      Human created by hand, or an agent from before one-workspace-per-job):
+//      only a declared label can keep it in its Lead's cluster.
 //   2. workspaceId             — Paseo's own boundary when there is one.
 //   3. cwd                     — what a plain `paseo run` has instead.
 //   4. null                    — unknown.
@@ -1355,6 +1366,42 @@ export function selfCluster(
 	// wrong cwd instead costs one refusal that names PASEO_TEAM_CLUSTER as the
 	// fix — the direction this pack errs in everywhere else.
 	return normalizeCluster(cwd);
+}
+
+/**
+ * This seat's own Paseo workspace id, from its own agent state file.
+ *
+ * Distinct from `selfCluster` on purpose: a cluster is a project label that an
+ * operator can override, a workspace is a fact Paseo recorded. The only caller
+ * that needs it is the create_agent placement gate, which compares an explicit
+ * `workspaceId` against it — so a value that cannot be read returns null and the
+ * gate falls back to "leave it out", which is always provable.
+ *
+ * Only a POSITIVE read is memoised, for the reason `selfClusterMemo` gives: early
+ * in an agent's life Paseo may not have written the state file yet.
+ */
+const selfWorkspaceMemo = new Map<string, string>();
+
+export function selfWorkspaceId(
+	env: Record<string, string | undefined> = process.env,
+): string | null {
+	const selfId = env.PASEO_AGENT_ID?.trim();
+	if (!selfId || !isAgentId(selfId)) return null;
+	const root = paseoAgentsRoot(env);
+	const memoKey = `${root}\u0000${selfId}`;
+	const cached = selfWorkspaceMemo.get(memoKey);
+	if (cached) return cached;
+	try {
+		const { states } = readAgentStates([selfId], { root });
+		const own = states[selfId]?.workspaceId?.trim();
+		if (own) {
+			selfWorkspaceMemo.set(memoKey, own);
+			return own;
+		}
+	} catch {
+		// Unreadable state: unknown, not "no workspace".
+	}
+	return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2013,7 +2060,7 @@ export function peerMessageTurnNotice({
 	return [
 		"## Paseo Team — peer message (this turn)",
 		"",
-		`This turn opens with a PEER_MESSAGE_V1 from one of YOUR Peers, not from the Human.`,
+		`This turn opens with a message (PEER_MESSAGE_V1) from one of YOUR Peers — a teammate talking to you, not the Human.`,
 		`Kind: ${kind}   Task: ${task}   From agent: ${from}`,
 		"",
 		block.malformed.length
@@ -2525,7 +2572,7 @@ export function leadConsultTurnNotice({
 	return [
 		"## Paseo Team — a Lead is consulting you (this turn)",
 		"",
-		`This turn opens with a ${LEAD_CONSULT_HEADER} of kind "${block.kind}".`,
+		`This turn opens with a question from a Lead (${LEAD_CONSULT_HEADER}, kind "${block.kind}") — a colleague asking you to decide something.`,
 		`Verdict: ${verdict.code} (${verdict.severity})`,
 		`Sender: ${attribution.status}${attribution.fromAgentId ? ` (${attribution.fromAgentId})` : ""}`,
 		...(correlation ? [`Correlation: ${correlation}`] : []),
@@ -2709,10 +2756,10 @@ function supervisorPeerPromptBlockReason(
  * ever meant to grant.
  *
  * Only ever called after the parentage test has already passed the seat's own
- * subagents through. That order is load-bearing: a reviewer Peer legitimately
- * lives in a LINKED WORKTREE, so it is in a different cluster than its Lead by
- * construction, and testing the cluster first would block the very flow
- * `leadCreateWorkspaceBlockReason` exists to mandate.
+ * subagents through. That order is load-bearing: an agent a Lead created is
+ * always reachable, even if its workspace or cwd derives a different cluster
+ * (an agent that predates one-workspace-per-job, say), and testing the cluster
+ * first would block that legitimate flow.
  */
 function crossClusterPromptBlockReason(
 	targetId: string,
@@ -3424,11 +3471,10 @@ export function supervisorCreateAgentArgsBlockReason(
  * time. The routing cycle in skills/paseo-team-lead/SKILL.md passed only
  * `settings`, never `labels`, so every seat it created fell back to
  * `workspaceId`/`cwd` — which is exactly wrong for the one seat that most
- * needs the label: an independent-reviewer workspace is a LINKED WORKTREE
- * (`leadCreateWorkspaceBlockReason` mandates it), so it has a different
- * `workspaceId` AND a different `cwd` from the Lead that owns it. Unlabelled,
- * that Peer reads as a foreign cluster to every cluster-scoped rule
- * (`supervisorTurnVerdict`, the lease board).
+ * needs the label: a seat whose workspaceId or cwd differs from its Lead's (the
+ * reviewer worktree this used to mandate, or one created outside a Lead's
+ * create_agent). Unlabelled, that Peer reads as a foreign cluster to every
+ * cluster-scoped rule (`supervisorTurnVerdict`, the lease board).
  *
  * Applies to the only two create_agent paths a role in this pack has: a
  * Lead's own create_agent, and a Supervisor's gated lead-recovery create_agent
@@ -3484,45 +3530,213 @@ export function clusterLabelBlockReason({
 }
 
 /**
- * Argument-level gate for Lead create_workspace through the MCP proxy —
- * Layer 1 of the reviewer isolation invariant (Layer 2 is the runtime
- * assertLinkedWorktree gate in ocr-review.mjs, which rejects any
- * non-worktree workspace with REVIEW_WORKSPACE_NOT_WORKTREE).
+ * A Lead does not create or archive workspaces.
  *
- * MCP create_workspace args carry no disposition field, so reviewer intent
- * is declared through the workspace naming convention the Lead skill
- * mandates: reviewer workspaces are titled/slugged with "review". The gate
- * enforces:
- *   - isolation is explicit and valid ("local" | "worktree") — never a
- *     daemon default;
- *   - a review-marked workspace (title/worktreeSlug containing "review")
- *     MUST use worktree isolation; local is the exact anti-pattern the
- *     runtime gate rejects, so it is blocked before creation.
+ * It used to, and the doctrine told it to: a Writer and an independent Reviewer
+ * each "always got their own workspace". Every one of those is an entry in the
+ * Human's Paseo sidebar, detached from the job it belongs to, so one task left a
+ * trail of workspaces nobody could tell apart. Everything in one job now lives
+ * in the workspace the Lead itself was started in:
+ *
+ *   - create_agent WITHOUT workspaceId puts the new seat in the caller's
+ *     workspace, nested under the caller (createAgentParamsBlockReason holds the
+ *     call to exactly that);
+ *   - a Writer is kept apart by OWNED_SCOPE and the scope lease, not by a tree
+ *     of its own;
+ *   - the independent Reviewer still reviews from a linked, detached git
+ *     worktree at the exact candidate SHA — it makes that worktree itself with
+ *     `git worktree add --detach`, INSIDE the shared workspace, and the runtime
+ *     assertLinkedWorktree gate in ocr-review.mjs checks the git fact, not the
+ *     Paseo workspace.
+ *
+ * archive_workspace is refused with it: "archive a workspace and everything it
+ * owns" would now take the whole job down, not one Peer's corner of it.
+ * Returns the reason, or null when the target is not one of the two.
  */
-export function leadCreateWorkspaceBlockReason(input: unknown): string | null {
-	return leadCreateWorkspaceArgsBlockReason(extractMcpArgs(input));
+export function leadWorkspaceMutationBlockReason(target: string): string | null {
+	if (!matchesPaseoToolName(target, [...PASEO_TOOLS.workspaceMutation])) return null;
+	return `A Lead does not create or archive workspaces ("${target}" refused). Everything in one job shares the workspace you were started in: call create_agent WITHOUT workspaceId and the new seat lands in yours, nested under you. Isolate a Writer with OWNED_SCOPE and a scope lease; the independent Reviewer makes its own detached \`git worktree add\` at the candidate SHA inside this same workspace. If the job genuinely needs a different project, put that to the Human.`;
 }
 
-/** Same gate against a plain create_workspace arguments object (see above). */
-export function leadCreateWorkspaceArgsBlockReason(
-	args: unknown,
-): string | null {
-	if (typeof args !== "object" || args === null) {
-		return 'Lead create_workspace requires an args object with an explicit isolation ("local" or "worktree"). Refusing fail-closed.';
+/**
+ * The parameters Paseo's agent-scoped `create_agent` reads, and the ones that
+ * move an agent out of its creator's workspace.
+ *
+ * Read from Paseo's own tool definition (@getpaseo/server 0.10.x,
+ * agent/tools/paseo-tools.js), not from this pack's earlier idea of it:
+ *
+ *   canonical   { title, provider, initialPrompt, labels?, settings?,
+ *                 workspaceId?, notifyOnFinish? }
+ *               `workspaceId` omitted = the CALLER's workspace, and the new agent
+ *               is the caller's subagent.
+ *   legacy      any of `relationship`, `workspace`, `cwd`, `worktreeName`,
+ *               `branchName`, `baseBranch`, `refName`, `githubPrNumber` switches
+ *               Paseo to the old placement shape, where `workspace.kind:
+ *               "create"` mints a NEW workspace and `relationship.kind:
+ *               "detached"` lifts the agent out of its creator's subagent track.
+ *
+ * The second list is the spam: nothing used to stop a Lead or a Supervisor from
+ * passing one of them, and each one is a new workspace in the sidebar. They are
+ * refused by name, so the message can say what Paseo would have done with it.
+ */
+export const CREATE_AGENT_PARAMS = Object.freeze([
+	"title",
+	"provider",
+	"initialPrompt",
+	"labels",
+	"settings",
+	"workspaceId",
+	"notifyOnFinish",
+]);
+export const CREATE_AGENT_PLACEMENT_PARAMS = Object.freeze([
+	"relationship",
+	"workspace",
+	"cwd",
+	"worktreeName",
+	"branchName",
+	"baseBranch",
+	"refName",
+	"githubPrNumber",
+]);
+/** `settings` is `.strict()` in Paseo: these three, and nothing else. */
+const CREATE_AGENT_SETTINGS = Object.freeze(["modeId", "thinkingOptionId", "features"]);
+
+/**
+ * Argument-level gate for a Lead's or Supervisor's `create_agent`: does the call
+ * carry every parameter Paseo needs, only parameters Paseo reads, and does it
+ * keep the new agent in the creator's own workspace?
+ *
+ * Every problem is collected and reported in ONE refusal. A caller that is told
+ * about the workspace first and the missing title on the next try pays a round
+ * trip per defect, and these are all mechanical.
+ *
+ * Deliberately the LAST of the create_agent gates, like the mode gate: a call
+ * refused on authority grounds (a Supervisor creating a Peer, a Lead widening a
+ * Supervisor's domain) must hear about the authority, not about a title.
+ *
+ * `selfWorkspaceId` is the creator's own workspace, read from its Paseo state.
+ * It is only ever used to ALLOW an explicit `workspaceId` that equals it; when it
+ * cannot be resolved the explicit form is refused, because "the same workspace"
+ * is then unprovable and omitting the field is always provable.
+ */
+export function createAgentParamsBlockReason({
+	role,
+	args,
+	selfWorkspaceId,
+}: {
+	role: TeamRole;
+	args: unknown;
+	selfWorkspaceId?: string | null;
+}): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (typeof args !== "object" || args === null || Array.isArray(args)) {
+		return "Refusing create_agent: the call carries no arguments object. Pass { title, provider, initialPrompt, settings: { thinkingOptionId, modeId? }, labels } and leave workspaceId out.";
 	}
 	const rec = args as Record<string, unknown>;
-	const isolation =
-		typeof rec.isolation === "string" ? rec.isolation.trim() : "";
-	if (isolation !== "local" && isolation !== "worktree") {
-		return `create_workspace requires explicit isolation "local" or "worktree" (got "${isolation || "<missing>"}") — never rely on a daemon default.`;
+	const problems: string[] = [];
+
+	// Placement: the part that spams workspaces.
+	const placement = CREATE_AGENT_PLACEMENT_PARAMS.filter((key) => rec[key] !== undefined);
+	if (placement.length > 0) {
+		problems.push(
+			`${placement.map((key) => `"${key}"`).join(", ")} ${placement.length === 1 ? "is a placement parameter" : "are placement parameters"} — Paseo reads ${placement.length === 1 ? "it" : "them"} as "create a new workspace for this agent" or "detach it from its creator". Leave ${placement.length === 1 ? "it" : "them"} out: a seat created without any lands in YOUR workspace, nested under you`,
+		);
 	}
-	const markers = [rec.title, rec.worktreeSlug].filter(
-		(value): value is string => typeof value === "string",
+	if (rec.workspaceId !== undefined) {
+		const requested = typeof rec.workspaceId === "string" ? rec.workspaceId.trim() : "";
+		const own = typeof selfWorkspaceId === "string" ? selfWorkspaceId.trim() : "";
+		if (!requested) {
+			problems.push('"workspaceId" is empty — leave it out');
+		} else if (!own) {
+			problems.push(
+				`"workspaceId" ("${requested}") cannot be shown to be your own workspace, because this seat's own workspace could not be read from Paseo's state. Leave it out: omitting it always means your own workspace`,
+			);
+		} else if (requested !== own) {
+			problems.push(
+				`"workspaceId" is "${requested}", but this seat's workspace is "${own}". Everything in one job shares the creator's workspace — leave "workspaceId" out (or pass "${own}")`,
+			);
+		}
+	}
+
+	// Parameters Paseo does not read. A top-level `mode`, `model` or `thinking`
+	// is the common one: the first two are silently dropped, so the seat comes
+	// up on a mode or model nobody chose.
+	const misplaced = Object.keys(rec).filter(
+		(key) =>
+			!(CREATE_AGENT_PARAMS as readonly string[]).includes(key) &&
+			!(CREATE_AGENT_PLACEMENT_PARAMS as readonly string[]).includes(key),
 	);
-	if (isolation !== "worktree" && markers.some((value) => /review/i.test(value))) {
-		return 'An independent-reviewer workspace must use isolation "worktree" (a linked git worktree from the source repository). If the worktree cannot be created, report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE — never fall back to a local workspace.';
+	if (misplaced.length > 0) {
+		const hint = (key: string): string =>
+			key === "mode"
+				? "settings.modeId"
+				: key === "thinking"
+					? "settings.thinkingOptionId"
+					: key === "model"
+						? 'the model segment of "provider" ("<role-provider>/<model-id>")'
+						: key === "background"
+							? "nothing — agent-scoped creation is always background; use notifyOnFinish"
+							: "nowhere: Paseo ignores it";
+		problems.push(
+			`unknown parameter${misplaced.length === 1 ? "" : "s"} ${misplaced.map((key) => `"${key}" (belongs in ${hint(key)})`).join(", ")}. create_agent reads only: ${CREATE_AGENT_PARAMS.join(", ")}`,
+		);
 	}
-	return null;
+
+	// Required: Paseo refuses a call without these, and a caller that guessed at
+	// them would otherwise learn it from the daemon one tool call later.
+	const title = typeof rec.title === "string" ? rec.title.trim() : "";
+	if (!title) problems.push('"title" is required (a short label, at most 60 characters)');
+	else if (title.length > 60) problems.push(`"title" is ${title.length} characters; Paseo allows at most 60`);
+	const provider = typeof rec.provider === "string" ? rec.provider.trim() : "";
+	if (!/^[^/\s]+\/\S+$/.test(provider)) {
+		problems.push(
+			`"provider" must be "<role-provider>/<model-id>" with the model in it (got "${provider || "<missing>"}") — the model travels here, never in the prompt`,
+		);
+	}
+	if (typeof rec.initialPrompt !== "string" || rec.initialPrompt.trim() === "") {
+		problems.push('"initialPrompt" is required — it is the first message the new agent reads');
+	}
+	const settings = rec.settings;
+	if (settings !== undefined && (typeof settings !== "object" || settings === null || Array.isArray(settings))) {
+		problems.push('"settings" must be an object: { thinkingOptionId, modeId?, features? }');
+	} else {
+		const settingsRec = (settings ?? {}) as Record<string, unknown>;
+		const strays = Object.keys(settingsRec).filter((key) => !CREATE_AGENT_SETTINGS.includes(key));
+		if (strays.length > 0) {
+			problems.push(
+				`settings.${strays.join(", settings.")} ${strays.length === 1 ? "is" : "are"} not a create-time setting (Paseo accepts ${CREATE_AGENT_SETTINGS.join(", ")}); a model belongs in "provider"`,
+			);
+		}
+		const thinking = settingsRec.thinkingOptionId;
+		if (typeof thinking !== "string" || thinking.trim() === "") {
+			problems.push('"settings.thinkingOptionId" is required — name the routed level, or "off" for a model with no extended thinking');
+		}
+	}
+	if (rec.labels !== undefined) {
+		const labels = rec.labels;
+		const bad =
+			typeof labels !== "object" || labels === null || Array.isArray(labels)
+				? ["labels"]
+				: Object.entries(labels as Record<string, unknown>)
+						.filter(([, value]) => typeof value !== "string")
+						.map(([key]) => `labels.${key}`);
+		if (bad.length > 0) problems.push(`${bad.join(", ")} must be string values`);
+	}
+	if (rec.notifyOnFinish !== undefined && typeof rec.notifyOnFinish !== "boolean") {
+		problems.push('"notifyOnFinish" must be true or false');
+	}
+
+	if (problems.length === 0) return null;
+	return `Refusing create_agent: ${problems.join("; ")}.`;
+}
+
+/** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
+export function createAgentParamsBlockReasonForInput(
+	role: TeamRole,
+	input: unknown,
+	selfWorkspaceId?: string | null,
+): string | null {
+	return createAgentParamsBlockReason({ role, args: extractMcpArgs(input), selfWorkspaceId });
 }
 
 /**
@@ -3581,6 +3795,12 @@ export interface GovernanceContext extends SupervisorRecoveryContext {
 	promptTarget?: AgentOwnership | null;
 	/** This seat's own cluster; see selfCluster. Undefined disables the gate. */
 	cluster?: string | null;
+	/**
+	 * This seat's own Paseo workspace; see selfWorkspaceId. Only read by the
+	 * create_agent placement gate, which uses it to allow an explicit workspaceId
+	 * that names the creator's own workspace and to refuse every other one.
+	 */
+	selfWorkspaceId?: string | null;
 }
 
 export function mcpBlockReason(
@@ -3600,6 +3820,12 @@ export function mcpBlockReason(
 	// A browser tool is browser authority wherever it is registered; the
 	// Supervisor stays out (observation only, no page it could drive).
 	if (role === "lead" && isBrowserMcpTarget(target)) return null;
+	// Before the generic allowlist miss, so the Lead hears the rule and the route
+	// to take instead of "not in the allowlist".
+	if (role === "lead") {
+		const workspaceBlock = leadWorkspaceMutationBlockReason(target);
+		if (workspaceBlock) return workspaceBlock;
+	}
 	if (!matchesPaseoToolName(target, mcpAllowedTargets(role))) {
 		if (role === "supervisor") {
 			return `Supervisor may only call monitoring tools through MCP (list_agents, get_agent_status, get_agent_activity, send_agent_prompt) plus a gated lead-recovery create_agent. "${target}" is blocked — send an observation to the Lead instead.`;
@@ -3641,10 +3867,15 @@ export function mcpBlockReason(
 		// authority, not about a mode it was never going to get to use.
 		const modeBlock = createAgentModeBlockReason(input);
 		if (modeBlock) return modeBlock;
-	}
-	if (role === "lead" && matchesPaseoToolName(target, ["create_workspace"])) {
-		const argBlock = leadCreateWorkspaceBlockReason(input);
-		if (argBlock) return argBlock;
+		// After the mode gate for the same reason the mode gate is after the
+		// authority ones: the placement and parameter checks are mechanical, and a
+		// call that is wrong on authority should hear about that first.
+		const paramsBlock = createAgentParamsBlockReasonForInput(
+			role,
+			input,
+			context.selfWorkspaceId,
+		);
+		if (paramsBlock) return paramsBlock;
 	}
 	if (matchesPaseoToolName(target, ["send_agent_prompt"])) {
 		const ownershipBlock = sendAgentPromptBlockReason({
@@ -3758,12 +3989,6 @@ const V3_ALLOWED_FIELDS = new Set([
 	"PROJECT_ID",
 	"DISPOSITION",
 	"MODE",
-	"ASSIGNED_HOST_ID",
-	"ASSIGNED_PASEO_PROVIDER",
-	"ASSIGNED_MODEL",
-	"ASSIGNED_THINKING",
-	"WORKSPACE_REF",
-	"AGENT_REF",
 	"EXPECTED_BASE_SHA",
 	"ASSIGNED_CANDIDATE_SHA",
 	"OWNED_SCOPE",
@@ -3771,6 +3996,28 @@ const V3_ALLOWED_FIELDS = new Set([
 	"VERIFICATION_PROFILE",
 	"RETURN_CHANNEL",
 	...AUTHORITY_FIELDS,
+]);
+
+/**
+ * Routing facts a brief USED to carry: the host, provider, model and thinking
+ * level a Peer was routed to, and the workspace/agent it was handed. They are
+ * parameters of the create_agent CALL (`provider`, `settings`, `workspaceId`,
+ * and the new agent's own id), so repeating them in the message gave the Peer
+ * a second, unverifiable copy of something the daemon already knows — and gave a
+ * Lead one more place to let the two disagree.
+ *
+ * They are no longer written, but they are still READ without penalty: an
+ * allowlist miss fails the whole brief closed, so a Lead that still pastes one
+ * would otherwise turn a write brief into a read-only turn over a field that
+ * grants nothing. Skipped, never stored — nothing may ever read them back.
+ */
+const V3_IGNORED_FIELDS = new Set([
+	"ASSIGNED_HOST_ID",
+	"ASSIGNED_PASEO_PROVIDER",
+	"ASSIGNED_MODEL",
+	"ASSIGNED_THINKING",
+	"WORKSPACE_REF",
+	"AGENT_REF",
 ]);
 
 /**
@@ -3817,6 +4064,7 @@ function parseV3Brief(lines: string[]): ParsedTaskBrief {
 				continue;
 			}
 			const key = match[1];
+			if (V3_IGNORED_FIELDS.has(key)) continue;
 			if (!V3_ALLOWED_FIELDS.has(key)) {
 				malformed.push(`unknown V3 brief field "${key}"`);
 				continue;

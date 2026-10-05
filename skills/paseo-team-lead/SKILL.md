@@ -1,6 +1,6 @@
 ---
 name: paseo-team-lead
-description: Coordinate research, implementation, correction, and independent review through Paseo-managed Pi peers. Use when orchestrating multi-agent work on a repository — scoping, spawning read-only researchers, delegating an engineer to an isolated worktree, monitoring, and running an independent review on a stable candidate SHA.
+description: Coordinate research, implementation, correction, and independent review through Paseo-managed Pi peers. Use when orchestrating multi-agent work on a repository — scoping, spawning read-only researchers, delegating an engineer to an owned scope, monitoring, and running an independent review on a stable candidate SHA.
 ---
 
 # Paseo Team Lead Workflow
@@ -25,7 +25,7 @@ Create read-only Peers when independent work can run in parallel:
 - Documentation Researcher
 - Solution Challenger
 
-Read-only Peers may share the existing workspace. Send them a
+Every Peer works in YOUR workspace (see step 8 of the routing cycle). Send them a
 **V3 read-only brief** (`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`
 with `MODE: read-only` — see "Task brief template" below). Legacy
 `PASEO_TEAM_TASK_V1|V2` headers are parseable for diagnostics only: the
@@ -182,49 +182,57 @@ This is the exact failure mode the cluster config exists to prevent.
    `<role-provider>/<pi-provider>/<model-id>` (Paseo splits at the FIRST
    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
-8. Decide the workspace by DISPOSITION — this choice also decides how the
-   agent renders in Paseo, not only where it works.
-   - A read-only Peer that is not the independent reviewer (scout, researcher,
-     advisor, committee member) takes **no workspace at all**: omit
-     `workspaceId` entirely. It then stays in your workspace and Paseo draws it
-     nested under you, the way a native subagent looks. Creating a workspace for
-     such a Peer buys nothing — read-only Peers share a tree by design — and
-     costs you that nesting, because the Paseo tree is grouped by workspace: a
-     Peer in its own workspace renders detached from you even though its
-     `ParentAgentId` still points at you.
-   - A WRITER or the INDEPENDENT REVIEWER always gets its own workspace, and the
-     detached rendering is the price of isolation, not a defect.
-   Worktree isolation is required for
-   writers AND is a hard invariant for the independent reviewer: a reviewer
-   workspace is ALWAYS a git worktree created from the source repository at
-   the exact candidate SHA — never `local` isolation, a standalone clone, or
-   a new project. If the worktree cannot be created, report
-   `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE`; there is no fallback (the
-   reviewer wrapper mechanically rejects non-worktree workspaces with
-   `REVIEW_WORKSPACE_NOT_WORKTREE`).
-   Local MCP `create_workspace` calls MUST pass an explicit
-   `isolation: "local" | "worktree"` (the policy extension rejects a
-   missing/invalid value), and a reviewer workspace MUST carry the naming
-   convention `title: "review:<TASK_ID>"` (or a `worktreeSlug` containing
-   `review`) with `isolation: "worktree"` — the policy extension blocks a
-   review-marked workspace that requests local isolation.
-9. Call `create_agent` with the exact provider string, the runtime settings
-   under `settings`: `{ thinkingOptionId, modeId }`, **and**
-   `labels: { "team.cluster": "<your own cluster>" }`. `modeId` is REQUIRED on
-   every `claude-*` route and goes inside `settings` — a top-level `mode` is
-   ignored (see "Every `claude-*` agent you create needs `settings.modeId`").
-   NEVER omit the model to inherit a daemon default.
+8. **Leave the workspace alone — one job, one workspace.** Every agent of the
+   job, whatever its disposition, lives in the workspace you were started in,
+   and `create_agent` puts it there when you pass no placement at all: Paseo
+   draws the new seat nested under you, the way a native subagent looks. So
+   there is no workspace to decide, create or archive — the policy refuses
+   `create_workspace` and `archive_workspace` for a Lead, and refuses a
+   `create_agent` that carries `workspaceId` (unless it is your own),
+   `workspace`, `relationship`, `cwd`, `worktreeName`, `branchName`,
+   `baseBranch`, `refName` or `githubPrNumber`. Each of those is Paseo's way of
+   minting a NEW workspace or detaching the agent, and a Lead that used them
+   left a trail of workspaces nobody could tell apart.
+   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0),
+     not by a tree of its own: one writer per scope, enforced before it exists.
+   - The **independent Reviewer** still reviews a detached checkout of the exact
+     candidate SHA, and still never touches the Engineer's tree — it makes that
+     checkout itself with `git worktree add --detach <path> <candidate-sha>`
+     inside your workspace and runs the wrapper against it. The wrapper checks
+     the git fact (`REVIEW_WORKSPACE_NOT_WORKTREE`), not a Paseo workspace, so
+     nothing about it needs a workspace of its own. If the Reviewer cannot make
+     the worktree it reports `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — there is
+     no fallback to the primary checkout.
+9. Call `create_agent` with exactly the parameters Paseo reads, and nothing
+   else — the policy refuses the rest, and says which parameter it dislikes:
+
+   ```jsonc
+   create_agent({
+     title: "<short label, at most 60 chars>",
+     provider: "<role-provider>/<model-ref>",      // the model lives HERE, exact
+     initialPrompt: "<the brief, step 'Task brief template'>",
+     settings: { thinkingOptionId: "<routed level>",   // or "off"
+                 modeId: "auto" },                     // claude-* routes only
+     labels: { "team.cluster": "<your own cluster>" }
+     // no workspaceId, workspace, relationship, cwd, worktree*, mode, model, thinking
+   })
+   ```
+
+   Routing is a parameter of this call and nowhere else. The model, thinking
+   level, mode and workspace are NOT repeated in the message the Peer reads:
+   they have one source of truth, the daemon, and `get_agent_status` is how you
+   read them back. `modeId` is REQUIRED on every `claude-*` route and goes inside
+   `settings` — a top-level `mode` is ignored (see "Every `claude-*` agent you
+   create needs `settings.modeId`"). NEVER omit the model to inherit a daemon
+   default.
    The `team.cluster` label is REQUIRED and is checked against YOUR OWN
    cluster: omit it and `create_agent` is refused with
    `Refusing create_agent: labels["team.cluster"] is required and must be
    "<value>"` — the message names the exact value to pass. Get your own value
    from `pteam env list` / `PASEO_TEAM_CLUSTER`, or read it off any Peer you
-   already created. Without this label a reviewer worktree Peer (different
-   `workspaceId` AND `cwd` from you by construction) reads as a FOREIGN
-   cluster to every cluster-scoped rule: `SUPERVISOR_DECISION` verdicts,
-   the scope-lease board. A label naming a
-   DIFFERENT cluster than your own is refused too — that would be stamping a
-   new seat into another project's authority, not a typo to silently correct.
+   already created. A label naming a DIFFERENT cluster than your own is refused
+   too — that would be stamping a new seat into another project's authority,
+   not a typo to silently correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
     `runtimeInfo.thinkingOptionId` until startup identity is populated. Missing
     identity during the bounded startup window is
@@ -259,24 +267,23 @@ local one. In the commands below, `<id>` is the HOST_ID from
    same three-state reading of thinking as local step 5: unverifiable is not a
    pass, but a model that reports no extended thinking is routable at
    `thinking: off`).
-6. Locate or create the workspace ON THE REMOTE host — a Windows workspace
-   ID has no meaning on the Mac. Note the asymmetry with the local cycle: remote
-   `run` REQUIRES `--workspace` for every disposition, because a remote agent
-   without one would run in the CONTROLLER's cwd. So a remote read-only Peer
-   cannot stay nested under you the way a local one does — it is still your
-   subagent (`ParentAgentId` is unchanged), it simply renders in its own
-   workspace. That is a property of remote execution, not something to work
-   around:
+6. **One workspace for the whole job, ON THE REMOTE host.** A local workspace
+   ID has no meaning there, and the CLI — unlike the local MCP — has no "my own
+   workspace" to default to: a `run` without `--workspace` would run in the
+   CONTROLLER's cwd. So the wrapper needs one workspace id, and it is the same id
+   for every agent of the job, Writer and Reviewer included:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
-   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --isolation local|worktree --title <t>`
-   For an independent-reviewer workspace, pass
-   `--disposition independent-reviewer`: the wrapper then forces
-   `--isolation worktree` and rejects `--isolation local`
-   (`REVIEW_ISOLATION_INVALID`). If worktree creation fails on the remote
-   host, report `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — never fall back to
-   a local/standalone workspace for review.
+   `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --title <t>`
+   `workspace-create` is "ensure": it lists what is already open and REUSES the
+   workspace on that path (`reused: true`), creating one only when there is none —
+   so calling it again can never leave a second one behind. It creates only local
+   workspaces: `--isolation worktree` is refused (`WORKSPACE_ISOLATION_REFUSED`),
+   and the old `--disposition` flag is gone. The Reviewer makes its own detached
+   `git worktree add` inside this workspace, exactly as on the local host.
 7. Create the agent on the remote daemon (background by default; add
-   `--wait-timeout <dur>` to wait for completion):
+   `--wait-timeout <dur>` to wait for completion). The route is flags, not
+   message text — provider/model, thinking, mode, workspace and cluster all go
+   on the command, and none of them is repeated in the brief:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
    The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
    `run` requires a `team.cluster` label the same way the local `create_agent`
@@ -331,9 +338,10 @@ Hard rules for a mixed fleet:
   on Claude. Take the value from the route, never from habit.
 - Keep ONE Lead per project, on ONE family, for the life of that project.
   Peers may be mixed freely; the Lead is the deterministic part.
-- `ASSIGNED_PASEO_PROVIDER` in the brief records the family you actually used,
-  and `OBSERVED_PROVIDER` must match it. A Peer that reports a different family
-  than the brief assigned is an AUTHORITY_MISMATCH, not a detail.
+- The family you route to is the `provider` you pass to `create_agent`, and
+  `get_agent_status` reports what actually came up. They must match; a seat on a
+  different family than you asked for is `BLOCKED: MODEL_RESOLUTION_MISMATCH`,
+  not a detail.
 - Claude Peers cannot spawn Claude subagents (the `Task` tool is denied for
   every role). Fan-out is always yours, through Paseo.
 - **Every `claude-*` agent you create needs `settings.modeId`.** A permission
@@ -609,11 +617,10 @@ this is gated on `PASEO_TEAM_TOPOLOGY`, for the same reason
 `PROMPT_TARGET_IS_PEER` is not — it asks a question prior to jurisdiction.
 
 Separation must be **proven**: if either cluster cannot be derived, nothing is
-restricted. Your own subagents are always reachable, and a reviewer worktree —
-which derives a different `workspaceId`/`cwd` by construction — is no
-exception: your own `create_agent` is REQUIRED to carry a matching
-`labels: { "team.cluster": ... }` (step 9 of LOCAL_CREATE_CYCLE / step 7 of
-REMOTE_CREATE_CYCLE above), so it shares your cluster by construction, not by
+restricted. Your own subagents are always reachable: your own `create_agent` is
+REQUIRED to carry a matching `labels: { "team.cluster": ... }` (step 9 of
+LOCAL_CREATE_CYCLE / step 7 of REMOTE_CREATE_CYCLE above) and lands in your own
+workspace, so every seat you create shares your cluster by construction, not by
 a follow-up step. That leaves the manual case for a seat you did not create —
 most often another Supervisor, or a seat a Human created directly: if two such
 seats genuinely belong together, the Human sets the same `team.cluster` on
@@ -664,12 +671,13 @@ After implementation:
    candidate is automatically refused by the independent reviewer and must be
    corrected in the same Engineer session before review.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
-   `DISPOSITION: independent-reviewer`) in a **fresh git worktree** created
-   from the source repository and checked out at the exact candidate SHA —
-   not the Engineer's own working tree, and not a standalone clone or new
-   project (workspace `--isolation worktree`; remote path:
-   `workspace-create ... --disposition independent-reviewer`). If the
-   worktree cannot be created, this step is
+   `DISPOSITION: independent-reviewer`) like any other Peer — in your workspace,
+   no placement parameter. Its independence is a **detached git worktree** at the
+   exact candidate SHA that the Reviewer makes itself (`git worktree add
+   --detach <path> <candidate-sha>`, from the source repository) and reviews
+   from — not the Engineer's own working tree, and not a standalone clone or new
+   project. The same on a remote host; there is no workspace to create for it.
+   If the worktree cannot be made, this step is
    `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — no fallback. Route the Reviewer
    with `MODEL_CLASS: REVIEW_HIGH` and load `paseo-ocr-reviewer`.
 3. Require the Reviewer to run `git rev-parse HEAD`, `git status --porcelain`,
@@ -737,7 +745,7 @@ After implementation:
    to the original Engineer (as a full V3 brief so write authority is re-granted).
    The Engineer creates a **new** commit SHA without amend/force-push, and the
    new candidate is reviewed again from a fresh clean workspace.
-7. Preserve the existing one-writer, fresh-reviewer-workspace, exact-SHA, Lead
+7. Preserve the existing one-writer, fresh-reviewer-worktree, exact-SHA, Lead
    acceptance, and Human merge/deploy invariants.
 
 ## Completion
@@ -829,13 +837,6 @@ PROJECT_ID: <project>
 DISPOSITION: <see list below>
 MODE: write | read-only
 
-ASSIGNED_HOST_ID: <host-id>              # from cluster-routing.local.json
-ASSIGNED_PASEO_PROVIDER: <pi-supervisor|pi-lead|pi-peer|claude-supervisor|claude-lead|claude-peer>
-ASSIGNED_MODEL: <pi-provider>/<model-id> | <claude-model-id>   # exact, from list_models
-ASSIGNED_THINKING: <off|minimal|low|medium|high|xhigh|max>     # claude: off|low|medium|high|xhigh|max|ultracode
-WORKSPACE_REF: <worktree-or-workspace>
-AGENT_REF:
-
 EXPECTED_BASE_SHA: <sha>                 # writer preconditions
 ASSIGNED_CANDIDATE_SHA: <sha>            # reviewer only; exact
 
@@ -886,16 +887,18 @@ branches therefore MUST be named `agent/<TASK_ID>`. Branch protection on
 the shared remote stays mandatory; the extension is a guard, not the full
 security boundary.
 
-The `ASSIGNED_*` fields are evidence for the peer — the model was already
-chosen by you at `create_agent` time. The peer echoes them back and, when
-its tools let it see a mismatch, escalates `MODEL_MISMATCH`. The peer never
-reports invented `OBSERVED_*` values: **you own observed routing evidence**
-(via `get_agent_status → snapshot.runtimeInfo`), and a missing/unverifiable
-runtime identity is a failure, not a pass.
+The brief carries authority and scope, never routing. There is no model,
+provider, thinking, host, workspace or agent field in it: those are parameters
+of the `create_agent` call, where the daemon applies them, and **you own the
+observed routing evidence** (via `get_agent_status → snapshot.runtimeInfo`). A
+missing/unverifiable runtime identity is a failure, not a pass. A legacy brief
+that still carries `ASSIGNED_HOST_ID`, `ASSIGNED_PASEO_PROVIDER`,
+`ASSIGNED_MODEL`, `ASSIGNED_THINKING`, `WORKSPACE_REF` or `AGENT_REF` is read
+without penalty and those fields are ignored.
 
 Do not ask for a candidate SHA unless you granted `COMMIT_AUTHORITY:
-allowed`; ask for a stable workspace snapshot (`WORKSPACE_REF` + diff
-summary + clean-state evidence) instead, and do NOT route that snapshot to
+allowed`; ask for a stable snapshot (the changed paths + diff summary +
+clean-state evidence) instead, and do NOT route that snapshot to
 a cross-host reviewer until an integration owner has created a commit.
 Cross-host review requires granting both `COMMIT` and `PUSH_TASK_BRANCH`.
 
@@ -909,6 +912,13 @@ see step 6 of Review, and `templates/TASK_BRIEF_V3.md` for the standard body.
 A brief must not smuggle in a verdict. Give the Peer the objective,
 constraints and evidence — not the answer. Peer has the right to
 `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, or `BLOCKED`.
+
+**Write the body as a person writing to a colleague.** The authority block is
+the one machine-read part; everything after it is you talking. Say what you need
+and why, what you already know, what to leave alone and what you would like
+back, in plain sentences addressed to the Peer — not a form with codes the Peer
+has to decode. The same goes for anything you send afterwards (a correction, an
+answer to its question): reply the way you would to a teammate who asked you.
 
 ## Peer output contract
 
@@ -934,15 +944,15 @@ OPEN_QUESTIONS:
 HANDOFF:
 ```
 
-The peer ECHOES its `ASSIGNED_*` fields back when useful for traceability,
-but reports NO `OBSERVED_*` values: observed runtime identity
-(host/provider/model/thinking) belongs to YOU (the runtime-identity check that closes the routing cycle: LOCAL_CREATE_CYCLE step 10, REMOTE_CREATE_CYCLE step 8). A
-peer that invents observed values is a protocol violation, the same class
-as a claim without file/command/test evidence.
+The report is the Peer telling you, as a colleague would, what it did and found;
+the list above is what it has to cover, not a form it fills in. Routing is not
+the Peer's to report: observed runtime identity (host/provider/model/thinking)
+belongs to YOU (the runtime-identity check that closes the routing cycle:
+LOCAL_CREATE_CYCLE step 10, REMOTE_CREATE_CYCLE step 8). A peer that invents
+observed values is a protocol violation, the same class as a claim without
+file/command/test evidence.
 
 Valid escalations: `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, `BLOCKED`,
-`MODEL_MISMATCH` (runtime identity differs from the `ASSIGNED_*` fields in
-the brief — the peer must never change its model itself),
 `AUTHORITY_MISMATCH`, `SCOPE_CONFLICT`.
 
 Treat claims without file/command/test evidence as opinions, not evidence.

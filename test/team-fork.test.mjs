@@ -350,6 +350,40 @@ test("an underivable source cluster omits the label rather than lying about it",
 	});
 });
 
+test("a fork stays in its source's workspace: a cwd that names another directory is refused", async () => {
+	await withState(async ({ agentsRoot, dir }) => {
+		const before = readdirSync(dir).length;
+		let imported = false;
+		await assert.rejects(
+			forkAgent(
+				{
+					agentId: SOURCE,
+					reason: "change-host",
+					disposition: "lead",
+					provider: "pi-lead/anthropic/claude-opus-5",
+					cwd: "D:\\elsewhere",
+				},
+				{ role: "lead", agentsRoot, runPaseo: async () => { imported = true; return { id: FORKED }; } },
+			),
+			/FORK_CWD_MISMATCH/,
+		);
+		assert.equal(imported, false, "nothing was imported");
+		assert.equal(readdirSync(dir).length, before, "and no session file was written");
+
+		// The same directory, spelled differently, is the same directory.
+		await forkAgent(
+			{
+				agentId: SOURCE,
+				reason: "change-host",
+				disposition: "lead",
+				provider: "pi-lead/anthropic/claude-opus-5",
+				cwd: "d:/repo/",
+			},
+			{ role: "lead", agentsRoot, runPaseo: async () => ({ id: FORKED }) },
+		);
+	});
+});
+
 test("a blocked fork never touches the disk", async () => {
 	await withState(async ({ agentsRoot, dir }) => {
 		const before = readdirSync(dir).length;

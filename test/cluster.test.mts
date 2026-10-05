@@ -389,11 +389,10 @@ test("coordinator traffic inside one cluster is still allowed — that is the po
 });
 
 test("a seat's OWN subagent is reachable even from another cluster", () => {
-	// Regression guard for the reviewer flow. leadCreateWorkspaceBlockReason
-	// MANDATES that a reviewer workspace is a linked worktree, which gives that
-	// Peer a different cwd and workspaceId from its Lead by construction. If the
-	// cluster test ran before the parentage test, the pack would block the very
-	// flow it requires.
+	// Regression guard: a Lead's own Peer may derive a different cluster than the
+	// Lead (an agent that predates one-workspace-per-job, or one in another cwd).
+	// If the cluster test ran before the parentage test, the pack would block a
+	// Lead from prompting its own subagent.
 	const ownPeerElsewhere = {
 		agentId: PEER_A,
 		parentAgentId: LEAD_A,

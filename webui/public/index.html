@@ -4,11 +4,11 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Bảng điều khiển nhóm agent</title>
-		<link rel="stylesheet" href="/style.css" />
+			<link rel="stylesheet" href="/style.css" />
 	</head>
 	<body>
 		<header class="topbar">
-			<div class="brand">Nhóm agent</div>
+			<div class="brand">Paseo Team</div>
 			<nav id="tabs" aria-label="Điều hướng chính">
 				<button data-tab="home" class="active">Trang chủ</button>
 				<button data-tab="graph">Nhóm agent</button>
@@ -40,26 +40,18 @@
 				</div>
 
 				<div class="grid">
-					<article class="card stat">
+					<button type="button" class="card stat" data-goto="graph" title="Agent đang thực sự chạy ngay lúc này. Bấm để xem.">
 						<h2>Đang làm việc</h2>
 						<div class="stat-value" id="stat-running">–</div>
-						<p class="stat-hint">Agent đang thực sự chạy ngay lúc này.</p>
-					</article>
-					<article class="card stat">
-						<h2>Chờ bạn duyệt</h2>
-						<div class="stat-value" id="stat-permits">–</div>
-						<p class="stat-hint">Agent dừng lại vì cần bạn đồng ý.</p>
-					</article>
-					<article class="card stat">
+					</button>
+					<button type="button" class="card stat" data-goto="graph" title="Agent dừng giữa chừng, cần xem lại. Bấm để xem.">
 						<h2>Gặp lỗi</h2>
 						<div class="stat-value" id="stat-errors">–</div>
-						<p class="stat-hint">Agent dừng giữa chừng, cần xem lại.</p>
-					</article>
-					<article class="card stat">
+					</button>
+					<button type="button" class="card stat" data-goto="graph" title="Gồm cả agent đang rảnh. Bấm để xem.">
 						<h2>Tổng số agent</h2>
 						<div class="stat-value" id="stat-total">–</div>
-						<p class="stat-hint">Gồm cả agent đang rảnh.</p>
-					</article>
+					</button>
 				</div>
 
 				<article class="card" id="setup-card">
@@ -88,17 +80,18 @@
 					<label class="check" data-advanced>
 						<input type="checkbox" id="graph-all" /> Hiện cả agent đã lưu trữ
 					</label>
+					<label class="check hidden" id="graph-project-wrap">
+						Dự án
+						<select id="graph-project"><option value="">tất cả</option></select>
+					</label>
 					<label class="check" data-advanced>
-						Phạm vi
+						Phạm vi quản (domain)
 						<select id="graph-domain"><option value="">tất cả</option></select>
 					</label>
 					<span id="graph-meta" class="meta"></span>
 				</div>
 
-				<p class="lead-in">
-					Sơ đồ đọc từ trái sang phải: người ở bên trái là người giao việc,
-					người bên phải là người nhận việc.
-				</p>
+				<p class="lead-in" id="graph-hint"></p>
 
 				<div class="graph-wrap" id="diagram-wrap">
 					<svg id="graph" role="img" aria-label="Sơ đồ ai giao việc cho ai"></svg>
@@ -110,9 +103,9 @@
 
 				<div id="list-wrap" class="hidden"><div id="agent-list"></div></div>
 
-				<div id="graph-jurisdiction" class="notice hidden"></div>
+				<div id="graph-jurisdiction" class="notice hidden" data-advanced></div>
 
-				<div id="graph-cluster-mismatch" class="notice hidden"></div>
+				<div id="graph-cluster-mismatch" class="notice hidden" data-advanced></div>
 
 				<div id="graph-degraded" class="notice hidden"></div>
 
@@ -120,7 +113,7 @@
 					<span><i class="swatch role-supervisor"></i>Giám sát</span>
 					<span><i class="swatch role-lead"></i>Trưởng nhóm</span>
 					<span><i class="swatch role-peer"></i>Thành viên</span>
-					<span><i class="swatch role-unknown"></i>Chưa rõ vai trò</span>
+					<span><i class="swatch role-unknown"></i>Agent khác</span>
 					<span><i class="line solid"></i>giao việc</span>
 					<span><i class="line forked"></i>bàn giao (fork phiên)</span>
 				</div>
@@ -153,8 +146,8 @@
 				</div>
 				<p class="lead-in" id="role-hint"></p>
 				<textarea id="prompt-editor" spellcheck="false" aria-label="Mô tả vai trò"></textarea>
-				<article class="card">
-					<h2>Quyền chung của vai trò (chỉ xem)</h2>
+				<details class="card" id="env-card">
+					<summary>Quyền chung của vai trò (chỉ xem)</summary>
 					<div class="body">
 						<p class="hint">
 							Đây là những gì một vai trò được phép làm nói chung. Nó do file
@@ -163,7 +156,7 @@
 						</p>
 						<div id="env-table"></div>
 					</div>
-				</article>
+				</details>
 			</section>
 
 			<!-- ------------------------------------------------------------ -->

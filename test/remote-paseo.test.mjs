@@ -24,6 +24,8 @@ import {
 	validateThinking,
 	waitForRuntimeIdentity,
 	extractRuntimeIdentity,
+	findWorkspaceByPath,
+	parseWorkspaceList,
 } from "../scripts/remote-paseo.mjs";
 import { loadClusterConfig } from "../scripts/model-routing.mjs";
 
@@ -482,81 +484,35 @@ const EP = "https://app.paseo.sh/#offer=tok";
 }
 
 {
-	const t = "buildArgv: workspace-create validates --isolation values";
-	expectRemoteError("USAGE", () =>
-		buildArgv(
-			"workspace-create",
-			{ path: "/Users/admin/repo", isolation: "worktee" },
-			EP,
-		),
-	);
-	assert.ok(
-		buildArgv(
-			"workspace-create",
-			{ path: "/Users/admin/repo", isolation: "worktree" },
-			EP,
-		).includes("worktree"),
-		t,
-	);
+	const t = "buildArgv: workspace-create is local-only — one job, one workspace";
+	// No isolation named: local, and said so explicitly.
+	const argv = buildArgv("workspace-create", { path: "/Users/admin/repo" }, EP);
+	assert.equal(argv[argv.indexOf("--isolation") + 1], "local", t);
+	// A worktree workspace is a SECOND workspace beside the job's own: refused by
+	// name, so a Lead sees why instead of a generic usage error.
+	for (const isolation of ["worktree", "worktee"]) {
+		expectRemoteError("WORKSPACE_ISOLATION_REFUSED", () =>
+			buildArgv("workspace-create", { path: "/Users/admin/repo", isolation }, EP),
+		);
+	}
+	// The old reviewer flag no longer exists: a Reviewer makes its own git
+	// worktree inside the shared workspace, so there is nothing to force.
+	expectRemoteError("USAGE", () => validateFlags("workspace-create", { path: "/p", disposition: "independent-reviewer" }));
 }
 
 {
-	const t = "buildArgv: independent-reviewer disposition forces worktree isolation";
-	// Unspecified isolation defaults to worktree for a reviewer workspace.
-	const argv = buildArgv(
-		"workspace-create",
-		{
-			path: "/Users/admin/repo",
-			disposition: "independent-reviewer",
-			title: "review-workspace",
-		},
-		EP,
-	);
-	const isolationIndex = argv.indexOf("--isolation");
-	assert.ok(isolationIndex !== -1 && argv[isolationIndex + 1] === "worktree", t);
-	// Explicit worktree is accepted unchanged.
-	assert.ok(
-		buildArgv(
-			"workspace-create",
-			{
-				path: "/Users/admin/repo",
-				disposition: "independent-reviewer",
-				isolation: "worktree",
-			},
-			EP,
-		).includes("worktree"),
-		t,
-	);
-	// Local isolation for a reviewer is a hard error, never a silent fallback.
-	expectRemoteError("REVIEW_ISOLATION_INVALID", () =>
-		buildArgv(
-			"workspace-create",
-			{
-				path: "/Users/admin/repo",
-				disposition: "independent-reviewer",
-				isolation: "local",
-			},
-			EP,
-		),
-	);
-	// Non-reviewer dispositions do not force isolation.
-	assert.ok(
-		!buildArgv(
-			"workspace-create",
-			{ path: "/Users/admin/repo", disposition: "engineer" },
-			EP,
-		).includes("--isolation"),
-		t,
-	);
-	// A misspelled disposition fails closed instead of silently skipping the
-	// reviewer worktree enforcement.
-	expectRemoteError("USAGE", () =>
-		buildArgv(
-			"workspace-create",
-			{ path: "/Users/admin/repo", disposition: "independent-reviwer" },
-			EP,
-		),
-	);
+	const t = "workspace lookup: the workspace already open on the path is the one to reuse";
+	const rows = [
+		{ workspaceId: "w-1", cwd: "D:\\Code\\Repo\\", isolation: "local" },
+		{ workspaceId: "w-2", cwd: "/Users/admin/repo", isolation: "worktree" },
+		{ workspaceId: "w-3", cwd: "/Users/admin/other", isolation: "local" },
+	];
+	assert.equal(findWorkspaceByPath(rows, "d:/code/repo")?.workspaceId, "w-1", `${t}: separators and drive case fold`);
+	assert.equal(findWorkspaceByPath(rows, "/Users/admin/other/")?.workspaceId, "w-3", `${t}: trailing slash`);
+	assert.equal(findWorkspaceByPath(rows, "/Users/admin/repo"), null, `${t}: a worktree row is a private tree, never the shared one`);
+	assert.equal(findWorkspaceByPath(rows, ""), null, t);
+	assert.deepEqual(parseWorkspaceList("not json"), [], t);
+	assert.deepEqual(parseWorkspaceList(JSON.stringify({ data: [{ workspaceId: "w" }] })), [{ workspaceId: "w" }], t);
 }
 
 {
@@ -1211,39 +1167,63 @@ assert.deepEqual(
 }
 
 {
-	const t =
-		"e2e: reviewer worktree creation failure → REVIEW_WORKTREE_UNAVAILABLE, not CLI_ERROR";
+	const t = "e2e: workspace-create reuses the workspace already open on the path";
 	const r = runWrapper(
-		[
-			"workspace-create",
-			"--host-id",
-			"mac-review",
-			"--path",
-			"/Users/admin/repo",
-			"--disposition",
-			"independent-reviewer",
-		],
-		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1" } },
+		["workspace-create", "--host-id", "mac-review", "--path", "/Users/admin/repo"],
+		{
+			extraEnv: {
+				FAKE_PASEO_WORKSPACES: JSON.stringify([
+					{ workspaceId: "wks-job", project: "repo", name: "repo", isolation: "local", cwd: "/Users/admin/repo/" },
+				]),
+			},
+		},
 	);
-	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
-	assert.equal(r.json.ok, false, t);
-	assert.equal(r.json.code, "REVIEW_WORKTREE_UNAVAILABLE", t);
-	assert.match(r.json.message, /REVIEW_WORKTREE_UNAVAILABLE/, t);
-	assert.match(r.json.message, /never fall back/i, t);
+	assert.equal(r.code, 0, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.reused, true, t);
+	assert.equal(r.json.data.workspaceId, "wks-job", t);
+	// FAKE_PASEO_WORKSPACE_CREATE_FAIL would have failed a real create: reaching
+	// success with it set proves nothing was created.
+	const r2 = runWrapper(
+		["workspace-create", "--host-id", "mac-review", "--path", "/Users/admin/repo"],
+		{
+			extraEnv: {
+				FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1",
+				FAKE_PASEO_WORKSPACES: JSON.stringify([{ workspaceId: "wks-job", isolation: "local", cwd: "/Users/admin/repo" }]),
+			},
+		},
+	);
+	assert.equal(r2.code, 0, `${t}: no create was attempted (got ${r2.code}: ${r2.stdout})`);
+	assert.equal(r2.json.reused, true, t);
 }
 
 {
-	const t =
-		"e2e: non-reviewer workspace-create failure stays CLI_ERROR";
+	const t = "e2e: workspace-create creates one only when the path has none";
 	const r = runWrapper(
-		[
-			"workspace-create",
-			"--host-id",
-			"mac-review",
-			"--path",
-			"/Users/admin/repo",
-		],
-		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1" } },
+		["workspace-create", "--host-id", "mac-review", "--path", "/Users/admin/repo", "--title", "job"],
+		{ extraEnv: { FAKE_PASEO_WORKSPACES: JSON.stringify([{ workspaceId: "wks-x", isolation: "local", cwd: "/Users/admin/elsewhere" }]) } },
+	);
+	assert.equal(r.code, 0, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.reused, undefined, t);
+	assert.deepEqual(r.json.data.argv.slice(0, 2), ["workspace", "create"], t);
+	assert.ok(r.json.data.argv.includes("local"), t);
+}
+
+{
+	const t = "e2e: a workspace listing that FAILED is not 'there is none'";
+	const r = runWrapper(
+		["workspace-create", "--host-id", "mac-review", "--path", "/Users/admin/repo"],
+		{ extraEnv: { FAKE_PASEO_WORKSPACE_LS_FAIL: "1" } },
+	);
+	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
+	assert.equal(r.json.code, "CLI_ERROR", t);
+	assert.match(r.json.message, /not creating a second one blind/, t);
+}
+
+{
+	const t = "e2e: workspace-create failure stays CLI_ERROR";
+	const r = runWrapper(
+		["workspace-create", "--host-id", "mac-review", "--path", "/Users/admin/repo"],
+		{ extraEnv: { FAKE_PASEO_WORKSPACE_CREATE_FAIL: "1", FAKE_PASEO_WORKSPACES: "[]" } },
 	);
 	assert.equal(r.code, 2, `${t} (got ${r.code}: ${r.stdout})`);
 	assert.equal(r.json.code, "CLI_ERROR", t);

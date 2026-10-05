@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildGraph, collectGraph, describeClusterMismatches, inferFamily, inferRole, inferRoleProvider, inferSeat, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
+import { buildGraph, collectGraph, describeClusterMismatches, inferFamily, inferRole, inferRoleProvider, inferRuntime, inferSeat, normalizePermits, parsePeerMessage } from "../cli/lib/graph.mjs";
 import * as cache from "../cli/lib/graph-cache.mjs";
 
 // --- role inference --------------------------------------------------------
@@ -19,6 +19,16 @@ assert.equal(inferRole("claude-supervisor/claude-opus-5"), "supervisor");
 assert.equal(inferFamily("claude-lead/claude-opus-5"), "claude");
 assert.equal(inferFamily("pi-lead/Minnyat/deepseek-v4-flash"), "pi");
 assert.equal(inferFamily("claude"), null);
+
+// The runtime is the answer for ANY provider Paseo can run, so a sub-agent that is
+// not one of the pack's role providers still says what is executing it.
+assert.equal(inferRuntime("pi-peer/Minnyat/gpt-5.4"), "pi");
+assert.equal(inferRuntime("claude-lead/claude-opus-5"), "claude");
+assert.equal(inferRuntime("claude"), "claude", "a plain Claude Code agent is the same runtime as a claude-* seat");
+assert.equal(inferRuntime("codex/gpt-5.4"), "codex");
+assert.equal(inferRuntime("OpenCode"), "opencode", "lower-cased, like every other provider reading here");
+assert.equal(inferRuntime(""), null);
+assert.equal(inferRuntime(undefined), null);
 assert.deepEqual(inferRoleProvider("claude-peer/claude-fable-5"), { family: "claude", role: "peer", seat: null });
 assert.equal(inferRoleProvider("codex-peer"), null);
 assert.equal(inferRole(undefined), null);

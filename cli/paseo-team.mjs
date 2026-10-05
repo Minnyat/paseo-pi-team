@@ -28,11 +28,12 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, appendFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as cw from "./lib/config-walker.mjs";
-import { schemaForSection, withModelInventory, ROUTING_SECTIONS } from "./lib/config-schema.mjs";
+import { schemaForSection, withModelInventory, withPiModelCatalog, ROUTING_SECTIONS } from "./lib/config-schema.mjs";
 import {
 	applySeatsToPaseoConfig,
 	listSeats,
@@ -451,10 +452,55 @@ function resolveSection(section) {
 	return CONFIG_SECTIONS[section]();
 }
 
+/**
+ * A fingerprint of the file as it is on disk right now ("absent" when there is
+ * none). `config read` hands it out and `config write --rev` checks it, so a write
+ * can tell "the file I was shown" from "the file somebody changed since".
+ */
+function fileRev(path) {
+	if (!existsSync(path)) return "absent";
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+/**
+ * `{ "<provider>": ["<model-id>", ...] }` from pi's own models.json — the file pi
+ * reads its catalog from, so the form's choices are the ones pi can resolve.
+ * Never throws: no file, a corrupt one, or an unexpected shape is an empty
+ * catalog, and the fields it would have fed stay plain text boxes.
+ */
+function piModelCatalog() {
+	const doc = cw.readJsonOrNull(cw.piModelsPath());
+	const providers = doc && typeof doc === "object" ? doc.providers : null;
+	const catalog = {};
+	if (!providers || typeof providers !== "object") return catalog;
+	for (const [name, provider] of Object.entries(providers)) {
+		const models = Array.isArray(provider?.models) ? provider.models : [];
+		catalog[name] = models
+			.map((model) => (typeof model === "string" ? model : model?.id))
+			.filter((id) => typeof id === "string" && id !== "");
+	}
+	return catalog;
+}
+
 async function cmdConfigRead(section, rest = []) {
 	rejectUnknownFlags(rest, ["--no-discovery"]);
 	const path = resolveSection(section);
-	const data = cw.readJsonOrNull(path);
+	// Read the text ONCE and parse it here, instead of through readJsonOrNull: that
+	// returns null for a file that exists but does not parse, which the form then
+	// showed as "chưa tồn tại — lưu sẽ tạo mới" — and a Save would have replaced a
+	// file somebody could still have repaired.
+	const present = existsSync(path);
+	const text = present ? cw.readText(path) : null;
+	let data = null;
+	let invalid = null;
+	if (text !== null) {
+		try {
+			data = JSON.parse(text);
+		} catch (error) {
+			invalid = { message: String(error?.message ?? error) };
+		}
+	}
+	const rev = fileRev(path);
 	// The form schema rides along with the data: the WebUI renders fields the
 	// CLI described and nothing else, so a form is reproducible from a terminal.
 	let schema = schemaForSection(section);
@@ -467,26 +513,42 @@ async function cmdConfigRead(section, rest = []) {
 		inventory = await discoverModels();
 		schema = withModelInventory(schema, inventory.byProvider);
 	}
+	if (schema && section === "pi-settings") schema = withPiModelCatalog(schema, piModelCatalog());
 	const extras = {
 		...(schema ? { schema } : {}),
 		...(inventory ? { inventory: { providers: Object.keys(inventory.byProvider), degraded: inventory.degraded } } : {}),
 	};
-	if (data === null) {
-		json({ exists: false, path, data: {}, ...extras });
+	if (invalid) {
+		json({ exists: true, path, rev, data: {}, invalid, raw: text, ...extras });
 		return;
 	}
-	json({ exists: true, path, data, ...extras });
+	if (data === null && !present) {
+		json({ exists: false, path, rev, data: {}, ...extras });
+		return;
+	}
+	json({ exists: true, path, rev, data, ...extras });
 }
 
-function cmdConfigWrite(section) {
+function cmdConfigWrite(section, rest = []) {
+	rejectUnknownFlags(rest, ["--rev"]);
 	const path = resolveSection(section);
+	const rev = flagValue(rest, "--rev");
 	const content = readStdin();
+	// Optimistic concurrency. Pi rewrites its own settings.json (the last-seen
+	// changelog version, a model picked with /model, the theme), and an editor that
+	// loaded the file an hour ago would write its stale copy straight over those.
+	// With --rev the write is refused if the file is no longer the one that was read.
+	if (rev !== undefined && fileRev(path) !== rev) {
+		fail(
+			`CONFIG_CHANGED: ${path} was modified after it was read, so this write would overwrite those changes. Reload it, redo the edit, and save again.`,
+		);
+	}
 	try {
 		cw.atomicWriteJson(path, content);
 	} catch (e) {
 		fail(`invalid JSON or write failed for ${path}: ${e.message}`);
 	}
-	json({ ok: true, wrote: true, path });
+	json({ ok: true, wrote: true, path, rev: fileRev(path) });
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,7 +1422,7 @@ usage:
   pteam claude-setup [--install|--apply|--verify|--uninstall|--print-providers] [--json] [--force]
                                            (--apply writes the claude-* providers; it does NOT reload)
   pteam config read  <section> [--no-discovery]
-  pteam config write <section>             (JSON body on stdin)
+  pteam config write <section> [--rev <rev>]  (JSON body on stdin; --rev refuses the write if the file changed since config read gave that rev)
   pteam prompts read <role>                (supervisor|lead|peer)
   pteam prompts write <role>               (markdown body on stdin)
   pteam skills list

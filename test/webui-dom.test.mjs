@@ -27,6 +27,32 @@ for (const [, tab] of html.matchAll(/data-tab="([^"]+)"/g)) {
 	assert.ok(declared.has(`tab-${tab}`), `a tab button targets "${tab}" but #tab-${tab} does not exist`);
 }
 
+// Home tiles are buttons that jump to a board: a data-goto that names no tab is a
+// tile that does nothing when clicked.
+for (const [, target] of html.matchAll(/data-goto="([^"]+)"/g)) {
+	assert.ok(declared.has(`tab-${target}`), `a tile goes to "${target}" but #tab-${target} does not exist`);
+}
+
+// "Advanced" controls must actually be hidden in simple mode. `.check`, a plain
+// class selector set later in the file, used to out-rank `[data-advanced]` (same
+// specificity, later wins) and left the archived-agents checkbox and the domain
+// filter on screen for everyone. The rule has to win by force, not by order.
+{
+	const css = readFileSync(join(PUBLIC_DIR, "style.css"), "utf8");
+	assert.match(
+		css,
+		/body:not\(\.advanced\) \[data-advanced\]\s*\{[^}]*display:\s*none\s*!important/,
+		"the simple-mode rule that hides [data-advanced] must be !important",
+	);
+}
+
+// The server must not hand a 404 to the one request every browser makes by itself.
+{
+	const server = readFileSync(join(PUBLIC_DIR, "..", "server.mjs"), "utf8");
+	assert.match(server, /\/favicon\.ico/, "favicon.ico is answered, not 404");
+	assert.ok(!server.includes("\u0000"), "server.mjs carries no raw NUL byte (git and grep treat the file as binary)");
+}
+
 // The section dropdown is hand-written markup while the sections themselves
 // live in two other files. A new section that nobody added an <option> for is
 // reachable by URL and by the CLI but invisible in the browser — which is how

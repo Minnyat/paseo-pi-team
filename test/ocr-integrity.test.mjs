@@ -90,23 +90,25 @@ assert.match(ocrReview, /--git-common-dir/);
 assert.match(ocrSkill, /REVIEW_WORKSPACE_NOT_WORKTREE/);
 assert.match(ocrSkill, /REVIEW_WORKTREE_UNAVAILABLE/);
 assert.match(leadSkill, /REVIEW_WORKTREE_UNAVAILABLE/);
-assert.match(leadSkill, /--disposition independent-reviewer/);
-assert.match(remotePaseo, /REVIEW_ISOLATION_INVALID/);
-assert.match(remotePaseo, /independent-reviewer/);
-assert.match(remotePaseo, /REVIEW_WORKTREE_UNAVAILABLE/);
+// The Reviewer makes its own detached worktree INSIDE the job's shared
+// workspace: no Paseo workspace is created for it, locally or on a remote host.
+assert.match(leadSkill, /git worktree add\s+--detach/);
+assert.match(ocrSkill, /git worktree add --detach/);
+assert.match(remotePaseo, /WORKSPACE_ISOLATION_REFUSED/);
+assert.doesNotMatch(remotePaseo, /REVIEW_ISOLATION_INVALID/);
 
-// Layer-1 local guard: the runtime-neutral policy core gates MCP
-// create_workspace args, and BOTH runtime adapters route through that core —
-// a gate that lived in only one adapter would leave the other runtime open.
+// A Lead cannot open a workspace at all: the runtime-neutral policy core owns
+// the rule, and BOTH runtime adapters route through that core — a gate that
+// lived in only one adapter would leave the other runtime open.
 const policyCore = read("extensions/paseo-team-core/policy-core.ts");
-assert.match(policyCore, /leadCreateWorkspaceBlockReason/);
-assert.match(policyCore, /REVIEW_WORKTREE_UNAVAILABLE/);
+assert.match(policyCore, /leadWorkspaceMutationBlockReason/);
+assert.doesNotMatch(policyCore, /leadCreateWorkspaceBlockReason/);
 const policyExtension = read("extensions/paseo-team-policy.ts");
 assert.match(policyExtension, /from "\.\/paseo-team-core\/policy-core\.ts"/);
 const claudePolicy = read("extensions/paseo-team-core/claude-policy.ts");
 assert.match(claudePolicy, /from "\.\/policy-core\.ts"/);
-assert.match(claudePolicy, /leadCreateWorkspaceArgsBlockReason/);
-assert.match(leadSkill, /review:<TASK_ID>/);
+assert.match(claudePolicy, /leadWorkspaceMutationBlockReason/);
+assert.match(claudePolicy, /createAgentParamsBlockReason/);
 
 // OCR metadata stays outside the V3 authority marker block.
 const authorityBlock = brief.split("PASEO_TEAM_TASK_V3_BEGIN")[1].split("PASEO_TEAM_TASK_V3_END")[0];

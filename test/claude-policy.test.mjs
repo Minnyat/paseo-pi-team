@@ -268,6 +268,15 @@ assert.match(
 	/Lead and Supervisor/,
 );
 
+// A create_agent a Lead or Supervisor may make: every parameter Paseo reads,
+// and nothing that places the agent outside the creator's own workspace.
+const fullCreate = {
+	title: "Scout the repo",
+	provider: "claude-peer/claude-opus-5",
+	initialPrompt: "Look around and report.",
+	settings: { thinkingOptionId: "high", modeId: "auto" },
+};
+
 // --- supervisor ---------------------------------------------------------------
 
 assert.equal(decide("supervisor", "Read", {}), null);
@@ -305,6 +314,8 @@ assert.match(
 );
 assert.equal(
 	decide("supervisor", "mcp__paseo__create_agent", {
+		title: "Lead recovery",
+		initialPrompt: "Take over the lead seat.",
 		provider: "claude-lead/claude-opus-5",
 		labels: { purpose: "recovery", recovery_for: "content-analysis" },
 		settings: { thinkingOptionId: "high", modeId: "auto" },
@@ -327,6 +338,8 @@ assert.match(
 );
 assert.equal(
 	decide("supervisor", "mcp__paseo__create_agent", {
+		title: "Lead bootstrap",
+		initialPrompt: "Start the lead seat.",
 		provider: "pi-lead/Minnyat/gpt-5.6-sol",
 		labels: { purpose: "bootstrap", recovery_for: "pod" },
 		settings: { thinkingOptionId: "high" },
@@ -344,26 +357,68 @@ assert.match(
 
 // --- lead ---------------------------------------------------------------------
 
-assert.equal(decide("lead", "mcp__paseo__create_agent", { provider: "x" }), null);
+assert.equal(decide("lead", "mcp__paseo__create_agent", fullCreate), null);
+assert.match(
+	decide("lead", "mcp__paseo__create_agent", { provider: "x" }) ?? "",
+	/"title" is required/,
+	"a call missing parameters Paseo needs is refused with the list, not one daemon error at a time",
+);
 assert.equal(decide("lead", "mcp__paseo__respond_to_permission", {}), null);
 assert.equal(decide("lead", "Bash", { command: "git status" }), null);
 assert.equal(decide("lead", "mcp__claude-in-chrome__navigate", {}), null);
 assert.match(decide("lead", "Write", {}) ?? "", /blocked by the lead role/);
 assert.match(decide("lead", "mcp__paseo__create_terminal", {}) ?? "", /not in the lead MCP allowlist/);
-// Reviewer isolation, layer 1: a review workspace must be a worktree.
-assert.match(
-	decide("lead", "mcp__paseo__create_workspace", { isolation: "local", title: "review:T-1" }) ?? "",
-	/must use isolation "worktree"/,
-);
-assert.equal(
-	decide("lead", "mcp__paseo__create_workspace", { isolation: "worktree", title: "review:T-1" }),
-	null,
-);
-assert.match(
-	decide("lead", "mcp__paseo__create_workspace", { title: "anything" }) ?? "",
-	/explicit isolation/,
-	"never rely on a daemon default",
-);
+// One job, one workspace: a Lead creates no workspace and archives none, and the
+// refusal names the route (create_agent without workspaceId; the Reviewer's own
+// `git worktree add` inside the shared workspace).
+for (const tool of ["mcp__paseo__create_workspace", "mcp__paseo__archive_workspace"]) {
+	for (const input of [{}, { isolation: "worktree", title: "review:T-1" }, { isolation: "local", title: "scratch" }]) {
+		const reason = decide("lead", tool, input) ?? "";
+		assert.match(reason, /does not create or archive workspaces/, `${tool} is refused whatever it carries`);
+		assert.match(reason, /git worktree add/);
+	}
+}
+assert.equal(decide("lead", "mcp__paseo__list_workspaces", {}), null, "reading the list is discovery");
+
+// --- create_agent: one job, one workspace — parity with create-agent-params.test.mts
+// The placement and parameter gate runs from the same core on this runtime; what
+// is pinned here is that claudeToolBlockReason actually consults it, and hands it
+// the creator's own workspace the way claude-hook.mjs does.
+{
+	const create = (toolInput, selfWorkspaceId, role = "lead") =>
+		claudeToolBlockReason({
+			role,
+			toolName: "mcp__paseo__create_agent",
+			toolInput,
+			brief: null,
+			selfWorkspaceId,
+		});
+	assert.match(
+		String(create({ ...fullCreate, workspace: { kind: "create", source: { kind: "directory" } } }, "ws_1")),
+		/"workspace" is a placement parameter/,
+		"a workspace the Lead asks Paseo to create is refused",
+	);
+	assert.match(String(create({ ...fullCreate, relationship: { kind: "detached" } }, "ws_1")), /"relationship"/);
+	assert.match(String(create({ ...fullCreate, cwd: "/elsewhere" }, "ws_1")), /"cwd"/);
+	assert.equal(create({ ...fullCreate, workspaceId: "ws_1" }, "ws_1"), null, "naming your own workspace is fine");
+	assert.match(
+		String(create({ ...fullCreate, workspaceId: "ws_2" }, "ws_1")),
+		/but this seat's workspace is "ws_1"/,
+		"another workspace is refused",
+	);
+	assert.match(
+		String(create({ ...fullCreate, workspaceId: "ws_1" }, null)),
+		/cannot be shown to be your own workspace/,
+		"an unreadable own workspace makes the explicit form unprovable",
+	);
+	assert.match(String(create({ ...fullCreate, mode: "auto" }, "ws_1")), /"mode" \(belongs in settings\.modeId\)/);
+	assert.match(String(create({ ...fullCreate, title: undefined }, "ws_1")), /"title" is required/);
+	assert.equal(
+		create({ ...fullCreate, cwd: "/elsewhere" }, "ws_1", "peer") === null,
+		false,
+		"a Peer never reaches create_agent at all",
+	);
+}
 
 // --- create_agent: the cluster-label gate, parity with policy.test.mts -------
 // `decide()` never passes `cluster`, so none of the calls above trip this gate
@@ -396,7 +451,7 @@ assert.equal(
 	claudeToolBlockReason({
 		role: "lead",
 		toolName: "mcp__paseo__create_agent",
-		toolInput: { provider: "x", labels: { "team.cluster": "D:\\Code\\Shop" } },
+		toolInput: { ...fullCreate, labels: { "team.cluster": "D:\\Code\\Shop" } },
 		brief: null,
 		cluster: "d:/code/shop",
 	}),
@@ -407,26 +462,17 @@ assert.equal(
 	claudeToolBlockReason({
 		role: "lead",
 		toolName: "mcp__paseo__create_agent",
-		toolInput: { provider: "x" },
+		toolInput: fullCreate,
 		brief: null,
 		cluster: null,
 	}),
 	null,
 	"an unresolvable own cluster disables the gate on this runtime too",
 );
-assert.equal(
-	claudeToolBlockReason({
-		role: "lead",
-		toolName: "mcp__paseo__create_workspace",
-		toolInput: { isolation: "local" },
-		brief: null,
-		cluster: "d:/code/shop",
-	}),
-	null,
-	"create_workspace carries no team.cluster requirement",
-);
 {
 	const recovery = {
+		title: "Lead recovery",
+		initialPrompt: "Take over the lead seat.",
 		provider: "claude-lead/claude-opus-5",
 		labels: { purpose: "recovery", recovery_for: "content-analysis" },
 		// modeId for the same reason as thinkingOptionId: Paseo applies no
@@ -544,7 +590,7 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 		claudeToolBlockReason({
 			role: "lead",
 			toolName: "mcp__paseo__create_agent",
-			toolInput: { initialPrompt: prompt },
+			toolInput: { ...fullCreate, initialPrompt: prompt },
 			brief: null,
 			leases,
 			selfAgentId,
@@ -680,6 +726,8 @@ assert.match(describeClaudePolicy("lead", null), /paseoMcp=\[/);
 			role: "supervisor",
 			toolName: "mcp__paseo__create_agent",
 			toolInput: {
+				title: "Lead recovery",
+				initialPrompt: "Take over the lead seat.",
 				provider: "claude-lead/claude-opus-5",
 				labels: { purpose: "recovery", recovery_for: "frontend.shell" },
 				settings: { thinkingOptionId: "high", modeId: "auto" },

@@ -375,6 +375,25 @@ function authorityBlock(describe, role, brief) {
  * which the core treats as fatal — an unreadable target must not read as a
  * friendly one.
  */
+/**
+ * The creator's own workspace, for the create_agent placement gate. Read only
+ * when the call IS a create_agent from a seat that can make one: every other tool
+ * call must stay cheap, and the lookup is a state-file read. Undefined = not
+ * needed; null = could not be read, which the gate answers with "leave
+ * workspaceId out" rather than guessing.
+ */
+function selfWorkspaceForDecision({ core, claude }, role, toolName, env) {
+	if (role !== "lead" && role !== "supervisor") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
+	try {
+		return core.selfWorkspaceId(env);
+	} catch {
+		return null;
+	}
+}
+
 function promptTargetForDecision({ core, claude }, role, toolName, toolInput, env) {
 	if (role !== "lead" && role !== "supervisor") return undefined;
 	// Same rule as the Pi adapter, and for the same reason: the lookup is driven
@@ -518,6 +537,7 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 			cluster: core.selfCluster(env),
+			selfWorkspaceId: selfWorkspaceForDecision({ core, claude }, role, toolName, env),
 			promptTarget: promptTargetForDecision(
 				{ core, claude },
 				role,

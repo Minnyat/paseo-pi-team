@@ -34,7 +34,9 @@ body {
 }
 
 /* Advanced-only affordances stay out of the way until asked for. */
-[data-advanced] { display: none; }
+/* !important: `.check`, `.toolbar label` and friends set `display` later in the file and
+   used to win this rule, which left every "advanced" control visible in simple mode. */
+body:not(.advanced) [data-advanced] { display: none !important; }
 body.advanced [data-advanced] { display: revert; }
 body.advanced nav [data-advanced] { display: inline-flex; }
 body.advanced label[data-advanced] { display: inline-flex; }
@@ -155,9 +157,11 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 }
 .card h2 { margin: 0 0 10px; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
 
-.stat { margin-bottom: 0; }
+/* A tile is a button: it goes to the board it counts. */
+.stat { margin-bottom: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.stat:hover { background: var(--panel-2); }
+.stat h2 { margin-bottom: 6px; }
 .stat-value { font-size: 34px; font-weight: 650; line-height: 1.1; }
-.stat-hint { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
 
 .body { font-size: 14px; }
 .hint { color: var(--muted); font-size: 13.5px; }
@@ -233,6 +237,36 @@ table.list .row-error td { background: color-mix(in srgb, var(--danger) 8%, tran
 .dot-role.peer { background: var(--peer); }
 .dot-role.unknown { background: var(--unknown); }
 
+/* Neutral label (runtime, seat variant, domain). `.pill` below is the warning-coloured
+   "needs you" marker, and reusing it for plain facts made every row look alarming. */
+.tag {
+	display: inline-block;
+	margin-left: 8px;
+	padding: 0 8px;
+	border-radius: 999px;
+	border: 1px solid var(--line);
+	color: var(--muted);
+	font-size: 11.5px;
+	line-height: 1.6;
+}
+
+/* Project header inside the list, and the agent tree's indentation. */
+table.list .group-row td {
+	padding-top: 18px;
+	border-bottom: 1px solid var(--line);
+	color: var(--text);
+	font-size: 12.5px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+}
+table.list .group-row:hover td { background: transparent; }
+table.list td.indent-1 { padding-left: 28px; }
+table.list td.indent-2 { padding-left: 46px; }
+table.list td.indent-3 { padding-left: 64px; }
+table.list td.indent-4 { padding-left: 82px; }
+table.list td.indent-5 { padding-left: 100px; }
+
 .pill {
 	display: inline-block;
 	margin-left: 10px;
@@ -252,6 +286,12 @@ table.list .row-error td { background: color-mix(in srgb, var(--danger) 8%, tran
 .node-box:hover .node-rect { stroke-width: 3; }
 .node-label { font: 12px var(--mono); fill: var(--text); pointer-events: none; }
 .node-sub { font: 11px system-ui, sans-serif; fill: var(--muted); pointer-events: none; }
+.node-runtime { font: 600 10.5px system-ui, sans-serif; fill: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; pointer-events: none; }
+.status-dot { fill: var(--unknown); pointer-events: none; }
+.status-dot.running { fill: var(--accent); }
+.status-dot.error { fill: var(--danger); }
+.band-title { font: 600 12.5px system-ui, sans-serif; fill: var(--text); letter-spacing: 0.08em; text-transform: uppercase; }
+.band-rule { stroke: var(--line); stroke-width: 1; }
 .edge { fill: none; stroke: #46534f; stroke-width: 1.6; }
 .edge.message { stroke: var(--warn); stroke-dasharray: 5 4; }
 /* Session lineage: an imported fork is a ROOT agent, so without this edge two
@@ -327,6 +367,16 @@ table.list .row-error td { background: color-mix(in srgb, var(--danger) 8%, tran
 	overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word;
 }
 .permit details summary, .error-block details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 10px; }
+
+/* The command / file / address an approval is actually about. */
+.permit-detail { margin: 12px 0 2px; }
+.permit-detail-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+.permit-detail pre {
+	margin: 0; padding: 9px 12px; border-radius: 8px;
+	background: var(--bg); border: 1px solid var(--line);
+	font: 12.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word;
+	max-height: 9em; overflow: auto;
+}
 
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; font-size: 13.5px; }
 .facts dt { color: var(--muted); }
@@ -532,3 +582,27 @@ textarea.cfg-lines {
 	.permit-headline { margin-right: 0; }
 	.risk-tag { position: static; display: inline-block; margin-bottom: 10px; }
 }
+
+/* --- narrow screens ------------------------------------------------------ */
+/* The diagram is drawn at a readable size and SCROLLS: shrunk to a phone's width
+   the whole tree fit on screen and none of it could be read. In the list, the
+   "who assigned it" column is what the indentation already says. */
+@media (max-width: 640px) {
+	#graph { min-width: 760px; }
+	table.list .col-parent { display: none; }
+	table.list th, table.list td { padding: 8px 6px; }
+}
+
+/* Unsaved edits: the Save button says so, instead of looking the same either way. */
+#config-save.dirty { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 70%, transparent); }
+#config-meta.no { color: var(--danger); }
+#prompt-save.dirty { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 70%, transparent); }
+#prompt-meta.no { color: var(--danger); }
+#prompt-editor:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* The policy table is reference material: closed until someone wants it. */
+details.card > summary { cursor: pointer; list-style: none; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary::before { content: "▸ "; }
+details.card[open] > summary::before { content: "▾ "; }
+details.card[open] > summary { margin-bottom: 10px; }

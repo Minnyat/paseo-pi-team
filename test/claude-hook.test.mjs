@@ -265,7 +265,7 @@ assert.equal(runHook("pre-tool-use", { session_id: "s0", tool_name: "Write" }, b
 		},
 		leadEnv,
 	);
-	assert.match(denied.hookSpecificOutput.permissionDecisionReason, /worktree/);
+	assert.match(denied.hookSpecificOutput.permissionDecisionReason, /does not create or archive workspaces/);
 	assert.equal(
 		runHook(
 			"pre-tool-use",
@@ -360,10 +360,17 @@ rmSync(home, { recursive: true, force: true });
 		"EDIT_AUTHORITY: allowed",
 		"PASEO_TEAM_TASK_V3_END",
 	].join("\n");
+	// Everything create_agent needs besides the brief: the lease gate is the one
+	// under test here, so the parameter gate must have nothing to say.
+	const seatArgs = {
+		title: "T-1 writer",
+		provider: "claude-peer/claude-opus-5",
+		settings: { thinkingOptionId: "high", modeId: "auto" },
+	};
 	const createWriter = {
 		session_id: "lease-1",
 		tool_name: "mcp__paseo__create_agent",
-		tool_input: { initialPrompt: writerBrief, labels: { "team.cluster": CLUSTER } },
+		tool_input: { ...seatArgs, initialPrompt: writerBrief, labels: { "team.cluster": CLUSTER } },
 	};
 
 	// No daemon here, so the ledger read fails — and the hook must turn that into
@@ -383,6 +390,7 @@ rmSync(home, { recursive: true, force: true });
 			{
 				...createWriter,
 				tool_input: {
+					...seatArgs,
 					initialPrompt: writerBrief.replace("MODE: write", "MODE: read-only"),
 					labels: { "team.cluster": CLUSTER },
 				},
@@ -398,6 +406,56 @@ rmSync(home, { recursive: true, force: true });
 		await handleEvent("pre-tool-use", { session_id: "lease-2", tool_name: "Read", tool_input: { file_path: "a" } }, leadEnv),
 		null,
 	);
+}
+
+// --- one job, one workspace: the hook has to RESOLVE the creator's workspace ---
+// The decision (claude-policy.test.mjs) is handed `selfWorkspaceId`; nothing there
+// notices a hook that never reads it, which would refuse every explicit
+// workspaceId — or, if it defaulted the other way, let any of them through.
+{
+	const LEAD = "aaaaaaaa-7777-4777-8777-777777777777";
+	const paseoHome = mkdtempSync(join(tmpdir(), "paseo-claude-ws-home-"));
+	const agentsDir = join(paseoHome, "agents", "D--repo");
+	mkdirSync(agentsDir, { recursive: true });
+	writeFileSync(
+		join(agentsDir, `${LEAD}.json`),
+		JSON.stringify({ id: LEAD, provider: "claude-lead/claude-opus-5", workspaceId: "ws_job_1", cwd: "D:/repo" }),
+		"utf8",
+	);
+	const leadEnv = {
+		...baseEnv,
+		PASEO_PI_ROLE: "lead",
+		PASEO_AGENT_ID: LEAD,
+		PASEO_HOME: paseoHome,
+		PASEO_TEAM_CLUSTER: "ws-hook-stub",
+	};
+	const create = (extra) =>
+		handleEvent(
+			"pre-tool-use",
+			{
+				session_id: "ws-1",
+				tool_name: "mcp__paseo__create_agent",
+				tool_input: {
+					title: "Scout",
+					provider: "claude-peer/claude-opus-5",
+					initialPrompt: "Look around.",
+					settings: { thinkingOptionId: "high", modeId: "auto" },
+					labels: { "team.cluster": "ws-hook-stub" },
+					...extra,
+				},
+			},
+			leadEnv,
+		);
+	try {
+		assert.equal(await create({}), null, "no placement: the new seat lands in the Lead's own workspace");
+		assert.equal(await create({ workspaceId: "ws_job_1" }), null, "naming its own workspace, read from its state file");
+		const other = await create({ workspaceId: "ws_somewhere_else" });
+		assert.match(other.hookSpecificOutput.permissionDecisionReason, /but this seat's workspace is "ws_job_1"/);
+		const minted = await create({ workspace: { kind: "create", source: { kind: "directory" } } });
+		assert.match(minted.hookSpecificOutput.permissionDecisionReason, /placement parameter/);
+	} finally {
+		rmSync(paseoHome, { recursive: true, force: true });
+	}
 }
 
 // --- PR-D governance: the hook has to RESOLVE ownership, not just forward it -

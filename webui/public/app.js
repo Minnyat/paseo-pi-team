@@ -30,14 +30,17 @@ import {
 } from "./config-form.js";
 import {
 	ROLE_HINT,
+	agentKindLabel,
 	degradedSentence,
 	humanizeError,
 	missingSetup,
 	overallHealth,
+	permitDetail,
 	permitSentence,
+	projectLabel,
 	relativeTime,
 	RISK_LABEL,
-	roleLabel,
+	runtimeLabel,
 	statusLabel,
 	toolMeaning,
 } from "./humanize.js";
@@ -262,13 +265,19 @@ function paintHealth() {
 
 	const nodes = lastGraph?.nodes ?? [];
 	$("stat-running").textContent = nodes.filter((node) => node.status === "running").length;
-	$("stat-permits").textContent = lastPermits?.count ?? 0;
 	$("stat-errors").textContent = nodes.filter((node) => node.status === "error").length;
 	$("stat-total").textContent = nodes.length;
 }
 
 function paintSetup() {
 	const body = clear($("setup-body"));
+	// The banner above already says "Cài đặt chưa hoàn tất" and what to run when
+	// that is the most urgent thing; repeating it in a card below is the same
+	// message twice. The card earns its place when it adds something: the other
+	// problems the banner had no room for, or the file paths in advanced mode.
+	const missingNow = lastStatus ? missingSetup(lastStatus) : [];
+	const bannerSaysIt = overallHealth({ status: lastStatus, graph: lastGraph, permits: lastPermits }).headline === "Cài đặt chưa hoàn tất";
+	$("setup-card").classList.toggle("hidden", !advanced && (missingNow.length === 0 || bannerSaysIt));
 	if (!lastStatus) {
 		body.appendChild(el("p", { class: "hint", text: "Chưa đọc được." }));
 		return;
@@ -389,13 +398,22 @@ function permitCard(permit) {
 		facts.appendChild(el("dd", { text: String(value) }));
 	};
 	addFact("Agent", agentNameFor(permit.agentId) || "không rõ tên");
-	if (node) addFact("Vai trò", roleLabel(node.role));
+	if (node) addFact("Dự án", projectLabel(node.project ?? "") || null);
 	if (node) addFact("Thư mục", node.cwd);
 	if (advanced) {
+		if (node) addFact("Loại agent", agentKindLabel(node));
 		addFact("Công cụ", permit.tool ?? "không rõ");
 		addFact("Mã yêu cầu", permit.requestId);
 	}
 	card.appendChild(facts);
+	// What it actually wants to do. "chạy lệnh trên máy này" cannot be approved or
+	// refused on its own — the command line is the decision.
+	const detail = permitDetail(permit);
+	card.appendChild(
+		detail
+			? el("div", { class: "permit-detail" }, [el("span", { class: "permit-detail-label", text: detail.label }), el("pre", { text: detail.text })])
+			: el("p", { class: "hint", text: "Agent không nói rõ cụ thể muốn làm gì. Nếu chưa chắc, hãy từ chối." }),
+	);
 
 	const allow = el("button", { class: "primary big", text: "Cho phép" });
 	const deny = el("button", { class: "danger big", text: "Từ chối" });
@@ -454,9 +472,9 @@ function renderPermits() {
 	}
 }
 
-async function refreshPermits({ silent = false } = {}) {
+async function refreshPermits({ silent = false, fresh = false } = {}) {
 	try {
-		lastPermits = (await api("/api/permits")).data;
+		lastPermits = (await api(`/api/permits${fresh ? "?fresh=1" : ""}`)).data;
 		setBadge(lastPermits.count ?? 0);
 	} catch (error) {
 		if (!silent) toastError(error);
@@ -469,16 +487,33 @@ loaders.permissions = async () => {
 	renderPermits();
 };
 
-$("permits-refresh").addEventListener("click", () => loaders.permissions());
+$("permits-refresh").addEventListener("click", async () => {
+	await refreshPermits({ fresh: true });
+	renderPermits();
+});
 
 // --- team view: diagram + list --------------------------------------------
+//
+// One board for the whole host, grouped by PROJECT. Several Leads (each with its
+// own Peers) share one machine in normal use, and a single flat tree made them
+// read as one team: the projects only differed by a pill that was easy to miss.
+// A project is the node's cluster — policy-core's own answer to "which workspace
+// does this seat live in" — falling back to its working directory.
 
-const NODE_W = 210;
+const NODE_W = 250;
 const NODE_H = 56;
-const COL_GAP = 90;
+const COL_GAP = 80;
 const ROW_GAP = 14;
+const BAND_HEAD = 34;
+const BAND_GAP = 22;
 
 let viewMode = "diagram";
+
+const VIEW_HINT = {
+	diagram:
+		"Mỗi hộp là một agent. Đường nối đi từ người giao việc (bên trái) sang người nhận việc (bên phải). Bấm vào hộp để xem chi tiết hoặc nhắn tin.",
+	list: "Mỗi dự án là một nhóm; agent do ai giao việc thì thụt vào dưới người đó. Dòng màu đỏ là agent đang gặp lỗi.",
+};
 
 function setView(mode) {
 	viewMode = mode;
@@ -486,66 +521,177 @@ function setView(mode) {
 	$("view-list").classList.toggle("active", mode === "list");
 	$("diagram-wrap").classList.toggle("hidden", mode !== "diagram");
 	$("list-wrap").classList.toggle("hidden", mode === "diagram");
+	$("graph-hint").textContent = VIEW_HINT[mode];
 	if (lastGraph) renderTeam(lastGraph);
 }
 
 $("view-diagram").addEventListener("click", () => setView("diagram"));
 $("view-list").addEventListener("click", () => setView("list"));
-
-/** Depth = distance to a root through parentId, cycle-guarded. */
-function depthOf(node, byId, seen = new Set()) {
-	let depth = 0;
-	let current = node;
-	while (current?.parentId && byId.has(current.parentId) && !seen.has(current.id)) {
-		seen.add(current.id);
-		current = byId.get(current.parentId);
-		depth += 1;
-		if (depth > 32) break;
-	}
-	return depth;
-}
+$("graph-hint").textContent = VIEW_HINT.diagram;
 
 function roleClass(role) {
 	return ["supervisor", "lead", "peer"].includes(role) ? role : "unknown";
 }
 
+function truncate(text, max) {
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 /**
- * Runtime family badge. The same role runs on pi and on Claude in one fleet,
- * so "Lead" alone is ambiguous while a task is being routed.
+ * Stamp every node with the project it belongs to.
+ *
+ * Its own cluster when the CLI could derive one; otherwise its parent's — a
+ * sub-agent started through a plain Paseo provider has no state file of its own to
+ * read a cluster from, and grouping it by its cwd instead would split it away from
+ * the Lead that started it into a second "project" of the same name; otherwise its
+ * working directory. Resolved over the WHOLE board before any filter runs, so a
+ * filter cannot change which project a node is in.
  */
-function familyLabel(family) {
-	return family === "claude" ? "Claude" : family === "pi" ? "Pi" : "";
+function annotateProjects(graph) {
+	const nodes = graph?.nodes ?? [];
+	const byId = new Map(nodes.map((node) => [node.id, node]));
+	const memo = new Map();
+	const resolve = (node, hops = 0) => {
+		if (memo.has(node.id)) return memo.get(node.id);
+		let key = node.cluster ?? null;
+		const parent = node.parentId ? byId.get(node.parentId) : null;
+		if (key === null && parent && hops < 16) key = resolve(parent, hops + 1);
+		key = key ?? node.cwd ?? "";
+		memo.set(node.id, key);
+		return key;
+	};
+	return { ...graph, nodes: nodes.map((node) => ({ ...node, project: resolve(node) })) };
+}
+
+function projectKey(node) {
+	return node.project ?? "";
+}
+
+function projectName(key) {
+	return projectLabel(key) || "Không rõ dự án";
+}
+
+/**
+ * Nodes grouped by project. A project holding something that needs a person (an
+ * approval waiting, an error) comes first; otherwise by name, so the order does
+ * not shuffle on every poll.
+ */
+function groupByProject(nodes) {
+	const groups = new Map();
+	for (const node of nodes) {
+		const key = projectKey(node);
+		if (!groups.has(key)) groups.set(key, []);
+		groups.get(key).push(node);
+	}
+	const needsPerson = (list) => list.some((node) => node.pendingPermissions > 0 || node.status === "error");
+	return [...groups.entries()]
+		.map(([key, list]) => ({ key, name: projectName(key), nodes: list }))
+		.sort((a, b) => Number(needsPerson(b.nodes)) - Number(needsPerson(a.nodes)) || a.name.localeCompare(b.name));
+}
+
+/**
+ * The order a person reads a team in: each root followed by everything it handed
+ * out, indented by how many hands away it is. A parent that is not in this group
+ * makes its child a root HERE (it is shown, not dropped), and a parent cycle
+ * cannot loop: every node is visited once.
+ */
+function treeOrder(nodes) {
+	const ids = new Set(nodes.map((node) => node.id));
+	const children = new Map();
+	const roots = [];
+	for (const node of nodes) {
+		if (node.parentId && node.parentId !== node.id && ids.has(node.parentId)) {
+			if (!children.has(node.parentId)) children.set(node.parentId, []);
+			children.get(node.parentId).push(node);
+		} else {
+			roots.push(node);
+		}
+	}
+	const order = [];
+	const seen = new Set();
+	const visit = (node, depth) => {
+		if (seen.has(node.id)) return;
+		seen.add(node.id);
+		order.push({ node, depth });
+		for (const child of children.get(node.id) ?? []) visit(child, depth + 1);
+	};
+	for (const root of roots) visit(root, 0);
+	for (const node of nodes) visit(node, 0); // only a cycle leaves anyone unvisited
+	return { order, children };
+}
+
+/**
+ * Tree layout, left to right: leaves take consecutive rows and a parent sits
+ * halfway between its first and last child, so edges fan out instead of crossing.
+ */
+function layoutGroup(nodes) {
+	const { order, children } = treeOrder(nodes);
+	const rowOf = new Map();
+	const visiting = new Set();
+	let nextRow = 0;
+	const place = (node) => {
+		if (rowOf.has(node.id)) return rowOf.get(node.id);
+		visiting.add(node.id);
+		const kids = (children.get(node.id) ?? []).filter((kid) => !visiting.has(kid.id));
+		let row;
+		if (kids.length === 0) {
+			row = nextRow;
+			nextRow += 1;
+		} else {
+			const rows = kids.map(place);
+			row = (Math.min(...rows) + Math.max(...rows)) / 2;
+		}
+		visiting.delete(node.id);
+		rowOf.set(node.id, row);
+		return row;
+	};
+	for (const { node } of order) place(node);
+	let maxDepth = 0;
+	const positions = new Map();
+	for (const { node, depth } of order) {
+		maxDepth = Math.max(maxDepth, depth);
+		positions.set(node.id, { node, depth, row: rowOf.get(node.id) ?? 0 });
+	}
+	return { positions, rows: Math.max(1, nextRow), maxDepth };
 }
 
 function renderDiagram(graph) {
 	const svg = clear($("graph"));
-	const nodes = graph.nodes ?? [];
-	const byId = new Map(nodes.map((node) => [node.id, node]));
-	const columns = new Map();
+	const groups = groupByProject(graph.nodes ?? []);
+	const showHeads = groups.length > 1;
 	const placed = new Map();
+	const heads = [];
+	let y = 16;
+	let width = 0;
 
-	for (const node of nodes) {
-		const depth = depthOf(node, byId);
-		const column = columns.get(depth) ?? [];
-		column.push(node);
-		columns.set(depth, column);
+	for (const group of groups) {
+		if (showHeads) {
+			heads.push({ y: y + 14, text: `${group.name} · ${group.nodes.length} agent` });
+			y += BAND_HEAD;
+		}
+		const { positions, rows, maxDepth } = layoutGroup(group.nodes);
+		for (const [id, at] of positions) {
+			placed.set(id, {
+				x: 24 + at.depth * (NODE_W + COL_GAP),
+				y: y + at.row * (NODE_H + ROW_GAP),
+				node: at.node,
+			});
+		}
+		width = Math.max(width, 48 + (maxDepth + 1) * NODE_W + maxDepth * COL_GAP);
+		y += rows * (NODE_H + ROW_GAP) + BAND_GAP;
 	}
 
-	let maxRows = 0;
-	for (const [depth, column] of [...columns.entries()].sort((a, b) => a[0] - b[0])) {
-		maxRows = Math.max(maxRows, column.length);
-		column.forEach((node, row) => {
-			placed.set(node.id, { x: 24 + depth * (NODE_W + COL_GAP), y: 24 + row * (NODE_H + ROW_GAP), node });
-		});
-	}
-
-	const width = 48 + (columns.size || 1) * (NODE_W + COL_GAP);
-	const height = Math.max(240, 48 + maxRows * (NODE_H + ROW_GAP));
-	svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-	svg.setAttribute("height", `${Math.min(height, 2400)}`);
+	const height = Math.max(200, y);
+	svg.setAttribute("viewBox", `0 0 ${Math.max(width, 320)} ${height}`);
+	svg.setAttribute("height", `${Math.min(height, 4000)}`);
 	// Left-align instead of the default centring: a two-column tree in a wide
 	// viewport would otherwise float in the middle with the roots off-centre.
 	svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+
+	for (const head of heads) {
+		svg.appendChild(svgEl("text", { class: "band-title", x: 24, y: head.y, text: head.text }));
+		svg.appendChild(svgEl("line", { class: "band-rule", x1: 24, y1: head.y + 8, x2: Math.max(width, 320) - 24, y2: head.y + 8 }));
+	}
 
 	for (const edge of graph.edges ?? []) {
 		const from = placed.get(edge.from);
@@ -561,8 +707,8 @@ function renderDiagram(graph) {
 		);
 	}
 
-	for (const { x, y, node } of placed.values()) {
-		const group = svgEl("g", { class: "node-box", transform: `translate(${x} ${y})`, onclick: () => openDrawer(node) });
+	for (const { x, y: top, node } of placed.values()) {
+		const group = svgEl("g", { class: "node-box", transform: `translate(${x} ${top})`, onclick: () => openDrawer(node) });
 		group.appendChild(
 			svgEl("rect", {
 				class: "node-rect",
@@ -575,19 +721,17 @@ function renderDiagram(graph) {
 				"stroke-dasharray": node.status === "error" ? "4 3" : null,
 			}),
 		);
-		// A hover tooltip carries the untruncated name; the box shows a slice.
-		group.appendChild(
-			svgEl("title", { text: `${node.name || "(không tên)"} — ${roleLabel(node.role)}, ${statusLabel(node.status)}` }),
-		);
-		group.appendChild(svgEl("text", { class: "node-label", x: 12, y: 23, text: (node.name || "(không tên)").slice(0, 24) }));
-		group.appendChild(
-			svgEl("text", {
-				class: "node-sub",
-				x: 12,
-				y: 41,
-				text: `${roleLabel(node.role)}${node.family ? ` (${familyLabel(node.family)})` : ""}${node.domain ? ` · ${node.domain}` : ""} · ${statusLabel(node.status)}`,
-			}),
-		);
+		const name = node.name || "(không tên)";
+		const kind = `${agentKindLabel(node)}${node.seat ? ` · ${node.seat}` : ""} · ${statusLabel(node.status)}`;
+		// A hover tooltip carries the untruncated text; the box shows a slice.
+		group.appendChild(svgEl("title", { text: `${name} — ${kind}${runtimeLabel(node) ? `, chạy bằng ${runtimeLabel(node)}` : ""}` }));
+		group.appendChild(svgEl("circle", { class: `status-dot ${node.status}`, cx: 15, cy: 19, r: 4.5 }));
+		group.appendChild(svgEl("text", { class: "node-label", x: 28, y: 23, text: truncate(name, 27) }));
+		group.appendChild(svgEl("text", { class: "node-sub", x: 12, y: 42, text: truncate(kind, 32) }));
+		const runtime = runtimeLabel(node);
+		if (runtime) {
+			group.appendChild(svgEl("text", { class: "node-runtime", x: NODE_W - 12, y: 42, "text-anchor": "end", text: runtime }));
+		}
 		if (node.pendingPermissions > 0) {
 			group.appendChild(svgEl("circle", { class: "badge-permit", cx: NODE_W - 16, cy: 16, r: 10 }));
 			group.appendChild(
@@ -600,45 +744,50 @@ function renderDiagram(graph) {
 
 function renderList(graph) {
 	const wrap = clear($("agent-list"));
-	// What needs a human first goes first: waiting on approval, then broken,
-	// then working, then idle.
-	const rank = (node) =>
-		node.pendingPermissions > 0 ? 0 : node.status === "error" ? 1 : node.status === "running" ? 2 : 3;
-	const nodes = [...(graph.nodes ?? [])].sort((a, b) => rank(a) - rank(b));
+	const nodes = graph.nodes ?? [];
 	if (nodes.length === 0) {
 		wrap.appendChild(el("div", { class: "empty" }, [el("p", { text: "Chưa có agent nào." })]));
 		return;
 	}
 	const byId = new Map(nodes.map((node) => [node.id, node]));
+	const groups = groupByProject(nodes);
+	const showHeads = groups.length > 1;
 	const table = el("table", { class: "list" }, [
 		el("tr", {}, [
-			el("th", { text: "Tên việc" }),
-			el("th", { text: "Vai trò" }),
+			el("th", { text: "Agent" }),
+			el("th", { text: "Loại" }),
 			el("th", { text: "Trạng thái" }),
-			el("th", { text: "Người giao việc" }),
+			el("th", { class: "col-parent", text: "Người giao việc" }),
 			el("th", { text: "" }),
 		]),
 	]);
-	for (const node of nodes) {
-		const parent = node.parentId ? byId.get(node.parentId) : null;
-		table.appendChild(
-			el("tr", { class: node.status === "error" ? "row-error" : "" }, [
-				el("td", {}, [
-					el("span", { class: `dot-role ${roleClass(node.role)}` }),
-					el("span", { text: node.name || "(không tên)" }),
-					node.pendingPermissions > 0 ? el("span", { class: "pill", text: `${node.pendingPermissions} chờ duyệt` }) : null,
+	for (const group of groups) {
+		if (showHeads) {
+			table.appendChild(
+				el("tr", { class: "group-row" }, [el("td", { colspan: "5", text: `${group.name} · ${group.nodes.length} agent` })]),
+			);
+		}
+		for (const { node, depth } of treeOrder(group.nodes).order) {
+			const parent = node.parentId ? byId.get(node.parentId) : null;
+			table.appendChild(
+				el("tr", { class: node.status === "error" ? "row-error" : "" }, [
+					el("td", { class: `indent-${Math.min(depth, 5)}` }, [
+						el("span", { class: `dot-role ${roleClass(node.role)}` }),
+						el("span", { text: node.name || "(không tên)" }),
+						node.pendingPermissions > 0 ? el("span", { class: "pill", text: `${node.pendingPermissions} chờ duyệt` }) : null,
+					]),
+					el("td", {}, [
+						el("span", { text: agentKindLabel(node) }),
+						runtimeLabel(node) ? el("span", { class: "tag", text: runtimeLabel(node) }) : null,
+						node.seat ? el("span", { class: "tag", text: node.seat }) : null,
+						advanced && node.domain ? el("span", { class: "tag", text: node.domain }) : null,
+					]),
+					el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
+					el("td", { class: "col-parent", text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
+					el("td", {}, [el("button", { text: "Chi tiết", onclick: () => openDrawer(node) })]),
 				]),
-				el("td", {}, [
-					el("span", { text: roleLabel(node.role) }),
-					node.family ? el("span", { class: "pill", text: familyLabel(node.family) }) : null,
-					node.domain ? el("span", { class: "pill", text: node.domain }) : null,
-					node.cluster ? el("span", { class: "pill", title: "Cluster (team.cluster)", text: node.cluster }) : null,
-				]),
-				el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
-				el("td", { text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
-				el("td", {}, [el("button", { text: "Chi tiết", onclick: () => openDrawer(node) })]),
-			]),
-		);
+			);
+		}
 	}
 	wrap.appendChild(table);
 }
@@ -651,35 +800,55 @@ function domainLabel(domain) {
 }
 
 /**
- * Keep the domain <select> in step with what is actually on the board, without
+ * Keep a filter <select> in step with what is actually on the board without
  * throwing away the operator's current choice: a filter that resets itself on
  * every 5s poll is worse than no filter.
  */
-function syncDomainFilter(graph) {
-	const select = $("graph-domain");
-	if (!select) return;
-	const domains = [...new Set((graph.nodes ?? []).map((node) => node.domain).filter(Boolean))].sort();
-	const wanted = ["", ...domains].join("|");
+function syncSelect(select, values, allLabel) {
+	const wanted = ["", ...values.map((entry) => entry.value)].join("|");
 	if (select.dataset.options !== wanted) {
 		const previous = select.value;
 		select.dataset.options = wanted;
 		clear(select);
-		select.appendChild(el("option", { value: "", text: "tất cả phạm vi" }));
-		for (const domain of domains) select.appendChild(el("option", { value: domain, text: domain }));
-		select.value = domains.includes(previous) ? previous : "";
+		select.appendChild(el("option", { value: "", text: allLabel }));
+		for (const entry of values) select.appendChild(el("option", { value: entry.value, text: entry.text }));
+		select.value = values.some((entry) => entry.value === previous) ? previous : "";
 	}
 	return select.value;
 }
 
+function syncDomainFilter(graph) {
+	const select = $("graph-domain");
+	const domains = [...new Set((graph.nodes ?? []).map((node) => node.domain).filter(Boolean))].sort();
+	return syncSelect(
+		select,
+		domains.map((domain) => ({ value: domain, text: domain })),
+		"tất cả phạm vi",
+	);
+}
+
 /**
- * Restrict the board to one jurisdiction.
+ * The project filter only exists when there is more than one project to choose
+ * between: a dropdown with a single entry is a control that does nothing.
+ */
+function syncProjectFilter(graph) {
+	const projects = groupByProject(graph.nodes ?? []);
+	$("graph-project-wrap").classList.toggle("hidden", projects.length < 2);
+	const entries = projects.map((project) => ({ value: project.key, text: project.name })).sort((a, b) => a.text.localeCompare(b.text));
+	return syncSelect($("graph-project"), entries, "tất cả dự án");
+}
+
+/**
+ * Restrict the board to one project and/or one jurisdiction.
  *
  * Edges are kept only when BOTH ends survive: half an edge pointing into
  * nothing would read as a message to an agent that does not exist.
  */
-function filterByDomain(graph, domain) {
-	if (!domain) return graph;
-	const nodes = (graph.nodes ?? []).filter((node) => node.domain === domain);
+function filterBoard(graph, { domain, project }) {
+	if (!domain && !project) return graph;
+	const nodes = (graph.nodes ?? []).filter(
+		(node) => (!domain || node.domain === domain) && (!project || projectKey(node) === project),
+	);
 	const kept = new Set(nodes.map((node) => node.id));
 	return {
 		...graph,
@@ -691,20 +860,23 @@ function filterByDomain(graph, domain) {
 /**
  * Two Supervisors over one domain is not a cosmetic labelling problem: a Lead
  * under both refuses BOTH decisions and escalates, so governance stops for
- * everyone underneath. It gets its own notice rather than a line in the
- * degraded list.
+ * everyone underneath. Advanced mode only — it is about team.domain labels, which
+ * the simple view never mentions — and the "no label" half is further limited to
+ * the case where it can matter: the graph cannot read the agents' own
+ * PASEO_TEAM_TOPOLOGY, and on the default single-Supervisor setup an unlabelled
+ * seat is normal, so reporting it there is noise a reader cannot act on.
  */
 function renderJurisdiction(graph) {
 	const box = $("graph-jurisdiction");
-	if (!box) return;
 	const jurisdiction = graph.jurisdiction ?? {};
 	const conflicts = jurisdiction.conflicts ?? [];
 	const unlabeled = jurisdiction.unlabeled ?? [];
+	const supervisors = jurisdiction.supervisors ?? [];
 	const lines = [];
 	for (const conflict of conflicts) lines.push(`Chồng lấn phạm vi: ${conflict.detail}`);
-	if (unlabeled.length > 0) {
+	if (unlabeled.length > 0 && supervisors.length > 1) {
 		lines.push(
-			`${unlabeled.length} ghế Trưởng nhóm/Giám sát chưa có nhãn team.domain — ở chế độ nhiều Giám sát (PASEO_TEAM_TOPOLOGY=multi) họ không quản được ai và cũng không ai quản được họ.`,
+			`${unlabeled.length} ghế Trưởng nhóm/Giám sát chưa có nhãn team.domain. Nếu bạn chạy nhiều Giám sát (PASEO_TEAM_TOPOLOGY=multi) thì họ không quản được ai và cũng không ai quản được họ.`,
 		);
 	}
 	box.textContent = lines.join(" ");
@@ -724,7 +896,6 @@ function renderJurisdiction(graph) {
  */
 function renderClusterMismatches(graph) {
 	const box = $("graph-cluster-mismatch");
-	if (!box) return;
 	const mismatches = graph.clusterMismatches ?? [];
 	box.textContent = mismatches.map((mismatch) => mismatch.detail).join(" ");
 	box.classList.toggle("hidden", mismatches.length === 0);
@@ -732,8 +903,10 @@ function renderClusterMismatches(graph) {
 }
 
 function renderTeam(fullGraph) {
-	const domain = syncDomainFilter(fullGraph);
-	const graph = filterByDomain(fullGraph, domain);
+	const graph = filterBoard(fullGraph, {
+		domain: syncDomainFilter(fullGraph),
+		project: syncProjectFilter(fullGraph),
+	});
 	renderJurisdiction(fullGraph);
 	renderClusterMismatches(fullGraph);
 	return renderTeamGraph(graph, fullGraph);
@@ -771,26 +944,31 @@ function openDrawer(node) {
 	const body = clear($("drawer-body"));
 	drawer.classList.remove("hidden");
 	body.appendChild(el("h3", { text: node.name || "(không tên)" }));
-	const familyPart = node.family ? ` · ${familyLabel(node.family)}` : "";
+	const runtime = runtimeLabel(node);
 	body.appendChild(
-		el("p", { class: "drawer-sub", text: `${roleLabel(node.role)}${familyPart} · ${statusLabel(node.status)}` }),
+		el("p", {
+			class: "drawer-sub",
+			text: `${agentKindLabel(node)}${node.seat ? ` · ${node.seat}` : ""}${runtime ? ` · chạy bằng ${runtime}` : ""} · ${statusLabel(node.status)}`,
+		}),
 	);
 	if (ROLE_HINT[node.role]) body.appendChild(el("p", { class: "hint", text: ROLE_HINT[node.role] }));
 
-	const facts = [
-		["Thư mục làm việc", node.cwd],
-		["Chờ bạn duyệt", node.pendingPermissions || "không có"],
-	];
-	if (node.role === "supervisor" || node.role === "lead") {
-		facts.push(["Phạm vi quản (team.domain)", domainLabel(node.domain)]);
-		facts.push(["Cluster (team.cluster)", node.cluster ?? "chưa xác định được"]);
-	}
+	const facts = [];
+	const project = projectLabel(node.project ?? "");
+	if (project) facts.push(["Dự án", project]);
+	facts.push(["Thư mục làm việc", node.cwd], ["Chờ bạn duyệt", node.pendingPermissions || "không có"]);
 	if (node.forkOf) {
 		const source = lastGraph?.nodes?.find((other) => other.id === node.forkOf);
 		facts.push(["Bàn giao từ", source ? source.name || node.forkOf : node.forkOf]);
 	}
 	if (node.orphan) facts.push(["Người giao việc", "không có trong danh sách này (có thể đã lưu trữ)"]);
-	if (advanced) facts.push(["Mã agent", node.id], ["Nhà cung cấp", node.provider], ["Mức suy nghĩ", node.thinking]);
+	if (advanced) {
+		if (node.role === "supervisor" || node.role === "lead") {
+			facts.push(["Phạm vi quản (team.domain)", domainLabel(node.domain)]);
+			facts.push(["Cluster (team.cluster)", node.cluster ?? "chưa xác định được"]);
+		}
+		facts.push(["Mã agent", node.id], ["Nhà cung cấp", node.provider], ["Mức suy nghĩ", node.thinking]);
+	}
 	body.appendChild(kvTable(facts));
 
 	body.appendChild(el("h4", { text: "Nhắn cho agent này" }));
@@ -822,12 +1000,13 @@ function openDrawer(node) {
 
 $("drawer-close").addEventListener("click", () => $("node-drawer").classList.add("hidden"));
 
-async function refreshGraph({ silent = false } = {}) {
+async function refreshGraph({ silent = false, fresh = false } = {}) {
 	try {
 		const params = new URLSearchParams();
 		if ($("graph-all").checked) params.set("all", "1");
+		if (fresh) params.set("fresh", "1");
 		const query = params.toString();
-		lastGraph = (await api(`/api/graph${query ? `?${query}` : ""}`)).data;
+		lastGraph = annotateProjects((await api(`/api/graph${query ? `?${query}` : ""}`)).data);
 		if (activeTab === "graph") renderTeam(lastGraph);
 	} catch (error) {
 		if (!silent) toastError(error);
@@ -839,13 +1018,15 @@ loaders.graph = async () => {
 	await refreshGraph();
 };
 
-$("graph-refresh").addEventListener("click", () => refreshGraph());
+$("graph-refresh").addEventListener("click", () => refreshGraph({ fresh: true }));
 $("graph-all").addEventListener("change", () => refreshGraph());
-// The domain filter is a local view change: no request, just a redraw.
-$("graph-domain").addEventListener("change", () => {
-	teamRenderedSig = "";
-	if (lastGraph) renderTeam(lastGraph);
-});
+// Both filters are local view changes: no request, just a redraw.
+for (const id of ["graph-domain", "graph-project"]) {
+	$(id).addEventListener("change", () => {
+		teamRenderedSig = "";
+		if (lastGraph) renderTeam(lastGraph);
+	});
+}
 
 // A paseo round trip costs ~3s, so 5s is the floor that still leaves the daemon
 // idle between polls. The server caches, so extra tabs cost nothing.
@@ -864,25 +1045,70 @@ setInterval(async () => {
 
 // --- roles -----------------------------------------------------------------
 
+/** The role currently loaded into the editor, and its text as it is on disk. */
+const promptState = { role: null, saved: "" };
+
+function promptDirty() {
+	return promptState.role !== null && !$("prompt-editor").disabled && $("prompt-editor").value !== promptState.saved;
+}
+
+function paintPromptDirty() {
+	$("prompt-save").classList.toggle("dirty", promptDirty());
+}
+
 async function loadPrompt() {
 	const role = $("role-select").value;
 	$("role-hint").textContent = ROLE_HINT[role] ?? "";
 	try {
 		const { data } = await api(`/api/prompts?role=${encodeURIComponent(role)}`);
-		$("prompt-editor").value = data.content ?? "";
+		promptState.role = role;
+		promptState.saved = data.content ?? "";
+		$("prompt-editor").disabled = false;
+		$("prompt-save").disabled = false;
+		$("prompt-editor").value = promptState.saved;
+		$("prompt-meta").classList.remove("no");
 		$("prompt-meta").textContent = data.path ?? "";
 	} catch (error) {
-		$("prompt-meta").textContent = "";
-		toastError(error);
+		// An editor that stays empty and enabled invites exactly the wrong move: Lưu
+		// would write an empty file over the role's instructions. Say what is wrong
+		// where the editor is, and lock it until there is something to edit.
+		const info = error?.human ?? humanizeError({ message: error?.message });
+		promptState.role = null;
+		promptState.saved = "";
+		$("prompt-editor").value = "";
+		$("prompt-editor").disabled = true;
+		$("prompt-save").disabled = true;
+		$("prompt-meta").classList.add("no");
+		$("prompt-meta").textContent = `${info.title}. ${info.advice}`;
 	}
+	paintPromptDirty();
 }
 
-$("prompt-load").addEventListener("click", loadPrompt);
-$("role-select").addEventListener("change", loadPrompt);
+function confirmDiscardPrompt() {
+	return !promptDirty() || confirm("Bạn đã sửa mô tả vai trò này nhưng chưa lưu. Bỏ các thay đổi đó?");
+}
+
+$("prompt-load").addEventListener("click", () => {
+	if (confirmDiscardPrompt()) loadPrompt();
+});
+$("role-select").addEventListener("change", () => {
+	if (confirmDiscardPrompt()) {
+		loadPrompt();
+		return;
+	}
+	$("role-select").value = promptState.role ?? $("role-select").value;
+});
+$("prompt-editor").addEventListener("input", paintPromptDirty);
 $("prompt-save").addEventListener("click", async () => {
 	const role = $("role-select").value;
+	if ($("prompt-editor").value.trim() === "") {
+		toast("Mô tả vai trò đang trống. Không lưu, để khỏi xoá hết chỉ dẫn của vai trò này.", true);
+		return;
+	}
 	try {
 		await api(`/api/prompts?role=${encodeURIComponent(role)}`, { method: "POST", body: { content: $("prompt-editor").value } });
+		promptState.saved = $("prompt-editor").value;
+		paintPromptDirty();
 		toast("Đã lưu. Bản cũ được sao lưu tự động.");
 	} catch (error) {
 		toastError(error);
@@ -890,7 +1116,7 @@ $("prompt-save").addEventListener("click", async () => {
 });
 
 loaders.roles = async () => {
-	if (!$("prompt-editor").value) await loadPrompt();
+	if (promptState.role === null) await loadPrompt();
 	if (!$("env-table").hasChildNodes()) await loadEnvTable();
 };
 
@@ -929,6 +1155,10 @@ const configState = {
 	doc: {},
 	/** The document as it is on disk, for "unsaved edits?" checks. */
 	saved: {},
+	/** Fingerprint of the file as it was read; a save sends it back so a file that changed since is not overwritten. */
+	rev: null,
+	/** The text of a file that exists but does not parse, until it is repaired. */
+	invalidRaw: null,
 	mode: "form",
 	// Repaint callbacks for fields whose options follow a sibling field.
 	// Rebuilt from scratch on every render — a stale closure would write into
@@ -1183,7 +1413,7 @@ function mapControl(field, path) {
 	const fixed = field.fixedKeys ?? null;
 	const existing = () => getPath(configState.doc, path) ?? {};
 
-	const cardForKey = (key, isFixed) => {
+	const cardForKey = (key, isFixed, compact = false) => {
 		const card = el("div", { class: "cfg-card" });
 		card.dataset.key = key;
 		const head = el("div", { class: "cfg-card-head" });
@@ -1227,7 +1457,7 @@ function mapControl(field, path) {
 		}
 		card.appendChild(head);
 		const body = el("div", { class: "cfg-card-body" });
-		appendFields(body, field.item?.fields, joinPath(path, key));
+		appendFields(body, field.item?.fields, joinPath(path, key), { compact });
 		card.appendChild(body);
 		return card;
 	};
@@ -1235,7 +1465,7 @@ function mapControl(field, path) {
 	const keys = fixed
 		? [...fixed, ...Object.keys(existing()).filter((key) => !fixed.includes(key))]
 		: Object.keys(existing());
-	for (const key of keys) wrap.appendChild(cardForKey(key, fixed?.includes(key) === true));
+	keys.forEach((key, index) => wrap.appendChild(cardForKey(key, fixed?.includes(key) === true, index > 0)));
 	if (!fixed) {
 		wrap.appendChild(
 			el("button", {
@@ -1278,19 +1508,25 @@ function fieldControl(field, path, prefix) {
  * card twice as tall and buries the two that matter, so the tail is collapsed —
  * still one click away, and still saved whether it is open or shut.
  */
-function appendFields(container, fields, prefix) {
+function appendFields(container, fields, prefix, { compact = false } = {}) {
 	const plain = [];
 	const advanced = [];
 	for (const field of fields ?? []) (field.advanced ? advanced : plain).push(field);
-	for (const field of plain) container.appendChild(fieldRow(field, prefix));
+	for (const field of plain) container.appendChild(fieldRow(field, prefix, { compact }));
 	if (advanced.length === 0) return;
+	// Open when something in it is already set: a collapsed section hiding a
+	// non-default value is a setting nobody can see is in force.
+	const set = advanced.filter((field) => getPath(configState.doc, joinPath(prefix, field.path)) !== undefined).length;
 	const more = el("details", { class: "cfg-more" });
-	more.appendChild(el("summary", { text: `Tuỳ chọn nâng cao (${advanced.length})` }));
-	for (const field of advanced) more.appendChild(fieldRow(field, prefix));
+	more.open = set > 0;
+	more.appendChild(
+		el("summary", { text: `Tuỳ chọn nâng cao (${advanced.length}${set > 0 ? `, ${set} đã đặt` : ""})` }),
+	);
+	for (const field of advanced) more.appendChild(fieldRow(field, prefix, { compact }));
 	container.appendChild(more);
 }
 
-function fieldRow(field, prefix) {
+function fieldRow(field, prefix, { compact = false } = {}) {
 	const path = joinPath(prefix, field.path);
 	const row = el("div", { class: `cfg-field${field.type === "map" || field.type === "flags" ? " cfg-field-wide" : ""}` });
 	// Label, its default and its hint all live in the FIRST column. They used
@@ -1298,13 +1534,16 @@ function fieldRow(field, prefix) {
 	// screen and hid the control the row is actually about.
 	row.appendChild(
 		el("div", { class: "cfg-label" }, [
-			el("label", { text: field.label }),
+			// `compact` is every card after the first in a list of look-alike cards
+			// (the five routes, each host): the same three paragraphs of hint repeated
+			// five times buried the values. The text stays one hover away.
+			el("label", { text: field.label, title: compact && field.hint ? field.hint : null }),
 			field.default !== undefined ? el("span", { class: "cfg-default", text: defaultValueLabel(field) }) : null,
-			field.hint && field.type !== "map" ? el("p", { class: "cfg-hint", text: field.hint }) : null,
+			field.hint && field.type !== "map" && !compact ? el("p", { class: "cfg-hint", text: field.hint }) : null,
 		]),
 	);
 	row.appendChild(fieldControl(field, path, prefix));
-	if (field.type === "map" && field.hint) row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
+	if (field.type === "map" && field.hint && !compact) row.appendChild(el("p", { class: "cfg-hint", text: field.hint }));
 	if (field.showIf) {
 		row.dataset.showIfPath = joinPath(prefix, field.showIf.path);
 		row.dataset.showIfEquals = String(field.showIf.equals);
@@ -1373,6 +1612,9 @@ function renderConfigForm() {
 		form.appendChild(fieldset);
 	}
 	refreshDependents();
+	// Presets and add/remove-card buttons rebuild the form without firing an
+	// input event, so the Save button's "unsaved" state is refreshed here too.
+	paintDirty();
 }
 
 /**
@@ -1522,27 +1764,90 @@ function setConfigMode(mode) {
 	applyConfigMode("form");
 }
 
-async function loadConfig() {
+async function loadConfig({ fresh = false } = {}) {
 	const section = $("config-section").value;
 	try {
-		const { data } = await api(`/api/config?section=${encodeURIComponent(section)}`);
+		// A save changes the file (so the CLI-side cache is already dropped), but an
+		// explicit reload may follow a change made by something else — Pi itself —
+		// which the 5s read cache cannot know about.
+		const { data } = await api(`/api/config?section=${encodeURIComponent(section)}${fresh ? "&fresh=1" : ""}`);
 		configState.section = section;
 		configState.schema = data.schema ?? null;
+		configState.rev = typeof data.rev === "string" ? data.rev : null;
+		configState.invalidRaw = data.invalid ? String(data.raw ?? "") : null;
 		configState.doc = data.exists ? clone(data.data) : clone(configState.schema?.seed ?? {});
 		// What is on disk right now, so "Áp dụng ghế" can tell edited from saved.
 		configState.saved = pruneEmpty(clone(configState.doc)) ?? {};
 		$("seats-apply").classList.toggle("hidden", section !== "seats");
-		$("config-meta").textContent = `${data.path}${data.exists ? "" : " (chưa tồn tại — lưu sẽ tạo mới)"}`;
-		$("config-editor").value = JSON.stringify(configState.doc, null, 2);
-		// A section without a schema keeps the old raw-JSON editor.
-		applyConfigMode(configState.schema ? "form" : "raw");
+		$("config-meta").textContent = data.invalid
+			? `${data.path} — file này đang HỎNG, không đọc được JSON (${data.invalid.message}). Sửa trong ô dưới rồi Lưu; bản hỏng được sao lưu.`
+			: `${data.path}${data.exists ? "" : " (chưa tồn tại — lưu sẽ tạo mới)"}`;
+		$("config-meta").classList.toggle("no", Boolean(data.invalid));
+		$("config-editor").value = data.invalid ? configState.invalidRaw : JSON.stringify(configState.doc, null, 2);
+		// A section without a schema keeps the old raw-JSON editor, and so does a
+		// file that does not parse: the form cannot show what could not be read.
+		applyConfigMode(configState.schema && !data.invalid ? "form" : "raw");
+		paintDirty();
 	} catch (error) {
 		toastError(error);
 	}
 }
 
-$("config-load").addEventListener("click", loadConfig);
-$("config-section").addEventListener("change", loadConfig);
+/**
+ * Has the person changed anything since the file was read?
+ *
+ * Leaving a section (or pressing Tải lại) used to throw the edits away without a
+ * word — one mis-click on the dropdown and a form's worth of changes was gone.
+ */
+function configDirty() {
+	if (configState.section === null) return false;
+	if (configState.invalidRaw !== null) return $("config-editor").value !== configState.invalidRaw;
+	let working;
+	if (configState.mode === "raw") {
+		try {
+			working = pruneEmpty(JSON.parse($("config-editor").value)) ?? {};
+		} catch {
+			return true; // text that is not even JSON has certainly been edited
+		}
+	} else {
+		working = pruneEmpty(clone(configState.doc)) ?? {};
+	}
+	return JSON.stringify(working) !== JSON.stringify(configState.saved ?? {});
+}
+
+function paintDirty() {
+	const dirty = configDirty();
+	$("config-save").classList.toggle("dirty", dirty);
+	$("config-save").textContent = dirty ? "Lưu thay đổi" : "Lưu";
+}
+
+/** Ask before discarding edits; true means "go ahead". */
+function confirmDiscardConfig() {
+	if (!configDirty()) return true;
+	return confirm("Bạn đã sửa mục này nhưng chưa lưu. Bỏ các thay đổi đó?");
+}
+
+$("config-load").addEventListener("click", () => {
+	if (confirmDiscardConfig()) loadConfig({ fresh: true });
+});
+$("config-section").addEventListener("change", () => {
+	if (confirmDiscardConfig()) {
+		loadConfig({ fresh: true });
+		return;
+	}
+	$("config-section").value = configState.section ?? $("config-section").value;
+});
+// Edits fire input/change inside these two; the Save button follows them.
+for (const id of ["config-form", "config-editor"]) {
+	$(id).addEventListener("input", paintDirty);
+	$(id).addEventListener("change", paintDirty);
+}
+window.addEventListener("beforeunload", (event) => {
+	if ((activeTab === "config" && configDirty()) || (activeTab === "roles" && promptDirty())) {
+		event.preventDefault();
+		event.returnValue = "";
+	}
+});
 
 /**
  * Apply the SAVED seat document, never the form's working copy.
@@ -1598,9 +1903,13 @@ $("config-save").addEventListener("click", async () => {
 		return;
 	}
 	try {
-		await api(`/api/config?section=${encodeURIComponent(section)}`, { method: "POST", raw: text });
+		// `rev` is the fingerprint of the file this form was built from: if anything
+		// (Pi itself rewrites its own settings.json) changed it since, the CLI
+		// refuses instead of silently writing a stale copy over those changes.
+		const rev = configState.section === section && configState.rev ? `&rev=${encodeURIComponent(configState.rev)}` : "";
+		await api(`/api/config?section=${encodeURIComponent(section)}${rev}`, { method: "POST", raw: text });
 		toast("Đã lưu. Bản cũ được sao lưu kèm thời gian.");
-		await loadConfig();
+		await loadConfig({ fresh: true });
 	} catch (error) {
 		toastError(error);
 	}
@@ -1613,7 +1922,10 @@ loaders.config = async () => {
 // --- boot ------------------------------------------------------------------
 
 applyMode();
-if (!token) {
-	toast("Thiếu mã truy cập. Mở đúng đường dẫn có #token=… mà cửa sổ dòng lệnh vừa in ra.", true);
+// No up-front complaint about a missing token: `paseo-team web --no-token` runs
+// without one, and warning there was a false alarm on every page load. A server
+// that DOES need one answers 401, which api() turns into the same advice.
+for (const tile of document.querySelectorAll("[data-goto]")) {
+	tile.addEventListener("click", () => selectTab(tile.dataset.goto));
 }
 selectTab("home");

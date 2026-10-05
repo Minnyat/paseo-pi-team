@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import {
 	ALL_PASEO_TOOLS,
+	PASEO_TOOLS,
 	browserMcpAllowed,
 	callsPaseoCli,
 	callsTeamSupportScript,
@@ -127,10 +128,6 @@ const v3WriteBrief = [
 	"PROJECT_ID: demo",
 	"DISPOSITION: engineer",
 	"MODE: write",
-	"ASSIGNED_HOST_ID: win-primary",
-	"ASSIGNED_PASEO_PROVIDER: pi-peer",
-	"ASSIGNED_MODEL: testprov/coder-mid",
-	"ASSIGNED_THINKING: medium",
 	"OWNED_SCOPE: src/calculator.py",
 	"EDIT_AUTHORITY: allowed",
 	"COMMIT_AUTHORITY: allowed",
@@ -151,6 +148,37 @@ const v3WriteBrief = [
 	assert.deepEqual(brief.malformed, []);
 	assert.equal(brief.fields.get("TASK_ID"), "T-101");
 	assert.equal(brief.fields.get("COMMIT_AUTHORITY"), "allowed");
+}
+
+// Routing facts are parameters of create_agent, not message content. A brief
+// that still carries them keeps its authority (an allowlist miss would have made
+// it read-only over fields that grant nothing), and the values are never stored:
+// nothing may read them back as if the message were the source of truth.
+{
+	const withRouting = v3WriteBrief.replace(
+		"MODE: write\n",
+		[
+			"MODE: write",
+			"ASSIGNED_HOST_ID: win-primary",
+			"ASSIGNED_PASEO_PROVIDER: pi-peer",
+			"ASSIGNED_MODEL: testprov/coder-mid",
+			"ASSIGNED_THINKING: medium",
+			"WORKSPACE_REF: worktree:../w/T-101",
+			"AGENT_REF: local/abc",
+			"",
+		].join("\n"),
+	);
+	assert.notEqual(withRouting, v3WriteBrief, "the fixture really carries the fields");
+	const brief = parseTaskBrief(withRouting);
+	assert.ok(brief);
+	assert.deepEqual(brief.malformed, [], "a legacy routing field is not malformed");
+	assert.equal(brief.mode, "write", "and does not cost the brief its authority");
+	assert.equal(brief.fields.get("COMMIT_AUTHORITY"), "allowed");
+	for (const field of ["ASSIGNED_HOST_ID", "ASSIGNED_PASEO_PROVIDER", "ASSIGNED_MODEL", "ASSIGNED_THINKING", "WORKSPACE_REF", "AGENT_REF"]) {
+		assert.equal(brief.fields.has(field), false, `${field} is skipped, never stored`);
+	}
+	// Ignored is not a loophole: a field that was never on the list still fails closed.
+	assert.equal(parseTaskBrief(v3WriteBrief.replace("MODE: write\n", "MODE: write\nASSIGNED_SEED: 1\n"))?.mode, null);
 }
 
 // Task body after the end marker is untrusted; fields there must NOT parse.
@@ -694,8 +722,18 @@ assert.match(
 // Supervisor create_agent: the TARGET is allowed, but the ARGS are the gate
 // (fail-closed). Only a gated lead-recovery create passes.
 const recoveryCreateArgs = {
+	title: "Lead recovery",
 	provider: "pi-lead/Minnyat/gpt-5.6-sol",
+	initialPrompt: "Take over the lead seat.",
 	labels: { purpose: "recovery", recovery_for: "content-analysis" },
+	settings: { thinkingOptionId: "high" },
+};
+// A create_agent a Lead may make: every parameter Paseo reads, and nothing that
+// places the agent anywhere but the creator's own workspace.
+const leadCreateArgs = {
+	title: "Scout the repo",
+	provider: "pi-peer/Minnyat/gpt-5.4",
+	initialPrompt: "Look around and report what you find.",
 	settings: { thinkingOptionId: "high" },
 };
 assert.equal(
@@ -803,7 +841,17 @@ assert.ok(mcpBlockReason("supervisor", { action: "auth-start" }) !== null);
 
 // Lead target allowlist: discovery/workspace/monitoring/orchestration/permissions.
 assert.equal(mcpBlockReason("lead", { connect: "paseo" }), null);
-assert.equal(mcpBlockReason("lead", { tool: "create_agent" }), null);
+// A create_agent with no arguments object cannot be a call Paseo would accept:
+// it is refused here, with the contract, instead of one tool call later.
+assert.match(
+	mcpBlockReason("lead", { tool: "create_agent" }) ?? "",
+	/no arguments object/,
+);
+assert.equal(
+	mcpBlockReason("lead", { tool: "create_agent", args: leadCreateArgs }),
+	null,
+	"a complete create_agent with no placement parameter passes",
+);
 assert.equal(mcpBlockReason("lead", { tool: "respond_to_permission" }), null);
 assert.match(
 	mcpBlockReason("lead", { tool: "create_terminal" }) ?? "",
@@ -821,67 +869,25 @@ assert.ok(
 );
 assert.ok(mcpBlockReason("lead", { tool: {} }) !== null);
 
-// Lead create_workspace argument gate (Layer 1 of reviewer worktree invariant).
-assert.match(
-	mcpBlockReason("lead", { tool: "create_workspace" }) ?? "",
-	/args object/,
-	"missing create_workspace args → block",
-);
-assert.match(
-	mcpBlockReason("lead", {
-		tool: "create_workspace",
-		args: { path: "/repo" },
-	}) ?? "",
-	/explicit isolation/,
-	"missing isolation → block (no daemon default)",
-);
-assert.match(
-	mcpBlockReason("lead", {
-		tool: "create_workspace",
-		args: { path: "/repo", isolation: "worktee" },
-	}) ?? "",
-	/explicit isolation/,
-	"misspelled isolation → block fail-closed",
-);
+// A Lead does not create or archive workspaces: everything in one job shares
+// the workspace the Lead was started in. Whatever the arguments are, the call
+// is refused, and the refusal names the route to take.
+for (const tool of ["create_workspace", "paseo_create_workspace", "archive_workspace"]) {
+	for (const args of [
+		undefined,
+		{ path: "/repo", isolation: "local", title: "scout scratch" },
+		{ path: "/repo", isolation: "worktree", title: "review:T-042" },
+		JSON.stringify({ path: "/repo", isolation: "worktree", worktreeSlug: "review-T-042" }),
+	]) {
+		const reason = mcpBlockReason("lead", { tool, args }) ?? "";
+		assert.match(reason, /does not create or archive workspaces/, `${tool} is refused whatever it carries`);
+		assert.match(reason, /WITHOUT workspaceId/, "and the refusal says which call to make instead");
+	}
+}
 assert.equal(
-	mcpBlockReason("lead", {
-		tool: "create_workspace",
-		args: { path: "/repo", isolation: "local", title: "scout scratch" },
-	}),
+	mcpBlockReason("lead", { tool: "list_workspaces" }),
 	null,
-	"non-review local workspace passes",
-);
-assert.equal(
-	mcpBlockReason("lead", {
-		tool: "create_workspace",
-		args: { path: "/repo", isolation: "worktree", title: "review:T-042" },
-	}),
-	null,
-	"review-marked worktree workspace passes",
-);
-assert.match(
-	mcpBlockReason("lead", {
-		tool: "create_workspace",
-		args: { path: "/repo", isolation: "local", title: "review:T-042" },
-	}) ?? "",
-	/worktree/,
-	"review-titled workspace with local isolation → block",
-);
-assert.match(
-	mcpBlockReason("lead", {
-		tool: "create_workspace",
-		args: { path: "/repo", isolation: "local", worktreeSlug: "review-T-042" },
-	}) ?? "",
-	/worktree/,
-	"review-slugged workspace with local isolation → block",
-);
-assert.match(
-	mcpBlockReason("lead", {
-		tool: "paseo_create_workspace",
-		args: JSON.stringify({ path: "/repo", isolation: "local", title: "Review T-9" }),
-	}) ?? "",
-	/worktree/,
-	"prefixed target + string args are gated the same way",
+	"reading the workspace list is still discovery",
 );
 
 // create_agent: the cluster-label gate (§PR-G follow-up). No code path ever
@@ -916,7 +922,7 @@ assert.equal(
 		"lead",
 		{
 			tool: "create_agent",
-			args: { initialPrompt: "hello", labels: { "team.cluster": "D:\\Code\\Shop" } },
+			args: { ...leadCreateArgs, labels: { "team.cluster": "D:\\Code\\Shop" } },
 		},
 		{ cluster: "d:/code/shop" },
 	),
@@ -926,29 +932,17 @@ assert.equal(
 assert.equal(
 	mcpBlockReason(
 		"lead",
-		{ tool: "create_agent", args: { initialPrompt: "hello" } },
+		{ tool: "create_agent", args: leadCreateArgs },
 		{ cluster: null },
 	),
 	null,
 	"this Lead's own cluster is unresolvable, so the gate cannot demand a value it cannot itself determine",
 );
 assert.equal(
-	mcpBlockReason("lead", { tool: "create_agent", args: { initialPrompt: "hello" } }),
+	mcpBlockReason("lead", { tool: "create_agent", args: leadCreateArgs }),
 	null,
 	"a caller that never resolved a cluster at all (no context) keeps the pre-gate behaviour",
 );
-// create_workspace is a DIFFERENT target — the cluster-label requirement must
-// not leak onto it even when this seat's own cluster is known.
-assert.equal(
-	mcpBlockReason(
-		"lead",
-		{ tool: "create_workspace", args: { path: "/repo", isolation: "local" } },
-		{ cluster: "d:/code/shop" },
-	),
-	null,
-	"create_workspace carries no team.cluster requirement",
-);
-
 // Same gate on the Supervisor's gated lead-recovery create_agent. Checked
 // BEFORE the recovery-specific argument gate, so a call that is otherwise a
 // perfectly valid recovery still needs the label.
@@ -1110,8 +1104,12 @@ const prevLeadWrite = process.env.PASEO_TEAM_LEAD_WRITE;
 delete process.env.PASEO_TEAM_LEAD_WRITE;
 const lead = policyFor("lead", "read-only");
 assert.ok(
-	ALL_PASEO_TOOLS.every((t) => lead.allow.includes(t)),
-	"lead allows all paseo tools",
+	ALL_PASEO_TOOLS.filter((t) => !PASEO_TOOLS.workspaceMutation.includes(t)).every((t) => lead.allow.includes(t)),
+	"lead allows every paseo tool except the two that mutate workspaces",
+);
+assert.ok(
+	PASEO_TOOLS.workspaceMutation.every((t) => ALL_PASEO_TOOLS.includes(t) && !lead.allow.includes(t)),
+	"create_workspace / archive_workspace stay in the deny catalog and out of the Lead allowlist",
 );
 assert.ok(
 	lead.allow.includes("respond_to_permission"),
@@ -1712,7 +1710,13 @@ for (const file of readdirSync(examplesDir).filter((f) => f.endsWith(".md"))) {
 				toolName: "mcp",
 				input: {
 					tool: "create_agent",
-					args: { initialPrompt: prompt, labels: { "team.cluster": CLUSTER } },
+					args: {
+						title: "T-1 writer",
+						provider: "pi-peer/Minnyat/gpt-5.4",
+						initialPrompt: prompt,
+						settings: { thinkingOptionId: "high" },
+						labels: { "team.cluster": CLUSTER },
+					},
 				},
 			})) as { block?: boolean; reason?: string } | undefined;
 
@@ -2126,7 +2130,12 @@ import {
 	assert.equal(
 		mcpBlockReason("lead", {
 			tool: "create_agent",
-			args: { provider: "claude-peer/claude-opus-5", settings: { modeId: "auto" } },
+			args: {
+				title: "Scout",
+				provider: "claude-peer/claude-opus-5",
+				initialPrompt: "Look around.",
+				settings: { modeId: "auto", thinkingOptionId: "high" },
+			},
 		}),
 		null,
 	);
