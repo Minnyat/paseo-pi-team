@@ -955,6 +955,9 @@ and why, what you already know, what to leave alone and what you would like
 back, in plain sentences addressed to the Peer — not a form with codes the Peer
 has to decode. The same goes for anything you send afterwards (a correction, an
 answer to its question): reply the way you would to a teammate who asked you.
+OBJECTIVE is the outcome, not the change you expect to produce it; CONSTRAINTS
+holds the seam contract and any transitional state ("Splitting into tasks"),
+and nothing about the insides of `OWNED_SCOPE`.
 
 ## Peer output contract
 
