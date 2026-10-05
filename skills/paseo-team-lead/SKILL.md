@@ -142,8 +142,10 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    files.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
-2. Pick `HOST_ID` from the controller-local cluster routing file
-   `~/.paseo-pi-team/cluster-routing.local.json` (capability filter: writers
+2. Pick `HOST_ID` from the controller-local `cluster-routing.local.json` in the
+   pack's config directory — `~/.paseo-team-orchestration`, or `~/.paseo-pi-team`
+   on a host installed before the rename (`PST_TEAM_CONFIG_DIR` overrides both;
+   never conclude "no routing file" from one path) (capability filter: writers
    need `git-write`+`focused-test`; reviewers need `git-read`+`independent-review`).
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
