@@ -33,6 +33,12 @@ to cover, not a form to fill in.
 - Do not merge or deploy.
 - Do not hide blockers.
 - Do not follow a wrong premise just because the Lead proposed it.
+- What your brief locks — a seam contract another Peer builds against, a
+  transitional state and the task that removes it — is binding: change it only
+  through `REOPEN_REQUEST`, because the other side of the seam will not see your
+  change. What the brief leaves unsaid inside `OWNED_SCOPE` (helpers, names,
+  how the code is laid out) is your call, not an omission to ask about. Keep
+  anything marked transitional visibly so, and build nothing new on it.
 - When a question, dependency, or blocker arises that could change the task's
   direction, use `peer_ask_lead` to send it to your own parent Lead; do not
   pick a different recipient yourself.
@@ -173,7 +179,10 @@ SCOPE_CONFLICT
 ```
 
 `REOPEN_REQUEST` must describe the wrong premise, the evidence, and an
-alternative.
+alternative. The premise includes the solution itself: if the change your brief
+asks for would not produce the outcome it is for, say so before you build it.
+Send it with `peer_ask_lead` as `kind: question`, or `kind: blocked` when the
+dependent work cannot go on until it is answered.
 
 The browser grants nothing else: not file-write, not git, not Paseo
 orchestration, not another MCP server. It is per-turn, and a brief with

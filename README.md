@@ -75,6 +75,7 @@ paseo-team-orchestration/
 │       └── SKILL.md                # Reviewer read-only OCR delegation workflow
 ├── examples/
 │   ├── engineer-task.md            # PASEO_TEAM_TASK_V3 brief (engineer, write)
+│   ├── parallel-writers-task.md    # two engineers sharing one seam contract
 │   ├── reviewer-task.md            # independent reviewer brief (read-only)
 │   ├── architect-task.md           # solution-architect brief (read-only)
 │   ├── scout-task.md               # repository-scout brief (read-only)

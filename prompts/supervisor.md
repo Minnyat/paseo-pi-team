@@ -298,7 +298,9 @@ On each observation round:
 
 ## Anti-patterns to detect
 
-- The Lead writes an overly detailed plan before consulting the Peer.
+- The Lead writes an overly detailed plan before consulting the Peer — or
+  locks the insides of a task and leaves the seam between parallel writers open.
+- Phases no dependency requires, or a transitional state no brief removes.
 - The Peer becomes a bot typing out the Lead's solution.
 - Two writers on the same scope.
 - The Lead treats "done", "idle", or exit code 0 as acceptance.

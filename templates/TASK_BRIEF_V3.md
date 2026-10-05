@@ -139,6 +139,14 @@ skeleton above are a checklist for you, and a sentence each is enough. Address
 the Peer directly, and expect it to answer you the same way — a person asking its
 lead a question, or telling them what it found.
 
+Two of those headings carry most of the weight. OBJECTIVE is the outcome — what
+has to be true afterwards, and why — not the change you expect to produce it; a
+Peer handed only the solution cannot tell you it is the wrong one. CONSTRAINTS is
+where you lock what other work depends on: the seam contract, word for word as
+in the other writer's brief, and any transitional state with the task that
+removes it ("Splitting into tasks" in the Lead skill). Helpers, names and how the
+code is laid out inside `OWNED_SCOPE` are not constraints; leave them to the Peer.
+
 ## `acceptance-verifier` — the standard body
 
 Acceptance is part comparison, part judgement. This disposition does the

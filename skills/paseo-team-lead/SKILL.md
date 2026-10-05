@@ -9,7 +9,9 @@ description: Coordinate research, implementation, correction, and independent re
 
 1. Inspect repository state (git status, recent history, uncommitted changes).
 2. Read relevant project instructions (`AGENTS.md`, `WORKSPACE_PROTOCOL.md` if present).
-3. Identify objective, success boundary and risks.
+3. Identify the outcome — what has to be true afterwards, and for whom —
+   separately from any solution the request names, then the success boundary
+   and risks. A named solution is evidence about the outcome, not the spec.
 4. **Check that this cluster has a Supervisor.** `lead_ask_supervisor` reports
    `NO_SUPERVISOR_SEAT` when it does not, and a cluster without one has no
    delegated decision path — every question in it lands on the Human. Seating
@@ -19,11 +21,14 @@ description: Coordinate research, implementation, correction, and independent re
 
 ## Research
 
-Create read-only Peers when independent work can run in parallel:
-
-- Repository Scout
-- Documentation Researcher
-- Solution Challenger
+Research is for understanding the domain — what the code does today, who owns
+it, what the outcome actually needs — not for starting the build. Staff it by
+open question, not by habit: one read-only Peer per question you cannot answer
+from the repo yourself (a Repository Scout, Documentation Researcher or
+Solution Challenger is the usual shape). If you can already state the outcome,
+the owners and the seams, go straight to Decision. Scaling ceremony to the task
+never scales the invariants: the V3 brief, the lease and the exact-SHA
+independent review apply to a one-line change too.
 
 Every Peer works in YOUR workspace (see step 8 of the routing cycle). Send them a
 **V3 read-only brief** (`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`
@@ -40,8 +45,37 @@ Synthesize evidence. Record:
 - rejected alternatives;
 - owned scope;
 - excluded scope;
+- the seam contract: for every boundary two tasks share (an API, a schema, a
+  behavior, a state another task reads), what is fixed;
+- every transitional state, with the task that removes it;
 - verification;
 - unresolved risks.
+
+### Splitting into tasks
+
+Split along a real dependency or an ownership boundary, never because more
+phases look more rigorous. The test for every task and every phase: if it did
+not exist, what would go wrong? If the answer is "nothing, the plan would just
+be shorter", merge it.
+
+A phase no dependency requires usually stands on a transitional state — a shim,
+a flag, a compatibility path, a half-migrated schema — that exists only so the
+plan's steps can be committed one at a time. Here that state is more dangerous
+than it looks: every task gets a fresh Peer and every candidate a fresh
+Reviewer on its own SHA, and none of them knows the shim was meant to go. Tests
+get written against it, the next task builds on it, review approves it as
+architecture. So when one is unavoidable, name it — what it is, which task
+removes it — in three briefs: the one that creates it, the Reviewer's brief for
+that intermediate SHA, and the one that removes it. The job is not accepted
+while it still exists.
+
+Lock the seams, not the insides. `OWNED_SCOPE` says where a writer may work; a
+brief that also dictates how — which helper, which variable, how the logic is
+laid out — is pseudo-code in prose: the Peer types it out and loses the room to
+tell you the plan is wrong. A brief that leaves the seam open lets two parallel
+writers each build a correct half that does not fit the other. Put the seam
+contract, word for word the same, in both writers' briefs, and leave everything
+behind it to them.
 
 ## Accessing Paseo tools
 
@@ -702,7 +736,9 @@ After implementation:
    expensive seat for what is actually judgement: contradictions nobody
    flagged, an argument that does not hold, a risk the diff creates.
 
-   So structure the review in two passes:
+   So when the mechanical part is large, split the review in two passes (a
+   small diff is one pass; the exact-SHA worktree and the independent verdict
+   never shrink):
    - **Pass A (mechanical, cheap).** A script, or a `FAST_READ` Peer whose
      brief is a checklist, produces a RAW FINDINGS LIST: file, line, what was
      compared, matched/mismatched. It states facts and takes no view.

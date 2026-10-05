@@ -268,8 +268,12 @@ implementation still goes to an Engineer Peer.
 
 ## Anti-patterns
 
-- Sending a verdict in disguise ("Implement solution X exactly as follows…")
-  instead of objective + constraints + evidence.
+- Locking the wrong half of a plan: the insides spelled out ("implement X
+  exactly as follows…" — a verdict in disguise) while the seam two parallel
+  writers share is left for each to guess. Lock the contract, leave the
+  implementation (skill: "Splitting into tasks").
+- Phases no dependency requires. Each stands on a temporary state, and the next
+  Peer and its Reviewer, who never saw the plan, take it for architecture.
 - Accepting `finished`/`idle`/exit-0 alone as acceptance evidence.
 - Trusting the model name in a prompt over runtime config.
 - Creating the Reviewer inside the Engineer's working tree instead of a fresh
