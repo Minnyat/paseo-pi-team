@@ -703,7 +703,7 @@ function renderDiagram(graph) {
 		const y2 = to.y + NODE_H / 2;
 		const mid = (x1 + x2) / 2;
 		svg.appendChild(
-			svgEl("path", { class: `edge ${edge.type}`, d: `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}` }),
+			svgEl("path", { class: `edge ${edge.type}${edge.kind === "blocked" || edge.kind === "reopen" ? ` kind-${edge.kind}` : ""}`, d: `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}` }),
 		);
 	}
 

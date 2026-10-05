@@ -483,6 +483,25 @@ Use `send_agent_prompt` only for:
 
 Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the current Peer’s `paseo.parent-agent-id` and sends a structured `PEER_MESSAGE_V1`. It cannot target an arbitrary agent. Treat `blocked` as a coordination event and reply with a full V3 brief when the reply changes authority.
 
+### A Peer reopens a premise (`kind: reopen`)
+
+The Peer is telling you the ground under its brief is wrong. Settle it on
+evidence, not on how disruptive the change would be, and land on one of three:
+
+1. **The premise fails in the code as it stands** — a file and line, or a command
+   and its output, that you can reproduce. Revise: send the same Peer a fresh
+   full V3 brief (move `OWNED_SCOPE` through the lease if it changes), and tell any
+   other Peer whose work leaned on the same premise.
+2. **A real alternative, but the premise holds.** Say why in a sentence so the
+   Peer carries on. Not a defeat; a Peer that is never told why stops reopening.
+3. **You cannot tell.** Ask for the specific failing case or trace, not for an
+   opinion. Passing tests do not answer a reopen: they are what a flawed premise
+   also passes.
+
+Record the outcome with its evidence in your next `LEAD_REPORT`. A revision that
+moves the Human's stated objective, or touches anything irreversible, goes to
+the Supervisor (`lead_ask_supervisor`) before you act on it.
+
 ## Asking instead of interrupting (`lead_ask_supervisor`)
 
 The Human is not your first line of support; the Supervisor is. When you hit a
@@ -858,25 +877,14 @@ PASEO_TEAM_TASK_V3_END
 
 TASK_BODY_BEGIN
 OBJECTIVE / SUCCESS_BOUNDARY / KNOWN_EVIDENCE / QUESTIONS TO ANSWER
-CONSTRAINTS / REQUIRED HANDOFF
+MUST HOLD / ALREADY DECIDED / REQUIRED HANDOFF
 TASK_BODY_END
 ```
 
-`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed`, and the
-only one: omit it and the Peer keeps the browser its runtime already provides —
-Paseo Browser Control (`browser_*`, which the daemon registers on its own MCP
-server and injects into every seat) and, on a Claude seat, Claude in Chrome
-(`mcp__claude-in-chrome__*`). Browsing reads pages; everything it could change
-is still behind edit/commit/push authority. The pack no longer installs an
-`agent-browser` server, and that server now gets no special treatment.
-
-Write `BROWSER_MCP_AUTHORITY: denied` when you have a reason to withhold it —
-network egress you do not want, a task with no business leaving the repo — not
-as a reflex. Either way the setting is per-turn: repeat the full V3 brief on
-every authority-bearing follow-up, or the extension falls back to no valid
-brief at all, which grants nothing (browser included). It never grants Paseo
-orchestration or unrelated MCP servers, even though Browser Control shares a
-server with `create_agent`.
+`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed` (rationale:
+`lead.md` invariant 8). The setting is per-turn: repeat the full V3 brief on
+every authority-bearing follow-up, or the extension falls back to no valid brief
+at all, which grants nothing — browser included.
 
 PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
 extension permits is exactly
@@ -910,8 +918,10 @@ of accepting a deliverable, so your own context is not spent on comparison —
 see step 6 of Review, and `templates/TASK_BRIEF_V3.md` for the standard body.
 
 A brief must not smuggle in a verdict. Give the Peer the objective,
-constraints and evidence — not the answer. Peer has the right to
-`REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, or `BLOCKED`.
+constraints and evidence — not the answer, and mark which of your constraints
+are requirements and which are choices you made (`MUST HOLD` / `ALREADY DECIDED`
+in the template). Peer has the right to `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`,
+or `BLOCKED`, sent as the `reopen` / `dependency` / `blocked` kinds.
 
 **Write the body as a person writing to a colleague.** The authority block is
 the one machine-read part; everything after it is you talking. Say what you need

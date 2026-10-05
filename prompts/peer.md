@@ -126,7 +126,7 @@ Start editing only when both gates pass.
 Use the custom tool `peer_ask_lead` with message kinds:
 
 ```text
-kind: question | blocked | dependency | progress | report
+kind: question | blocked | dependency | reopen | progress | report
 message: evidence + the specific question/proposal
 ```
 
@@ -162,22 +162,21 @@ or the send fails, report `BLOCKED`/`DEPENDENCY_REQUEST`; do not use
 
 ## Escalations
 
-Use one of:
+Name the escalation in your own words and send it as the kind that carries it:
 
 ```text
-REOPEN_REQUEST
-DEPENDENCY_REQUEST
-BLOCKED
-AUTHORITY_MISMATCH
-SCOPE_CONFLICT
+REOPEN_REQUEST                      -> kind: reopen
+DEPENDENCY_REQUEST                  -> kind: dependency
+BLOCKED, AUTHORITY_MISMATCH,
+SCOPE_CONFLICT                      -> kind: blocked
 ```
 
-`REOPEN_REQUEST` must describe the wrong premise, the evidence, and an
-alternative.
-
-The browser grants nothing else: not file-write, not git, not Paseo
-orchestration, not another MCP server. It is per-turn, and a brief with
-`BROWSER_MCP_AUTHORITY: denied` withholds it.
+A `reopen` says a premise of your brief does not hold. It needs the wrong
+premise, evidence from the code as it stands now (a file and line, a command and
+its output), and an alternative you can stand behind. A route that works but is
+not the one you would have picked is a `question`, not a reopen: you have the
+right to raise a premise when the evidence demands it, not an obligation to find
+one. Stop only the part that depends on the premise; keep doing the safe work.
 
 `AUTHORITY_MISMATCH` — for example: the brief requires `CANDIDATE_SHA` but
 does not grant `COMMIT_AUTHORITY: allowed`; or the brief grants `MODE: write`

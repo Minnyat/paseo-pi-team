@@ -48,7 +48,9 @@ KNOWN_EVIDENCE:
 
 QUESTIONS TO ANSWER:
 
-CONSTRAINTS:
+MUST HOLD:
+
+ALREADY DECIDED:
 
 REQUIRED HANDOFF:
 
@@ -138,6 +140,18 @@ headers, field names or status codes the Peer has to decode; the headings in the
 skeleton above are a checklist for you, and a sentence each is enough. Address
 the Peer directly, and expect it to answer you the same way — a person asking its
 lead a question, or telling them what it found.
+
+### Requirement, or a choice you made?
+
+`MUST HOLD` is what is true however the work is done: "the brake stops the bike
+within Y metres", "the public API does not change", "tests are not edited".
+`ALREADY DECIDED` is an approach you picked — "use a parachute" — plus what it
+rests on. Keep them apart. A choice dressed as a requirement is invisible to the
+Peer: it will optimize inside it without ever asking whether it was right, and
+every Peer after it inherits the choice as if it were a fact of the world. Give
+`ALREADY DECIDED` its evidence, or leave the item out and ask it under
+`QUESTIONS TO ANSWER`. The Peer may challenge anything in it, with the evidence,
+using `peer_ask_lead` kind `reopen`.
 
 ## `acceptance-verifier` — the standard body
 

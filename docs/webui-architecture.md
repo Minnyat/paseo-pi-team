@@ -225,7 +225,7 @@ theo khối có header ổn định:
 
 ```text
 PEER_MESSAGE_V1
-KIND: question|blocked|dependency|progress
+KIND: question|blocked|dependency|reopen|progress|report
 CORRELATION_ID: <token>
 TASK_ID: <token>
 FROM_AGENT_ID: <agent id>
@@ -233,7 +233,7 @@ FROM_AGENT_ID: <agent id>
 
 Vì vậy chỉ cần parse timeline/prompt của **Lead** là dựng lại được cạnh
 `peer -> lead` kèm `kind`, `taskId`, `correlationId` — không cần Paseo hỗ trợ
-thêm gì. `kind` chính là màu của cạnh trong đồ thị (`blocked` = đỏ).
+thêm gì. `kind` quyết định màu của cạnh trong đồ thị: `blocked` và `reopen` (có Peer đang đứng chờ phía sau) màu đỏ, các loại còn lại dùng chung một màu để đồ thị không thành bảng chú giải.
 
 **(c) Lead -> Peer — tin cậy trung bình.** Suy ra từ `paseo logs <id> --filter
 tools` của Lead: các lời gọi `send_agent_prompt` / `create_agent`. Phụ thuộc

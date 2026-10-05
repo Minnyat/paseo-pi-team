@@ -52,7 +52,7 @@ QUESTIONS TO ANSWER:
 - Does the change introduce regressions outside the two edge cases?
 - Are there failure modes the tests do not cover (input types, precision)?
 
-CONSTRAINTS:
+MUST HOLD:
 - Work in a fresh checkout of the assigned SHA — not the engineer's tree:
   git fetch origin agent/T-001
   git worktree add --detach ../reviews/T-001-<short-sha> <candidate-sha>

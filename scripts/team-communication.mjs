@@ -25,7 +25,7 @@ import { retryWithBackoff } from "./reliability.mjs";
 // two runtimes' tool schemas are the other two copies. This file is plain .mjs
 // and cannot import the .ts core at module scope, so the list is duplicated and
 // team-communication.test.mjs asserts all four never drift.
-export const MESSAGE_KINDS = Object.freeze(["question", "blocked", "dependency", "progress", "report"]);
+export const MESSAGE_KINDS = Object.freeze(["question", "blocked", "dependency", "reopen", "progress", "report"]);
 const METADATA_TOKEN = /^[A-Za-z0-9._:-]{1,256}$/;
 
 function metadataToken(name, value) {

@@ -144,6 +144,27 @@ paseo-team-orchestration/
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
 ```
 
+## When to use this pack
+
+The three roles earn their cost where work has **vertical dependencies**: a
+later step can expose that an earlier decision was wrong — shared state,
+lifecycles, ordering, tight performance limits, subsystems whose concerns
+overlap. There, a design Peer that may challenge the brief, one owner per
+moving scope, and a review on an exact SHA keep a wrong early choice from
+becoming everyone's invisible constraint.
+
+For **independent, parallelizable** changes (a batch of CRUD endpoints, a set of
+unrelated fixes) the same machinery mostly adds ceremony: staff Peers for the
+work, skip the design round, and one review is enough. For **design-sensitive**
+work where one person's judgment is the product (game feel, UI polish), a
+single agent from start to finish may beat any split. Sizing the Peers is the
+Lead's call and is yours to override; the Supervisor seat and the Human-only
+merge/deploy rule are not part of that sizing.
+
+Adding a role, a message layer or a review step is not the same as improving the
+orchestration; removing one that changes no decision usually is. When you
+trim, trim what shifts no outcome.
+
 ## Roles
 
 | Profile | `PASEO_PI_ROLE` | Default tools |
@@ -273,7 +294,11 @@ tool reads `PASEO_AGENT_ID`, inspects `paseo.parent-agent-id`, sends only to the
 parent Lead, and wraps the payload as `PEER_MESSAGE_V1` carrying `kind`,
 `TASK_ID` and `CORRELATION_ID`.
 
-Message kinds: `question`, `blocked`, `dependency`, `progress`.
+Message kinds: `question`, `blocked`, `dependency`, `reopen`, `progress`,
+`report`. `reopen` is the one that is easy to mistake for a blocker and is not:
+the Peer is saying a premise of its brief fails, with evidence from the code as
+it stands. The Lead is told, on the turn it opens, to weigh that evidence and
+either revise with a fresh full brief or explain why the premise holds.
 
 Failing to resolve the parent is fail-closed — there is no broadcast fallback.
 

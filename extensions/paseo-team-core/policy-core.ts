@@ -1913,6 +1913,13 @@ export const PEER_MESSAGE_HEADER = "PEER_MESSAGE_V1";
  * finished report had to label it `progress`, and a channel that can only be
  * used by mislabelling it is not a channel a Peer can be instructed to use.
  *
+ * `reopen` is the Peer saying the brief's PREMISE does not hold. It is its own
+ * kind because it is neither of its neighbours: `blocked` says "I cannot
+ * proceed" and `question` says "I need a decision I may not make", while a
+ * reopen says "the thing you told me to build on is wrong, and here is the
+ * evidence". Riding either of those, the one message that most needs a Lead to
+ * weigh it arrived looking like routine friction, with no obligation attached.
+ *
  * `team-communication.mjs` MESSAGE_KINDS and both runtimes' tool schemas are
  * copies of this list; team-communication.test.mjs asserts they never drift.
  */
@@ -1920,6 +1927,7 @@ export const PEER_MESSAGE_KINDS = Object.freeze([
 	"question",
 	"blocked",
 	"dependency",
+	"reopen",
 	"progress",
 	"report",
 ] as const);
@@ -2086,6 +2094,8 @@ function peerMessageDirective(kind: PeerMessageKind | null): string {
 			return "The Peer is STOPPED until you answer. This is the one kind with a Peer idling behind it, so answer it before you start anything new.";
 		case "dependency":
 			return "The Peer needs something outside its own scope. Grant it, reassign it, or refuse it with a reason — a silent dependency request reads to the Peer as a refusal it cannot cite.";
+		case "reopen":
+			return "The Peer says a premise of your brief does not hold, and has stopped the part that depends on it. This is not a failure to defend your plan against. Check its evidence against the code as it stands now: if the premise fails, revise the plan and send a fresh full V3 brief; if it holds and the Peer only prefers another route, say why so it carries on. Record the decision either way. If the change would move the Human's stated objective, consult the Supervisor (lead_ask_supervisor), not the Human.";
 		case "question":
 			return "The Peer needs a decision it is not allowed to make. Answer it from your own authority; escalate to the Supervisor only if the call is genuinely not yours.";
 		case "progress":

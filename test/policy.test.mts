@@ -2055,6 +2055,34 @@ import {
 	assert.match(notice!, /peer message/i);
 	assert.match(notice!, /PR-X/);
 	assert.equal(peerMessageTurnNotice({ block: null }), null);
+
+	// A reopen is a premise challenge, and the Lead's turn says what that
+	// obliges it to do: weigh the evidence against the code as it stands, revise
+	// with a fresh full brief if the premise fails, explain if it holds, record
+	// the decision, and take an objective-moving change to the Supervisor.
+	const reopen = parsePeerBlock(
+		[
+			"PEER_MESSAGE_V1",
+			"KIND: reopen",
+			"CORRELATION_ID: c-2",
+			"TASK_ID: PR-X",
+			"FROM_AGENT_ID: a",
+			"",
+			"The lifecycle you described does not exist in src/net/replicate.ts:88.",
+		].join("\n"),
+	);
+	assert.equal(reopen!.kind, "reopen");
+	assert.deepEqual(reopen!.malformed, []);
+	const reopenNotice = peerMessageTurnNotice({ block: reopen })!;
+	assert.match(reopenNotice, /premise/i);
+	assert.match(reopenNotice, /fresh full V3 brief/);
+	assert.match(reopenNotice, /lead_ask_supervisor/);
+	assert.doesNotMatch(reopenNotice, /malformed/);
+	assert.notEqual(
+		reopenNotice,
+		peerMessageTurnNotice({ block: parsePeerBlock(message.replace("KIND: report", "KIND: blocked")) })!,
+		"a reopen must not read like a blocker",
+	);
 }
 
 

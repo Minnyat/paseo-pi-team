@@ -294,6 +294,9 @@ table.list td.indent-5 { padding-left: 100px; }
 .band-rule { stroke: var(--line); stroke-width: 1; }
 .edge { fill: none; stroke: #46534f; stroke-width: 1.6; }
 .edge.message { stroke: var(--warn); stroke-dasharray: 5 4; }
+/* Only the two kinds with a Peer waiting behind them stand out; every other
+   kind shares one colour so the diagram stays a diagram, not a legend. */
+.edge.message.kind-blocked, .edge.message.kind-reopen { stroke: var(--danger); }
 /* Session lineage: an imported fork is a ROOT agent, so without this edge two
    Leads holding the same history look unrelated. */
 .edge.fork { stroke: var(--lead); stroke-dasharray: 2 3; }

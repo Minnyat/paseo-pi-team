@@ -336,11 +336,11 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 	pi.registerTool({
 		name: PEER_COMMUNICATION_TOOL,
 		label: "peer_ask_lead",
-		description: "Send a question, blocker, dependency request, or progress update to this Peer’s parent Lead only.",
+		description: "Send a question, blocker, dependency request, premise challenge (reopen), progress update, or finished report to this Peer’s parent Lead only.",
 		parameters: {
 			type: "object",
 			properties: {
-				kind: { type: "string", enum: ["question", "blocked", "dependency", "progress", "report"] },
+				kind: { type: "string", enum: ["question", "blocked", "dependency", "reopen", "progress", "report"] },
 				message: { type: "string", minLength: 1, maxLength: 12000 },
 				taskId: { type: "string" },
 				correlationId: { type: "string" },
