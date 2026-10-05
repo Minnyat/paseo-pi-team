@@ -171,6 +171,10 @@ BLOCKED, AUTHORITY_MISMATCH,
 SCOPE_CONFLICT                      -> kind: blocked
 ```
 
+Two headings in your brief mean different things. `MUST HOLD` is true whatever
+approach you take. `ALREADY DECIDED` is a choice your Lead made, with the
+evidence behind it — not a settled fact — and you may `reopen` it with evidence.
+
 A `reopen` says a premise of your brief does not hold. It needs the wrong
 premise, evidence from the code as it stands now (a file and line, a command and
 its output), and an alternative you can stand behind. A route that works but is
