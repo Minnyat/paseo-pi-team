@@ -787,6 +787,94 @@ try {
 
 		assert.equal(run(["seats", "nonsense"]).status, 2, "an unknown seats subcommand is a usage error");
 	}
+
+	// --- config read/write: the file as shown, the file as it is now ---------
+	// Pi rewrites its own settings.json, and the form used to write its stale copy
+	// straight over those changes; a corrupt file was reported as "does not exist".
+	{
+		const agentDir = join(sandbox, "pi", "agent");
+		mkdirSync(agentDir, { recursive: true });
+		const settings = join(agentDir, "settings.json");
+		rmSync(settings, { force: true });
+
+		const absent = run(["config", "read", "pi-settings"]);
+		assert.equal(absent.status, 0, absent.stderr);
+		assert.equal(absent.json.exists, false);
+		assert.equal(absent.json.rev, "absent", "no file has a fingerprint of its own: 'absent'");
+
+		// A write with the right rev lands, and hands back the new fingerprint.
+		const first = run(["config", "write", "pi-settings", "--rev", absent.json.rev], { __stdin: '{"theme":"light","unknownKey":{"keep":"me"}}' });
+		assert.equal(first.status, 0, first.stderr);
+		assert.match(first.json.rev, /^[0-9a-f]{64}$/);
+
+		const read = run(["config", "read", "pi-settings"]);
+		assert.equal(read.json.rev, first.json.rev, "what a write returns is what the next read reports");
+		assert.equal(read.json.invalid, undefined);
+
+		// The file changes behind the form's back (Pi, or the user's editor).
+		writeFileSync(settings, '{"theme":"dark","changedByPi":true}');
+		const stale = run(["config", "write", "pi-settings", "--rev", read.json.rev], { __stdin: '{"theme":"light"}' });
+		assert.notEqual(stale.status, 0, "a write over a file that changed since it was read is refused");
+		assert.match(stale.stderr, /CONFIG_CHANGED/);
+		assert.equal(readFileSync(settings, "utf8"), '{"theme":"dark","changedByPi":true}', "and the file is exactly as it was");
+
+		// No --rev keeps the old, unconditional behaviour for scripts.
+		const blind = run(["config", "write", "pi-settings"], { __stdin: '{"theme":"light"}' });
+		assert.equal(blind.status, 0, blind.stderr);
+
+		// A file that exists but does not parse is not "absent".
+		writeFileSync(settings, '{"theme": "light",');
+		const broken = run(["config", "read", "pi-settings"]);
+		assert.equal(broken.status, 0, broken.stderr);
+		assert.equal(broken.json.exists, true, "a corrupt file still exists");
+		assert.match(broken.json.invalid.message, /JSON/);
+		assert.equal(broken.json.raw, '{"theme": "light",', "its text is handed over so it can be repaired");
+		assert.deepEqual(broken.json.data, {});
+		assert.notEqual(broken.json.rev, "absent");
+
+		assert.notEqual(run(["config", "write", "pi-settings", "--bogus", "x"], { __stdin: "{}" }).status, 0, "an unknown write flag is refused");
+	}
+
+	// --- pi-settings: the model fields offer what pi's own models.json has ----
+	{
+		const agentDir = join(sandbox, "pi", "agent");
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(join(agentDir, "settings.json"), "{}");
+		const models = join(agentDir, "models.json");
+
+		rmSync(models, { force: true });
+		const plain = run(["config", "read", "pi-settings"]);
+		const plainFields = plain.json.schema.groups.flatMap((group) => group.fields);
+		assert.equal(plainFields.find((f) => f.path === "defaultProvider").type, "string", "no models.json: still a text box");
+		assert.equal(plainFields.find((f) => f.path === "defaultModel").type, "string");
+
+		writeFileSync(
+			models,
+			JSON.stringify({
+				providers: {
+					Minnyat: { models: [{ id: "gpt-5.4" }, { id: "gpt-5.6-sol" }, "plain-string-id", { name: "no id" }] },
+					ollama: { models: [{ id: "llama3.1:8b" }] },
+					empty: {},
+				},
+			}),
+		);
+		const fed = run(["config", "read", "pi-settings"]);
+		const fields = fed.json.schema.groups.flatMap((group) => group.fields);
+		const provider = fields.find((f) => f.path === "defaultProvider");
+		assert.equal(provider.type, "enum");
+		assert.deepEqual(provider.enum, ["Minnyat", "empty", "ollama"], "every provider in the file, sorted");
+		const model = fields.find((f) => f.path === "defaultModel");
+		assert.equal(model.optionsBy.path, "defaultProvider");
+		assert.equal(model.optionsBy.source, "pi-models", "runtime-sourced: never refused on save, text box when empty");
+		assert.deepEqual(model.optionsBy.map.Minnyat, ["gpt-5.4", "gpt-5.6-sol", "plain-string-id"], "ids only; an entry with no id is skipped");
+		assert.deepEqual(model.optionsBy.map.empty, []);
+
+		// A corrupt models.json is an empty catalog, not a failed read.
+		writeFileSync(models, "{ not json");
+		const corrupt = run(["config", "read", "pi-settings"]);
+		assert.equal(corrupt.status, 0, corrupt.stderr);
+		assert.equal(corrupt.json.schema.groups.flatMap((g) => g.fields).find((f) => f.path === "defaultProvider").type, "string");
+	}
 } finally {
 	rmSync(sandbox, { recursive: true, force: true });
 }

@@ -46,6 +46,7 @@ export const CONFIG_SECTIONS = ["providers", "routing", "cluster", "mcp", "paseo
 const ROLES = ["supervisor", "lead", "peer"];
 const AGENT_REF = /^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/;
 const TOKEN_LIKE = /^[A-Za-z0-9._:-]{1,128}$/;
+const CONFIG_REV = /^(?:absent|[0-9a-f]{64})$/;
 const SKILL_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 
 class RouteError extends Error {
@@ -155,7 +156,14 @@ export const ROUTES = {
 	},
 	"POST /api/config": {
 		build: (q, body, raw) => ({
-			args: ["config", "write", pick(q.section, CONFIG_SECTIONS, "section")],
+			args: [
+				"config",
+				"write",
+				pick(q.section, CONFIG_SECTIONS, "section"),
+				// Optional: the fingerprint `config read` returned. Present, the CLI
+				// refuses to overwrite a file that changed since it was read.
+				...(q.rev === undefined ? [] : ["--rev", match(q.rev, CONFIG_REV, "rev")]),
+			],
 			stdin: raw,
 		}),
 		invalidates: ["config", "env", "status", "preflight", "seats"],
@@ -470,6 +478,13 @@ export async function startServer(options = {}) {
 				sendJson(res, 403, { ok: false, code: "HOST_NOT_ALLOWED", message: "this server only answers to localhost" });
 				return;
 			}
+			if (url.pathname === "/favicon.ico") {
+				// Browsers ask for it unprompted; a 404 here showed up as a console
+				// error on every page load and looked like something being broken.
+				res.writeHead(204, { "cache-control": "max-age=86400" });
+				res.end();
+				return;
+			}
 			if (!url.pathname.startsWith("/api/")) {
 				await serveStatic(url.pathname, res, req.headers);
 				return;
@@ -485,8 +500,16 @@ export async function startServer(options = {}) {
 				query,
 				rawBody,
 				exec: (argv, stdin, route) => {
-					const ttl = req.method === "GET" ? (route.cacheMs ?? 0) : 0;
-					const key = `${argv.join(" ")}`;
+					// `?fresh=1` is a person pressing a refresh button: a read cached up to
+					// 10s ago is not what they asked for, and it also drops the cached copy
+					// so the next plain read is not stale either.
+					const fresh = req.method === "GET" && query.fresh === "1";
+					if (fresh && route.tag) cache.invalidate([route.tag]);
+					// Fresh with a tag: the entry was just dropped, so this read goes to the
+					// CLI and then REPLACES it. Fresh without one cannot be dropped, so it is
+					// simply not cached.
+					const ttl = req.method === "GET" && (!fresh || route.tag) ? (route.cacheMs ?? 0) : 0;
+					const key = `${argv.join("\u0000")}`;
 					const options = route.timeoutMs ? { timeoutMs: route.timeoutMs } : {};
 					return ttl > 0
 						? cache.run(key, ttl, () => exec(argv, stdin, options), route.tag ?? null)

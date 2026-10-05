@@ -317,3 +317,58 @@ Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge pe
 thật; cạnh **message** không còn nguồn nào (chat room đã bị Paseo gỡ), và cạnh
 message suy-đoán-từ-log vẫn chưa có (legend vẫn ghi rõ "suy đoán" để không ai đọc
 nhầm một đồ thị thiếu cạnh thành một đội không nói chuyện với nhau).
+
+## 10. Bảng agent: theo dự án, theo runtime
+
+Bảng "Nhóm agent" đọc từ `paseo-team graph` và không tự tính thêm dữ kiện nào
+ngoài cách *trình bày*:
+
+- **Gom theo dự án.** Dự án của một node là `cluster` của nó; thiếu thì lấy của
+  người giao việc (sub-agent chạy bằng provider Paseo thường không có state file
+  để đọc cluster); thiếu nữa thì lấy `cwd`. Việc này chạy trên TOÀN BỘ bảng
+  trước khi lọc, nên bộ lọc không đổi được một node thuộc dự án nào. Chỉ khi có từ
+  hai dự án trở lên mới hiện tiêu đề nhóm và ô lọc "Dự án".
+- **Mọi runtime.** `node.runtime` (từ `inferRuntime`) là đoạn đầu của provider:
+  `pi`, `claude` cho các role provider của bộ này, và `codex`, `opencode`,
+  `gemini`… cho sub-agent chạy bằng provider Paseo thường. Node ngoài bộ vai trò
+  được gọi là "Agent phụ" (có người giao việc) hoặc "Agent độc lập", không phải
+  "Chưa rõ vai trò" — đó là một cấu hình bình thường, không phải lỗi.
+- **Cây, không phải danh sách phẳng.** Danh sách thụt vào theo người giao việc;
+  sơ đồ xếp cha ở giữa các con.
+- **Chế độ đơn giản không nói tiếng `team.domain`.** Bộ lọc phạm vi và các cảnh báo
+  về nhãn domain/cluster chỉ hiện ở chế độ nâng cao; cảnh báo "ghế chưa có nhãn
+  domain" còn bị giới hạn ở trường hợp có từ hai Giám sát trở lên, vì graph không đọc
+  được `PASEO_TEAM_TOPOLOGY` của các agent và trên cấu hình mặc định (một Giám sát)
+  ghế không nhãn là bình thường.
+- **Yêu cầu xin phép nói rõ xin làm gì.** Thẻ hiện lệnh / file / địa chỉ cụ thể lấy từ
+  bản ghi gốc (`permitDetail`), không chỉ "chạy lệnh trên máy này".
+
+## 11. Tab Cấu hình (chế độ nâng cao): sửa file mà không đè mất việc của người khác
+
+File cấu hình không chỉ mình trang này ghi: Pi tự ghi lại `settings.json` (phiên bản
+changelog đã xem, model chọn bằng `/model`, theme), và người dùng có thể mở file bằng
+trình soạn thảo. Vì vậy:
+
+- **`config read` trả thêm `rev`** (sha256 của file, hoặc `"absent"` nếu chưa có) và
+  **`config write <section> --rev <rev>` từ chối ghi** (`CONFIG_CHANGED`) nếu file đã khác
+  bản form đang giữ. Trang luôn gửi `rev`; script không gửi thì giữ hành vi ghi vô điều
+  kiện như cũ. Từ chối là một câu giải thích (“Bấm Tải lại, làm lại chỉnh sửa, rồi Lưu”),
+  không phải lỗi chung chung.
+- **File hỏng không còn bị báo là "chưa tồn tại".** `config read` trả `exists: true`,
+  `invalid: { message }` và `raw` (nguyên văn); trang mở ô JSON thô với đúng nội dung đó
+  để sửa, và nói rõ file đang hỏng.
+- **Không bỏ thay đổi chưa lưu trong im lặng.** Đổi mục, bấm Tải lại hay đóng tab đều hỏi
+  trước nếu form (hoặc ô JSON thô) khác bản trên đĩa; nút Lưu đổi thành “Lưu thay đổi” và
+  có viền khi còn thay đổi chưa lưu. Tab Vai trò dùng cùng quy tắc, và khoá ô soạn thảo
+  khi không đọc được mô tả vai trò (trước đây Lưu một ô trống sẽ xoá sạch chỉ dẫn).
+- **Nút làm mới thật sự làm mới.** `?fresh=1` bỏ qua cache đọc của server (Tải lại, Cập nhật
+  ở sơ đồ và ở danh sách chờ duyệt); các lần đọc tự động vẫn dùng cache.
+- **Form Pi gọn.** Chỉ những ô người ta hay đổi nằm trên bề mặt; các ô tinh chỉnh
+  (`advanced: true` trong schema) gập vào “Tuỳ chọn nâng cao (n)” và tự mở khi trong file đã
+  có giá trị ở đó, để một cài đặt đang có hiệu lực không bị giấu. `defaultProvider` /
+  `defaultModel` là danh sách chọn lấy từ chính `models.json` của Pi (`withPiModelCatalog`);
+  không có file đó thì vẫn là ô nhập tay, và giá trị ngoài danh sách không bao giờ bị từ chối
+  khi lưu (Pi còn có provider có sẵn không nằm trong file). Các thẻ giống nhau (5 lớp việc
+  trong routing, từng host trong cluster) chỉ in lời gợi ý ở thẻ đầu; thẻ sau để dưới dạng
+  tooltip.
+

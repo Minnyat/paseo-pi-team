@@ -147,6 +147,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "retry.baseDelayMs",
+						advanced: true,
 						type: "number",
 						default: 2000,
 						min: 0,
@@ -156,6 +157,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "retry.provider.timeoutMs",
+						advanced: true,
 						type: "number",
 						default: 0,
 						min: 0,
@@ -165,6 +167,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "retry.provider.maxRetries",
+						advanced: true,
 						type: "number",
 						default: 0,
 						min: 0,
@@ -174,6 +177,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "retry.provider.maxRetryDelayMs",
+						advanced: true,
 						type: "number",
 						default: 60000,
 						min: 0,
@@ -216,6 +220,7 @@ export const CONFIG_SCHEMAS = {
 				fields: [
 					{
 						path: "transport",
+						advanced: true,
 						type: "enum",
 						enum: ["auto", "sse", "websocket", "websocket-cached"],
 						default: "auto",
@@ -223,6 +228,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "httpIdleTimeoutMs",
+						advanced: true,
 						type: "number",
 						default: 300000,
 						min: 0,
@@ -231,6 +237,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "websocketConnectTimeoutMs",
+						advanced: true,
 						type: "number",
 						default: 15000,
 						min: 0,
@@ -239,6 +246,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "steeringMode",
+						advanced: true,
 						type: "enum",
 						enum: ["one-at-a-time", "all"],
 						default: "one-at-a-time",
@@ -247,6 +255,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "followUpMode",
+						advanced: true,
 						type: "enum",
 						enum: ["one-at-a-time", "all"],
 						default: "one-at-a-time",
@@ -267,6 +276,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "compaction.reserveTokens",
+						advanced: true,
 						type: "number",
 						default: 16384,
 						min: 0,
@@ -275,6 +285,7 @@ export const CONFIG_SCHEMAS = {
 					},
 					{
 						path: "compaction.keepRecentTokens",
+						advanced: true,
 						type: "number",
 						default: 20000,
 						min: 0,
@@ -681,6 +692,46 @@ export function withModelInventory(schema, modelsByProvider = {}) {
 			...group,
 			fields: (group.fields ?? []).map(fillField),
 		})),
+	};
+}
+
+/**
+ * Return a copy of the pi-settings schema whose `defaultProvider` / `defaultModel`
+ * offer what Pi actually has: the providers and model ids in pi's own models.json
+ * (`{ "<provider>": ["<model-id>", ...] }`).
+ *
+ * Both fields were free text, and a typo there is not an error anywhere — Pi just
+ * starts on a model that is not what its owner meant, or none. A dropdown fed by
+ * the same file Pi reads makes the valid choices the visible ones.
+ *
+ * Only ever an OFFER: `defaultModel` keeps `optionsBy.source`, so the form still
+ * degrades to a text box when no provider is chosen or models.json lists no models
+ * for it, and a value outside the list stays (flagged) and is never refused on save —
+ * Pi also knows built-in providers that models.json never mentions. With no catalog
+ * at all both fields stay the plain text boxes they were.
+ */
+export function withPiModelCatalog(schema, catalog = {}) {
+	if (schema === null || typeof schema !== "object") return schema;
+	const providers = Object.keys(catalog ?? {}).sort();
+	if (providers.length === 0) return schema;
+	const fill = (field) => {
+		if (field.path === "defaultProvider") {
+			return { ...field, type: "enum", enum: providers, hint: `${field.hint ?? ""} Lấy từ models.json; Pi còn có cả provider có sẵn không nằm trong file đó.`.trim() };
+		}
+		if (field.path === "defaultModel") {
+			return {
+				...field,
+				type: "enum",
+				enum: [],
+				hint: "Model của provider đã chọn ở ô trên, lấy từ models.json. Chưa chọn provider thì nhập tay.",
+				optionsBy: { path: "defaultProvider", source: "pi-models", map: catalog },
+			};
+		}
+		return field;
+	};
+	return {
+		...schema,
+		groups: (schema.groups ?? []).map((group) => ({ ...group, fields: (group.fields ?? []).map(fill) })),
 	};
 }
 

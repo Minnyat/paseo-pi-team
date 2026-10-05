@@ -96,6 +96,34 @@ import {
 	assert.equal(written.stdin, raw);
 }
 
+// --- config write: the fingerprint of the file the form was built from ----
+{
+	const rev = "a".repeat(64);
+	const seen = await handleApi({
+		method: "POST",
+		pathname: "/api/config",
+		query: { section: "pi-settings", rev },
+		rawBody: "{}",
+		exec: (args, stdin) => Promise.resolve({ exitCode: 0, stdout: "{}", stderr: "", stdin }),
+	});
+	assert.deepEqual(seen.args, ["config", "write", "pi-settings", "--rev", rev], "the CLI is asked to check it");
+
+	const absent = await handleApi({
+		method: "POST", pathname: "/api/config", query: { section: "pi-settings", rev: "absent" }, rawBody: "{}",
+		exec: () => Promise.resolve({ exitCode: 0, stdout: "{}", stderr: "" }),
+	});
+	assert.deepEqual(absent.args.slice(-2), ["--rev", "absent"], "'no file yet' is a fingerprint too");
+
+	// The value becomes an argv element, so it is allowlisted like every other one.
+	for (const bad of ["", "--force", "../../x", "A".repeat(64), "a".repeat(63), "absent;rm"]) {
+		await assert.rejects(
+			handleApi({ method: "POST", pathname: "/api/config", query: { section: "pi-settings", rev: bad }, rawBody: "{}", exec: () => Promise.resolve({ exitCode: 0, stdout: "{}" }) }),
+			/rev is missing or malformed/,
+			`rev ${JSON.stringify(bad)} is refused before it reaches the CLI`,
+		);
+	}
+}
+
 // --- host / origin checks --------------------------------------------------
 assert.equal(isAllowedHost({ headers: { host: "127.0.0.1:4321" } }, 4321), true);
 assert.equal(isAllowedHost({ headers: { host: "localhost:4321" } }, 4321), true);
@@ -229,6 +257,45 @@ assert.equal(bearerToken({ headers: {} }), null);
 		const preflightAgain = await (await fetch(`${base}/api/preflight`, { headers: auth })).json();
 		assert.equal(preflightAgain.cached, true, "a prompt must not throw away the 60s preflight answer");
 		assert.equal(calls.filter((call) => call.startsWith("preflight")).length, 1, "preflight ran exactly once");
+	} finally {
+		await handle.close();
+	}
+}
+
+// --- an explicit refresh is not served from a read cache ------------------
+// Pi (or an editor) can change a config file behind the page's back; "Tải lại"
+// that answered from a read cached 5s earlier showed the file as it WAS.
+{
+	let reads = 0;
+	const handle = await startServer({
+		port: 0,
+		quiet: true,
+		token: "t",
+		runCli: (args) => {
+			if (args[0] === "config" && args[1] === "read") reads += 1;
+			return Promise.resolve({ exitCode: 0, stdout: JSON.stringify({ n: reads }), stderr: "" });
+		},
+	});
+	const auth = { authorization: "Bearer t" };
+	const base = `http://127.0.0.1:${handle.port}`;
+	try {
+		const first = await (await fetch(`${base}/api/config?section=pi-settings`, { headers: auth })).json();
+		const second = await (await fetch(`${base}/api/config?section=pi-settings`, { headers: auth })).json();
+		assert.equal(second.cached, true, "a plain read is still cached");
+		assert.equal(reads, 1);
+
+		const fresh = await (await fetch(`${base}/api/config?section=pi-settings&fresh=1`, { headers: auth })).json();
+		assert.notEqual(fresh.cached, true, "a fresh read goes to the CLI");
+		assert.equal(reads, 2);
+		assert.equal(fresh.data.n, 2, "and returns what the CLI said just now");
+
+		const after = await (await fetch(`${base}/api/config?section=pi-settings`, { headers: auth })).json();
+		assert.equal(after.data.n, 2, "the cached copy was replaced, so the next plain read is not the stale one");
+		assert.equal(first.data.n, 1);
+
+		// The unprompted favicon request is answered, not a 404 in the console.
+		const icon = await fetch(`${base}/favicon.ico`);
+		assert.equal(icon.status, 204);
 	} finally {
 		await handle.close();
 	}

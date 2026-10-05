@@ -79,10 +79,11 @@ node scripts/remote-paseo.mjs health --host-id <id>
 node scripts/remote-paseo.mjs providers --host-id <id>
 node scripts/remote-paseo.mjs models --host-id <id> --provider pi-peer
 node scripts/remote-paseo.mjs workspaces --host-id <id>
-node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> \
-  --isolation local|worktree --title <t>
-# reviewer workspace: --disposition independent-reviewer ép --isolation worktree,
-# từ chối local (REVIEW_ISOLATION_INVALID); worktree fail → BLOCKED: REVIEW_WORKTREE_UNAVAILABLE
+node scripts/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --title <t>
+# MỘT workspace cho cả việc: lệnh này dùng lại workspace đang mở trên <path> (reused: true),
+# chỉ tạo khi chưa có, và chỉ tạo local — `--isolation worktree` bị từ chối
+# (WORKSPACE_ISOLATION_REFUSED). Reviewer tự `git worktree add --detach` bên trong
+# workspace chung; không worktree được → BLOCKED: REVIEW_WORKTREE_UNAVAILABLE
 node scripts/remote-paseo.mjs run --host-id <id> \
   --provider pi-peer/<pi-provider>/<model-id> --thinking <level> \
   --workspace <wks-id> --title <t> --brief <task-file>

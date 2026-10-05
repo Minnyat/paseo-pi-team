@@ -72,9 +72,12 @@ STATUS: BLOCKED
 REASON: DIRTY_REVIEW_WORKSPACE
 ```
 
-The review workspace MUST be a **linked git worktree** created from the source
-repository (worktree isolation), never the Engineer's primary checkout or a
-standalone clone/project. In a linked worktree `git rev-parse --git-dir`
+The review checkout MUST be a **linked git worktree** created from the source
+repository, never the Engineer's primary checkout or a standalone clone/project.
+You make it yourself, inside the workspace you were started in — a Reviewer is
+given no workspace of its own — with
+`git worktree add --detach <path> <candidate-sha>`, and run the wrapper with
+`--repo <path>`. In a linked worktree `git rev-parse --git-dir`
 resolves under `<source>/.git/worktrees/<name>` and differs from
 `--git-common-dir`; if the two resolve to the same directory, stop with:
 
@@ -84,9 +87,9 @@ REASON: REVIEW_WORKSPACE_NOT_WORKTREE
 ```
 
 A clean clone at the exact candidate SHA does NOT satisfy this gate — the
-wrapper enforces it mechanically. Ask the Lead for a workspace created with
-worktree isolation; if one cannot be created, the Lead reports
-`BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` rather than falling back.
+wrapper enforces it mechanically. If you cannot make the worktree, stop with
+`BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` and tell your Lead — never fall back to
+reviewing in the primary checkout.
 
 If OCR is missing or `ocr version` fails, stop with:
 
@@ -96,7 +99,7 @@ REASON: OCR_UNAVAILABLE
 ```
 
 Never repair the workspace with `git checkout`, `git reset`, `git rebase`, or
-`git cherry-pick`. Ask the Lead to prepare a fresh clean reviewer workspace.
+`git cherry-pick`. Tell your Lead, and make a fresh worktree once they say so.
 
 ### B. Determine the review range with OCR
 

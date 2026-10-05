@@ -12,13 +12,6 @@ PROJECT_ID: team-test-repo
 DISPOSITION: engineer
 MODE: write
 
-ASSIGNED_HOST_ID: win-primary
-ASSIGNED_PASEO_PROVIDER: pi-peer
-ASSIGNED_MODEL: <pi-provider>/<model-id>
-ASSIGNED_THINKING: medium
-WORKSPACE_REF: worktree:../worktrees/T-001
-AGENT_REF:
-
 EXPECTED_BASE_SHA: <base-sha>
 ASSIGNED_CANDIDATE_SHA:
 

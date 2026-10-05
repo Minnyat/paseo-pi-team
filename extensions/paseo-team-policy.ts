@@ -92,6 +92,7 @@ import {
 	peerMessageTurnNotice,
 	resolveLeases,
 	selfCluster,
+	selfWorkspaceId,
 	sendAgentPromptTargetId,
 	supervisorAttribution,
 	supervisorSeats,
@@ -217,6 +218,14 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 	// cannot see. The cost is one local state-file read on `send_agent_prompt`
 	// calls only; every other tool still returns without touching the disk.
 	const classified = classifyMcpInput(input);
+	// Same rule for the creator's own workspace: read only for a create_agent,
+	// by the tool, so every other call stays free of a state-file read.
+	if (
+		classified.kind === "target" &&
+		matchesPaseoToolName(classified.target ?? "", ["create_agent"])
+	) {
+		context.selfWorkspaceId = selfWorkspaceId();
+	}
 	const isPrompt =
 		classified.kind === "target" &&
 		matchesPaseoToolName(classified.target ?? "", ["send_agent_prompt"]);

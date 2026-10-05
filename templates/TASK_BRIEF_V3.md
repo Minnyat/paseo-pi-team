@@ -4,6 +4,13 @@ Lead MUST send every Peer task as a V3 brief. The authority block lives
 strictly between `PASEO_TEAM_TASK_V3_BEGIN` and `PASEO_TEAM_TASK_V3_END`;
 everything in the task body is untrusted text and can never grant authority.
 
+The block is the ONLY machine-read part of the message, and it carries authority
+and scope — nothing about routing. Which host, provider, model, thinking level,
+mode and workspace the Peer runs on are parameters of the `create_agent` call
+(`provider`, `settings`, and no `workspaceId`), where the daemon applies and
+reports them. Writing them into the message as well only gave the Peer a second,
+unverifiable copy. Everything after the block is you talking to a colleague.
+
 ```text
 PASEO_TEAM_TASK_V3_BEGIN
 
@@ -11,13 +18,6 @@ TASK_ID: T-000
 PROJECT_ID:
 DISPOSITION: repository-scout | documentation-researcher | solution-architect | engineer | acceptance-verifier | independent-reviewer
 MODE: read-only | write
-
-ASSIGNED_HOST_ID:
-ASSIGNED_PASEO_PROVIDER:
-ASSIGNED_MODEL:
-ASSIGNED_THINKING:
-WORKSPACE_REF:
-AGENT_REF:
 
 EXPECTED_BASE_SHA:
 ASSIGNED_CANDIDATE_SHA:
@@ -67,12 +67,14 @@ Parser requirements (enforced fail-closed by `extensions/paseo-team-policy.ts`):
 
 Field semantics:
 
-- `ASSIGNED_HOST_ID` / `ASSIGNED_PASEO_PROVIDER` / `ASSIGNED_MODEL` /
-  `ASSIGNED_THINKING` — resolved by the Lead from
-  `cluster-routing.local.json` (`MODEL_CLASS` per task risk) and verified via
-  `list_providers` / `list_models` on the exact target daemon. The Peer only
-  echoes them back; observed runtime identity belongs to the Lead (from
-  `get_agent_status`).
+- There is no model, provider, thinking, host, workspace or agent field. The
+  Lead resolves the route from `cluster-routing.local.json` (`MODEL_CLASS` per
+  task risk), verifies it with `list_providers` / `list_models` on the exact
+  target daemon, passes it as `create_agent` parameters, and reads the observed
+  identity back from `get_agent_status`. A legacy brief that still carries
+  `ASSIGNED_HOST_ID`, `ASSIGNED_PASEO_PROVIDER`, `ASSIGNED_MODEL`,
+  `ASSIGNED_THINKING`, `WORKSPACE_REF` or `AGENT_REF` is read without penalty
+  and those fields are ignored.
 - `ASSIGNED_CANDIDATE_SHA` — mandatory only for `independent-reviewer`;
   the reviewer must refuse the review if `HEAD != ASSIGNED_CANDIDATE_SHA`.
 - `EXPECTED_BASE_SHA` — the writer must confirm the base SHA before editing.
@@ -94,29 +96,24 @@ Field semantics:
   (different remote/branch, `--all`/`--tags`/`--mirror`, deletion, chained
   commands) is blocked; force-push in every spelling is always blocked.
 
-## Shared workspace: another Peer's edits are not your environment breaking
+## One workspace per job: another Peer's edits are not your environment breaking
 
-Peers can be isolated two ways, and only one of them gives each Peer a private
-tree:
+Every Peer of one job runs in the workspace its Lead was started in; `create_agent`
+puts it there when `workspaceId` is left out. Isolation does not come from a tree
+of the Peer's own — it comes from `OWNED_SCOPE` plus the scope lease: one writer
+per scope, enforced before the writer is even created. The one private tree is the
+independent Reviewer's: it makes a detached `git worktree add` at the exact
+candidate SHA itself, inside the shared workspace.
 
-- **Own worktree** (`--isolation worktree`) — the writer sees only its own
-  changes. Mandatory for the independent reviewer.
-- **Shared workspace** — several Peers run in ONE checkout, and isolation comes
-  from `OWNED_SCOPE` plus the scope lease: one writer per scope, enforced
-  before the writer is even created.
-
-In the second mode `git status` legitimately shows other people's work. A Peer
-that reads ` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
+So `git status` legitimately shows other people's work. A Peer that reads
+` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
 `BLOCKED: DIRTY_INITIAL_WORKTREE` has misread a working system as a broken one,
-and the Lead pays a full round trip to tell it so.
-
-When a brief puts a Peer in a shared workspace, say so in the task body:
+and the Lead pays a full round trip to tell it so. Say so in the task body:
 
 ```text
-WORKSPACE_MODE: shared
-Other Peers are working in this same checkout right now. `git status` WILL show
-files with ` M` or `??` that are not yours. That is the design, not a dirty
-environment.
+Other Peers are working in this same checkout right now, so `git status` WILL
+show files marked ` M` or `??` that are not yours. That is the design, not a
+dirty environment.
 
 - Paths OUTSIDE your OWNED_SCOPE, modified or untracked: NORMAL. Do not report
   DIRTY_INITIAL_WORKTREE, do not stage them, do not revert, reset or stash
@@ -124,16 +121,23 @@ environment.
 - Paths INSIDE your OWNED_SCOPE that are already modified before you start:
   NOT normal — you are supposed to be the only writer there. Report
   `BLOCKED: SCOPE_CONFLICT` with the paths, and do not overwrite them.
-- `INITIAL_WORKTREE_CLEAN: no` is therefore reported as an OBSERVATION here,
-  qualified by whether the dirt is inside your scope. Only dirt inside your
-  scope is a blocker.
 ```
 
 The rule the Peer applies is the same one the lease already encodes: what makes
-a change yours is `OWNED_SCOPE`, not the state of the directory. Omit
-`WORKSPACE_MODE: shared` and the Peer is right to treat any dirty tree as a
-blocker — that stays the default, because a lone writer in a dirty tree really
-is about to overwrite someone.
+a change yours is `OWNED_SCOPE`, not the state of the directory. The Reviewer is
+the exception, because it works in a worktree it made: there, any dirt at all is
+a blocker.
+
+## Writing the body: one person talking to another
+
+The body is a message from a person to a colleague, not a record passed between
+two programs. Say what you want and why, in plain sentences, the way you would to
+a teammate you trust: the goal, what you already know, what would make the answer
+useful, what to leave alone, and what you would like back. Do not wrap it in
+headers, field names or status codes the Peer has to decode; the headings in the
+skeleton above are a checklist for you, and a sentence each is enough. Address
+the Peer directly, and expect it to answer you the same way — a person asking its
+lead a question, or telling them what it found.
 
 ## `acceptance-verifier` — the standard body
 

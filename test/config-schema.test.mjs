@@ -16,6 +16,7 @@ import {
 	ROUTING_SECTIONS,
 	schemaForSection,
 	withModelInventory,
+	withPiModelCatalog,
 } from "../cli/lib/config-schema.mjs";
 import {
 	MODEL_CLASSES,
@@ -210,3 +211,51 @@ for (const section of ROUTING_SECTIONS) {
 
 
 console.log("[paseo-team] config-schema tests passed");
+
+// --- pi-settings: what a person sets vs. tuning knobs -----------------------
+// Twenty-one fields in five open cards buried the four that matter. The tuning
+// knobs fold into a disclosure that opens by itself when one of them is set.
+{
+	const fields = CONFIG_SCHEMAS["pi-settings"].groups.flatMap((group) => group.fields);
+	const advanced = new Set(fields.filter((field) => field.advanced).map((field) => field.path));
+	for (const path of [
+		"retry.baseDelayMs", "retry.provider.timeoutMs", "retry.provider.maxRetries", "retry.provider.maxRetryDelayMs",
+		"transport", "httpIdleTimeoutMs", "websocketConnectTimeoutMs", "steeringMode", "followUpMode",
+		"compaction.reserveTokens", "compaction.keepRecentTokens",
+	]) {
+		assert.ok(advanced.has(path), `${path} is a tuning knob`);
+	}
+	for (const path of [
+		"retry.enabled", "retry.maxRetries", "defaultProvider", "defaultModel", "defaultThinkingLevel",
+		"hideThinkingBlock", "compaction.enabled", "theme", "defaultProjectTrust", "quietStartup",
+	]) {
+		assert.ok(!advanced.has(path), `${path} stays on the surface`);
+	}
+	assert.ok(fields.length - advanced.size >= 8, "the surface is still the settings people actually change");
+}
+
+// --- pi-settings: model fields fed from pi's own models.json ----------------
+{
+	const base = CONFIG_SCHEMAS["pi-settings"];
+	const catalog = { Minnyat: ["gpt-5.4", "gpt-5.6-sol"], ollama: ["llama3.1:8b"] };
+	const before = JSON.stringify(base);
+	const fed = withPiModelCatalog(base, catalog);
+	const field = (schema, path) => schema.groups.flatMap((group) => group.fields).find((f) => f.path === path);
+
+	assert.equal(field(fed, "defaultProvider").type, "enum");
+	assert.deepEqual(field(fed, "defaultProvider").enum, ["Minnyat", "ollama"]);
+	assert.equal(field(fed, "defaultModel").type, "enum");
+	assert.deepEqual(field(fed, "defaultModel").optionsBy, { path: "defaultProvider", source: "pi-models", map: catalog });
+	assert.equal(JSON.stringify(base), before, "the module's own table is never mutated");
+
+	// With nothing to offer the fields stay what they were: text boxes.
+	assert.equal(withPiModelCatalog(base, {}), base);
+	assert.equal(withPiModelCatalog(base, undefined), base);
+	assert.equal(field(withPiModelCatalog(base, {}), "defaultModel").type, "string");
+
+	// Everything else in the schema is untouched.
+	assert.deepEqual(
+		fed.groups.flatMap((g) => g.fields).filter((f) => !["defaultProvider", "defaultModel"].includes(f.path)),
+		base.groups.flatMap((g) => g.fields).filter((f) => !["defaultProvider", "defaultModel"].includes(f.path)),
+	);
+}

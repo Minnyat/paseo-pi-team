@@ -693,11 +693,11 @@ quan sát nhiều session/workspace" vs "Lead là god trong project/workspace c�
 nó"): **QUAN SÁT được phép xuyên workspace; THẨM QUYỀN thì không.**
 
 **Suy ra cluster, nguồn tường minh trước:** `team.cluster` /
-`PASEO_TEAM_CLUSTER` → `workspaceId` → `cwd` → null. Nhãn phải thắng vì
-workspace reviewer là **linked worktree** (chính
-`leadCreateWorkspaceBlockReason` bắt buộc thế), nên nó khác cả `workspaceId`
-lẫn `cwd` so với Lead sở hữu nó — chỉ nhãn khai tường minh mới giữ được hai ghế
-đó trong một cụm.
+`PASEO_TEAM_CLUSTER` → `workspaceId` → `cwd` → null. Nhãn phải thắng vì một
+ghế vẫn có thể nằm ở `workspaceId`/`cwd` khác Lead của nó (ghế do Human tạo tay,
+hoặc agent có từ trước quy tắc "một việc một workspace" — từ giờ Lead không tạo
+workspace nữa, xem `leadWorkspaceMutationBlockReason`) — chỉ nhãn khai tường
+minh mới giữ được hai ghế đó trong một cụm.
 
 **Luật nền: tách biệt phải được CHỨNG MINH.** `clustersSeparate` trả false khi
 một trong hai phía không xác định. Mọi luật cluster chỉ BỎ BỚT ràng buộc (loại

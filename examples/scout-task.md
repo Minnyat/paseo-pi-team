@@ -3,10 +3,6 @@ PASEO_TEAM_TASK_V3_BEGIN
 TASK_ID: T-004
 DISPOSITION: repository-scout
 MODE: read-only
-ASSIGNED_HOST_ID: win-primary
-ASSIGNED_PASEO_PROVIDER: pi-peer
-ASSIGNED_MODEL: <pi-provider>/<model-id>
-ASSIGNED_THINKING: low
 
 OWNED_SCOPE: The repository (shared workspace).
 EXCLUDED_SCOPE: All writes.

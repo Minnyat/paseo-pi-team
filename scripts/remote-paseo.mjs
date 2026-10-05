@@ -23,9 +23,11 @@
 //   providers        --host-id <id>                     paseo provider ls
 //   models           --host-id <id> --provider <role>   paseo provider models
 //   workspaces       --host-id <id>                     paseo workspace ls
-//   workspace-create --host-id <id> --path <p> [--isolation local|worktree]
-//                    [--disposition <d>] [--title <t>] [--project <id>]
-//                    (disposition independent-reviewer forces worktree isolation)
+//   workspace-create --host-id <id> --path <p> [--title <t>] [--project <id>]
+//                    ONE workspace per job: reuses the workspace already open on
+//                    <p> and creates one only when there is none. Never a
+//                    worktree workspace (the Reviewer makes its own git worktree
+//                    inside the shared one).
 //   agents           --host-id <id> [--all]             paseo ls -g
 //   run              --host-id <id> --provider <role-provider>/<model-ref>
 //                    --thinking <level> [--mode <m>] (claude-* defaults to "auto") [--workspace <wks>] [--title <t>]
@@ -100,8 +102,7 @@ export const REMOTE_ERROR_CODES = Object.freeze([
 	"ENDPOINT_UNSAFE",
 	"CLI_ERROR",
 	"PROMPT_TOO_LONG",
-	"REVIEW_ISOLATION_INVALID",
-	"REVIEW_WORKTREE_UNAVAILABLE",
+	"WORKSPACE_ISOLATION_REFUSED",
 ]);
 
 export class RemoteError extends Error {
@@ -222,7 +223,7 @@ const COMMAND_FLAG_KEYS = {
 	providers: ["hostId"],
 	models: ["hostId", "provider"],
 	workspaces: ["hostId"],
-	"workspace-create": ["hostId", "path", "isolation", "disposition", "title", "project"],
+	"workspace-create": ["hostId", "path", "isolation", "title", "project"],
 	agents: ["hostId", "all"],
 	run: [
 		"hostId",
@@ -243,15 +244,6 @@ const COMMAND_FLAG_KEYS = {
 	archive: ["agentRef"],
 	send: ["agentRef", "prompt", "promptFile", "wait", "noWait"],
 };
-
-// The V3 brief disposition vocabulary (see templates/TASK_BRIEF_V3.md).
-export const WORKSPACE_DISPOSITIONS = Object.freeze([
-	"repository-scout",
-	"documentation-researcher",
-	"solution-architect",
-	"engineer",
-	"independent-reviewer",
-]);
 
 const GLOBAL_FLAG_KEYS = new Set(["cluster", "dryRun", "json", "help"]);
 const BOOLEAN_KEYS = new Set([...BOOLEAN_FLAGS].map(toCamelCase));
@@ -617,6 +609,45 @@ export function readPrompt(opts) {
 // ---------------------------------------------------------------------------
 
 /**
+ * `paseo workspace ls --json` is a list of rows
+ * `{ workspaceId, project, name, isolation, cwd }`. Tolerant of the two wrappers
+ * a JSON mode may add (`{ data: [...] }`, `{ workspaces: [...] }`), and of
+ * output that is not JSON at all — which reads as an empty list HERE, so the
+ * caller must tell a failed listing apart before trusting "empty".
+ */
+export function parseWorkspaceList(stdout) {
+	let parsed;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return [];
+	}
+	const rows = Array.isArray(parsed) ? parsed : (parsed?.data ?? parsed?.workspaces ?? []);
+	return Array.isArray(rows) ? rows.filter((row) => row && typeof row === "object") : [];
+}
+
+/** A path as a comparison key: separators folded, trailing slash dropped, and a
+ *  Windows drive path compared without regard to case (a remote host may be one). */
+function pathKey(value) {
+	const folded = String(value ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+	return /^[a-z]:/i.test(folded) ? folded.toLowerCase() : folded;
+}
+
+/**
+ * The workspace already open on `path`, or null. A worktree row is never a match:
+ * it is somebody's private tree, not the job's shared checkout.
+ */
+export function findWorkspaceByPath(rows, path) {
+	const wanted = pathKey(path);
+	if (!wanted) return null;
+	return (
+		rows.find(
+			(row) => row.isolation !== "worktree" && pathKey(row.cwd ?? row.workspaceDirectory) === wanted,
+		) ?? null
+	);
+}
+
+/**
  * Build the exact paseo CLI argv for a remote command. `endpoint` is the
  * secret endpoint VALUE — it must never leave this function except inside the
  * argv handed to the subprocess (and the `--dry-run` display, redacted).
@@ -642,45 +673,25 @@ export function buildArgv(command, opts, endpoint) {
 					"workspace-create requires --path <path-on-remote-host> (a remote workspace from the controller's cwd makes no sense)",
 				);
 			}
-			const argv = ["workspace", "create", ...ep];
-			argv.push("--path", opts.path.trim());
 			const isolation =
 				typeof opts.isolation === "string" && opts.isolation.trim() !== ""
 					? opts.isolation.trim()
-					: "";
-			if (isolation && isolation !== "local" && isolation !== "worktree") {
-				throw usageError(
-					`--isolation must be "local" or "worktree" (got "${isolation}")`,
+					: "local";
+			// One job, one workspace. A worktree workspace is a SECOND workspace beside
+			// the job's own, which is the sidebar spam the local create_agent gate
+			// exists to stop. The independent Reviewer still reviews from a detached
+			// git worktree at the exact SHA; it makes that itself, inside this
+			// workspace, so a worktree is never something this command has to create.
+			if (isolation !== "local") {
+				throw new RemoteError(
+					"WORKSPACE_ISOLATION_REFUSED",
+					`--isolation must be "local" (got "${isolation}"): everything in one job shares one workspace. A Writer is kept apart by OWNED_SCOPE and a scope lease; the independent Reviewer makes its own detached \`git worktree add\` inside the shared workspace.`,
+					{ isolation },
 				);
 			}
-			const disposition =
-				typeof opts.disposition === "string" ? opts.disposition.trim() : "";
-			// Fail closed on typos: a misspelled reviewer disposition must never
-			// silently skip the worktree enforcement below.
-			if (disposition && !WORKSPACE_DISPOSITIONS.includes(disposition)) {
-				throw usageError(
-					`--disposition must be one of ${WORKSPACE_DISPOSITIONS.join(", ")} (got "${disposition}")`,
-				);
-			}
-			let effectiveIsolation = isolation;
-			// Reviewer isolation is an invariant, not a preference: an
-			// independent-reviewer workspace is ALWAYS a git worktree. If the
-			// worktree cannot be created on the target host, the caller reports
-			// BLOCKED: REVIEW_WORKTREE_UNAVAILABLE — it never falls back to a
-			// local/standalone workspace that ocr-review.mjs would reject anyway.
-			if (disposition === "independent-reviewer") {
-				if (isolation && isolation !== "worktree") {
-					throw new RemoteError(
-						"REVIEW_ISOLATION_INVALID",
-						`an independent-reviewer workspace requires --isolation worktree (got "${isolation}"); if a worktree cannot be created, report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE instead of falling back`,
-						{ disposition, isolation },
-					);
-				}
-				effectiveIsolation = "worktree";
-			}
-			if (effectiveIsolation) {
-				argv.push("--isolation", effectiveIsolation);
-			}
+			const argv = ["workspace", "create", ...ep];
+			argv.push("--path", opts.path.trim());
+			argv.push("--isolation", "local");
 			if (typeof opts.title === "string" && opts.title.trim() !== "") {
 				argv.push("--title", opts.title.trim());
 			}
@@ -918,10 +929,10 @@ Commands:
   providers        --host-id <id>
   models           --host-id <id> --provider <role-provider>
   workspaces       --host-id <id>
-  workspace-create --host-id <id> --path <path> [--isolation local|worktree]
-                   [--disposition <d>] [--title <t>] [--project <id>]
-                   --disposition independent-reviewer forces --isolation worktree
-                   (reviewer isolation is an invariant; local is rejected)
+  workspace-create --host-id <id> --path <path> [--title <t>] [--project <id>]
+                   ONE workspace per job: reuses the workspace already open on
+                   <path>, creates one only when there is none, and never a
+                   worktree workspace (the Reviewer makes its own git worktree)
   agents           --host-id <id> [--all]
   run              --host-id <id> --provider <role-provider>/<pi-provider>/<model-id>
                    --thinking <level> --workspace <wks-id> [--title <t>]
@@ -1131,6 +1142,33 @@ async function main() {
 		);
 	}
 
+	// One job, one workspace: ask the daemon what is already open on this path
+	// BEFORE creating anything, so that calling this twice (or once per Peer, which
+	// is what an unguided Lead does) can never leave a second workspace behind.
+	if (command === "workspace-create") {
+		const listing = runCli(buildArgv("workspaces", {}, hostInfo.endpoint), {
+			secret: hostInfo.endpoint,
+			timeoutMs: 120000,
+			maxAttempts: 3,
+		});
+		// A listing that FAILED is not "there is none": creating on top of a
+		// workspace that may exist is the very duplication this step prevents.
+		if (!listing.ok) {
+			const failed = basePayload(command, hostInfo);
+			failed.ok = false;
+			failed.code = "CLI_ERROR";
+			failed.message = `could not list the workspaces already open on host "${hostInfo.hostId}", so whether one exists for ${parsed.path} is unknown — not creating a second one blind (${listing.error || `paseo exit ${listing.status}`})`;
+			emit(failed, 2);
+		}
+		const existing = findWorkspaceByPath(parseWorkspaceList(listing.stdout), parsed.path);
+		if (existing) {
+			const reused = basePayload(command, hostInfo);
+			reused.reused = true;
+			reused.data = existing;
+			emit(reused, 0);
+		}
+	}
+
 	// run --wait-timeout can legitimately exceed the default 120s subprocess
 	// timeout: scale the child timeout to the requested duration (+60s buffer).
 	// An invalid duration is a wrapper usage error; it must never disable the
@@ -1173,20 +1211,10 @@ async function main() {
 	const payload = basePayload(command, hostInfo);
 	if (!result.ok) {
 		payload.ok = false;
-		// A failed reviewer worktree creation is the specific blocker the Lead
-		// skill keys recovery on — surface it as REVIEW_WORKTREE_UNAVAILABLE, not
-		// a generic CLI_ERROR. There is no fallback to a local workspace.
-		const reviewerWorkspaceCreate =
-			command === "workspace-create" &&
-			typeof parsed.disposition === "string" &&
-			parsed.disposition.trim() === "independent-reviewer";
-		payload.code = reviewerWorkspaceCreate
-			? "REVIEW_WORKTREE_UNAVAILABLE"
-			: "CLI_ERROR";
-		payload.message = reviewerWorkspaceCreate
-			? `reviewer worktree workspace could not be created on host "${hostInfo.hostId}" — report BLOCKED: REVIEW_WORKTREE_UNAVAILABLE; never fall back to a local/standalone workspace (${result.error || `paseo exit ${result.status}`})`
-			: result.error ||
-				`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
+		payload.code = "CLI_ERROR";
+		payload.message =
+			result.error ||
+			`paseo ${command} failed with exit ${result.status} (stderr redacted)`;
 		if (result.stdout) payload.data = result.stdout;
 		emit(payload, 2);
 	}

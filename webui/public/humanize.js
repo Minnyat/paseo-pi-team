@@ -27,6 +27,50 @@ export function roleLabel(role) {
 	return ROLE_LABEL[role] ?? "Chưa rõ vai trò";
 }
 
+/**
+ * What an agent IS, for a node. A role the pack knows keeps its name; anything
+ * else is an honest generic. "Chưa rõ vai trò" read like a fault, and it was shown
+ * for every sub-agent that Paseo runs outside the pack's role providers (a plain
+ * `codex` or `claude` agent a Lead started) — which is a normal thing to have.
+ */
+export function agentKindLabel(node) {
+	if (ROLE_LABEL[node?.role]) return ROLE_LABEL[node.role];
+	return node?.parentId ? "Agent phụ" : "Agent độc lập";
+}
+
+const RUNTIME_LABEL = Object.freeze({
+	claude: "Claude",
+	pi: "Pi",
+	codex: "Codex",
+	opencode: "OpenCode",
+	gemini: "Gemini",
+	copilot: "Copilot",
+});
+
+/**
+ * Which coding agent runs the node, whatever it is. A known runtime gets its
+ * proper spelling; an unknown one is shown under its own provider name rather
+ * than hidden, because a badge that only exists for two runtimes makes every
+ * other sub-agent look like it has no runtime at all.
+ */
+export function runtimeLabel(node) {
+	const raw = node?.runtime ?? node?.family ?? null;
+	if (typeof raw !== "string" || raw.trim() === "") return "";
+	const key = raw.trim().toLowerCase();
+	return RUNTIME_LABEL[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+/**
+ * The project a node belongs to, as a name. A cluster id is often a path
+ * ("d:/code/shop") or a workspace id, and the last segment is what a person calls
+ * it.
+ */
+export function projectLabel(cluster) {
+	if (typeof cluster !== "string" || cluster.trim() === "") return "";
+	const trimmed = cluster.trim().replace(/[\\/]+$/, "");
+	return trimmed.split(/[\\/]/).pop() || trimmed;
+}
+
 const STATUS_LABEL = Object.freeze({
 	running: "Đang làm việc",
 	idle: "Đang rảnh",
@@ -34,6 +78,7 @@ const STATUS_LABEL = Object.freeze({
 	closed: "Đã đóng",
 	archived: "Đã lưu trữ",
 	stopped: "Đã dừng",
+	initializing: "Đang khởi động",
 });
 
 export function statusLabel(status) {
@@ -82,7 +127,58 @@ export function permitSentence(permit, agentName) {
 	return `${who} đang xin phép để ${what}.`;
 }
 
+const DETAIL_LABEL = Object.freeze({
+	command: "Lệnh",
+	cmd: "Lệnh",
+	file_path: "File",
+	filePath: "File",
+	path: "Đường dẫn",
+	url: "Địa chỉ",
+	pattern: "Tìm",
+	query: "Tìm",
+	description: "Nội dung",
+	title: "Nội dung",
+	summary: "Nội dung",
+});
+
+/**
+ * The thing the agent actually wants to do — the command line, the file, the
+ * address — pulled out of whatever the daemon attached to the request.
+ *
+ * "đang xin phép để chạy lệnh trên máy này" is not something a person can decide
+ * on: whether `ls` or `rm -rf` follows is the whole question. The raw record used
+ * to be reachable only in advanced mode, which put the one fact an approval turns
+ * on behind a toggle most readers never open.
+ *
+ * Tolerant on purpose (Paseo does not document the shape): the first string found
+ * under the usual keys wins, and nothing found returns null so the card says so
+ * rather than inventing a summary.
+ */
+export function permitDetail(permit, max = 400) {
+	const raw = permit?.raw;
+	if (!raw || typeof raw !== "object") return null;
+	const clip = (text) => (text.length > max ? `${text.slice(0, max)}…` : text);
+	for (const scope of [raw.input, raw.rawInput, raw.arguments, raw.args, raw]) {
+		if (typeof scope === "string" && scope.trim() !== "") return { label: "Nội dung", text: clip(scope.trim()) };
+		if (!scope || typeof scope !== "object") continue;
+		for (const key of Object.keys(DETAIL_LABEL)) {
+			const value = scope[key];
+			if (typeof value === "string" && value.trim() !== "") {
+				return { label: DETAIL_LABEL[key], text: clip(value.trim()) };
+			}
+		}
+	}
+	return null;
+}
+
 const ERROR_ADVICE = [
+	// First: the message names a file path and the words "write"/"modified", and
+	// nothing below should get the chance to explain it as something else.
+	{
+		match: /CONFIG_CHANGED/,
+		title: "File cấu hình đã bị sửa ở nơi khác",
+		advice: "Có chương trình khác (thường là chính Pi) vừa ghi vào file này, nên lần lưu này bị chặn để không đè mất thay đổi đó. Bấm “Tải lại”, làm lại chỉnh sửa của bạn rồi Lưu.",
+	},
 	// The model-endpoint codes come FIRST: their text contains words like
 	// "unreachable" and "connect" that the Paseo rule below would swallow,
 	// and telling someone to start Paseo when their model endpoint is down

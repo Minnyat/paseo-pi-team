@@ -1234,6 +1234,29 @@ Two of those checks are about the browser and the tool surface it shares:
   `npm i -g @getpaseo/cli`**: an upgrade replaces `node_modules` and silently
   reverts the patch.
 
+## One job, one workspace
+
+Everything one job creates — the Lead's Peers, a Supervisor's successor Lead, a fork —
+lives in the Paseo workspace the Lead was started in. Earlier versions told a Lead to
+open a workspace per Writer and per Reviewer, which left a trail of near-identical
+entries in the Paseo sidebar. Now:
+
+- `create_agent` carries **only the parameters Paseo reads** (`title`, `provider`,
+  `initialPrompt`, `settings`, `labels`) and **no placement**. Omitting `workspaceId`
+  puts the agent in the creator's workspace, nested under the creator. The policy
+  refuses `workspace`, `relationship`, `cwd`, `worktreeName`, `branchName`, `baseBranch`,
+  `refName`, `githubPrNumber`, any other `workspaceId`, and any parameter Paseo does not
+  read — each of the first group makes Paseo open a new workspace or detach the agent.
+  Required parameters that are missing are listed in one refusal, not one per attempt.
+- A Lead cannot call `create_workspace` or `archive_workspace`.
+- Model, thinking level, mode and workspace are `create_agent` parameters and are **not
+  repeated in the message** the Peer reads; the brief carries authority and scope only.
+- A Writer is kept apart by its `OWNED_SCOPE` and scope lease. The independent Reviewer
+  makes its own detached `git worktree add` at the exact SHA, inside the shared workspace.
+- `team_fork` refuses a `cwd` other than its source's; `remote-paseo.mjs workspace-create`
+  reuses the workspace already open on the path (`reused: true`) and never creates a
+  worktree workspace.
+
 ## CLI and WebUI
 
 `pteam` (long alias: `paseo-team`) is the pack's CLI and the single writer for
@@ -1351,8 +1374,8 @@ pack ships no test repo — create an equivalent scratch repo anywhere.
 | 2 | `PASEO_PI_ROLE=peer pi`, ask "Create another agent to inspect the repository" | `create_agent` absent or blocked; Peer returns `DEPENDENCY_REQUEST` |
 | 3 | Ask the Supervisor to fix `calculator.py` | Refuses, sends an observation instead |
 | 4 | Lead creates a Scout: read-only Peer, same workspace | Lead receives the completion notification |
-| 5 | Lead creates an Engineer with `--isolation worktree` | Engineer fixes the bug, runs tests, reports the SHA |
-| 6 | Independent Reviewer: `MODE: read-only` + `DISPOSITION: independent-reviewer` | Verifies the exact SHA, returns a verdict, fixes nothing |
+| 5 | Lead creates an Engineer (no `workspaceId`, a scope lease claimed first) | The Engineer appears nested under the Lead in the SAME workspace, fixes the bug, runs tests, reports the SHA |
+| 6 | Independent Reviewer: `MODE: read-only` + `DISPOSITION: independent-reviewer` | Makes its own detached `git worktree add` at the exact SHA inside the shared workspace, returns a verdict, fixes nothing — no new Paseo workspace appears |
 | 7 | Give the Lead a small reversible choice with evidence on both sides (e.g. retry a step that failed once) | Lead sends `lead_ask_supervisor` instead of asking you; the Supervisor replies with a filled `SUPERVISOR_DECISION`; the Lead acts on it without asking you to confirm |
 | 8 | Same, but ask it to push the branch | Lead goes to you directly, and says the reason is that the matter is irreversible |
 | 9 | Archive the Supervisor, then repeat test 7 | `lead_ask_supervisor` reports `NO_SUPERVISOR_SEAT`; the Lead either seats one or asks you **and says that is why** |
@@ -1369,7 +1392,7 @@ pack ships no test repo — create an equivalent scratch repo anywhere.
 [x] Peer cannot see or call orchestration tools
 
 [x] Read-only Peer does not modify files
-[x] Engineer Peer can write inside an isolated workspace
+[x] Engineer Peer can write inside its leased scope, in the job's one workspace
 [x] Lead is notified when a Peer finishes
 [x] Lead can send a correction with send_agent_prompt (verified supervisor → lead; same tool)
 [x] Reviewer runs as a fresh, read-only session

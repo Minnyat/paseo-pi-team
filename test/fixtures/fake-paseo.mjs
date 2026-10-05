@@ -37,6 +37,20 @@ if (
 	process.exit(1);
 }
 
+// `workspace ls --json`: the rows come from the test, so "a workspace is already
+// open on this path" and "none is" are both expressible. FAKE_PASEO_WORKSPACE_LS_FAIL
+// makes the listing itself fail, which the wrapper must NOT read as "none".
+if (argv[0] === "workspace" && argv[1] === "ls") {
+	if (process.env.FAKE_PASEO_WORKSPACE_LS_FAIL === "1") {
+		console.error("fatal: daemon unavailable");
+		process.exit(1);
+	}
+	if (process.env.FAKE_PASEO_WORKSPACES !== undefined) {
+		console.log(process.env.FAKE_PASEO_WORKSPACES);
+		process.exit(0);
+	}
+}
+
 if (argv[0] === "run") {
 	if (process.env.FAKE_PASEO_NO_AGENT_ID === "1") {
 		console.log(JSON.stringify({ status: "running" }));

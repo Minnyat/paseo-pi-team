@@ -8,13 +8,6 @@ PROJECT_ID: team-test-repo
 DISPOSITION: independent-reviewer
 MODE: read-only
 
-ASSIGNED_HOST_ID: mac-review
-ASSIGNED_PASEO_PROVIDER: pi-peer
-ASSIGNED_MODEL: <pi-provider>/<model-id>
-ASSIGNED_THINKING: high
-WORKSPACE_REF: worktree:../reviews/T-001-<short-sha>
-AGENT_REF:
-
 EXPECTED_BASE_SHA:
 ASSIGNED_CANDIDATE_SHA: <candidate-sha>
 

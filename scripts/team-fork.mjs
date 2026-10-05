@@ -44,6 +44,7 @@ const {
 	forkModelBlockReason,
 	forkRequestBlockReason,
 	forkSeedPrompt,
+	normalizeCluster,
 	parseRoleProvider,
 	seatModeBlockReason,
 } = await importPolicyCore();
@@ -220,6 +221,21 @@ export async function forkAgent(input = {}, options = {}) {
 
 	const state = readState(agentId, options);
 
+	const requestedCwd = typeof input.cwd === "string" && input.cwd.trim() !== "" ? input.cwd : null;
+	// One job, one workspace — checked BEFORE the transcript is copied, so a
+	// refused fork leaves no session file behind.
+	// A fork continues its source's work, so it runs where
+	// the source runs: a different directory is a different Paseo workspace, which
+	// is exactly the sidebar spam the create_agent gate exists to stop. `cwd` is
+	// only a way to NAME the directory when the source's state cannot — so it is
+	// refused when the state already names another one.
+	if (requestedCwd && state.cwd && normalizeCluster(requestedCwd) !== normalizeCluster(state.cwd)) {
+		throw bad(
+			"FORK_CWD_MISMATCH",
+			`BLOCKED: FORK_CWD_MISMATCH — cwd "${requestedCwd}" is not where agent ${agentId} runs ("${state.cwd}"). A fork stays in its source's workspace — a different directory would open a new one. Leave cwd out.`,
+		);
+	}
+
 	const materialized = options.materialize
 		? options.materialize(state.sessionFile, { now: options.now })
 		: materializeFork(state.sessionFile, { now: options.now });
@@ -236,7 +252,7 @@ export async function forkAgent(input = {}, options = {}) {
 	// an empty CLUSTER label would be worse than none.
 	const sourceCluster = agentCluster(state);
 	if (sourceCluster) labels["team.cluster"] = sourceCluster;
-	const cwd = typeof input.cwd === "string" && input.cwd.trim() !== "" ? input.cwd : state.cwd;
+	const cwd = requestedCwd ?? state.cwd;
 	if (!cwd) {
 		// Measured 2026-08-28: without --cwd the CLI notices the session belongs
 		// to another project and PROMPTS ("Fork this session into current
