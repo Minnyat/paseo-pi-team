@@ -247,8 +247,9 @@ This is the exact failure mode the cluster config exists to prevent.
    cluster: omit it and `create_agent` is refused with
    `Refusing create_agent: labels["team.cluster"] is required and must be
    "<value>"` — the message names the exact value to pass. Get your own value
-   from `pteam env list` / `PASEO_TEAM_CLUSTER`, or read it off any Peer you
-   already created. A label naming a DIFFERENT cluster than your own is refused
+   from the `cluster` field of any `team_lease` result (`status` changes nothing),
+   or read it off any Peer you already created; do not guess it from the project
+   name, and `pteam env list` only lists settings, not your cluster. A label naming a DIFFERENT cluster than your own is refused
    too — that would be stamping a new seat into another project's authority,
    not a typo to silently correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
@@ -706,7 +707,10 @@ After implementation:
    `WORKTREE_CLEAN: yes`. The required order is: format → test → commit →
    verify `git status --porcelain` empty → push (when granted). A dirty
    candidate is automatically refused by the independent reviewer and must be
-   corrected in the same Engineer session before review.
+   corrected in the same Engineer session before review. Check the candidate
+   from the repository, never from the Engineer's tree — it removes that when it
+   has reported: `git show <sha>`, `git diff <base>..<branch>`, or
+   `git archive <sha> | tar -x -C <tmp>` for a test run.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
    `DISPOSITION: independent-reviewer`) like any other Peer — in your workspace,
    no placement parameter. Its independence is a **detached git worktree** at the
@@ -779,9 +783,11 @@ After implementation:
    cheap. `acceptance-verifier` has no acceptance authority: it reports
    whether the artifact matches the brief, and you decide what that means.
    If changes are required, return findings
-   to the original Engineer (as a full V3 brief so write authority is re-granted).
-   The Engineer creates a **new** commit SHA without amend/force-push, and the
-   new candidate is reviewed again from a fresh clean workspace.
+   to the original Engineer (as a full V3 brief so write authority is re-granted,
+   with `EXPECTED_BASE_SHA` set to the candidate being corrected; its tree may be
+   gone, and it re-adds it from the branch). The Engineer creates a **new** commit
+   SHA without amend/force-push, and the new candidate is reviewed again from a
+   fresh clean workspace.
 7. Preserve the existing one-writer, fresh-reviewer-worktree, exact-SHA, Lead
    acceptance, and Human merge/deploy invariants.
 

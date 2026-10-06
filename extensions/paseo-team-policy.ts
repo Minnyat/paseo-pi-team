@@ -402,7 +402,7 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 			type: "object",
 			properties: {
 				action: { type: "string", enum: ["claim", "renew", "release", "status"] },
-				scope: { type: "string", maxLength: 256 },
+				scope: { type: "string", maxLength: 4096 },
 				ttlMs: { type: "integer", minimum: 1, maximum: 43_200_000 },
 				taskId: { type: "string", maxLength: 128 },
 			},
