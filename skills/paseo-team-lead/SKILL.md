@@ -207,7 +207,11 @@ This is the exact failure mode the cluster config exists to prevent.
      are on never moves). Put the commands in its brief
      (`templates/TASK_BRIEF_V3.md`). Keep it under the workspace root: from
      outside it a shell restarts in the workspace on every call and some
-     commands are declined.
+     commands are declined. Do not tell a writer to leave its tree in place:
+     review runs from the SHA in a tree of its own, the branch keeps the
+     commits, and the writer removes its tree when it has reported. A
+     correction brings it back with `git worktree add .worktrees/<TASK_ID>
+     agent/<TASK_ID>`.
    - The **independent Reviewer** still reviews a detached checkout of the exact
      candidate SHA, and still never touches the Engineer's tree — it makes that
      checkout itself with `git worktree add --detach <path> <candidate-sha>`
