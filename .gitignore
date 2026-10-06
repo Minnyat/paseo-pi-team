@@ -41,6 +41,14 @@ id_ed25519*
 # Audit trail of permit decisions (carries the OS username) and Claude session state.
 permit-audit.jsonl
 claude-sessions/
+# Shipped examples follow <name>.example.<ext> (config/pi-models.example.json); the
+# *.env and secrets.* rules above would swallow the same convention. These must
+# stay AFTER them: a negation only re-includes what an earlier pattern ignored.
+!*.example.env
+!*.env.example
+!.env.sample
+!.env.template
+!secrets.example.*
 
 # Per-session scratch written by the coding agents that work in this repo:
 # `.zcode/plans/` holds one plan file per session, `.claude/worktrees/` holds
