@@ -33,7 +33,7 @@
 - [x] P4: doctrine (lead.md / supervisor.md / SKILL) + README + PR-I trong `docs/multi-supervisor-topology.md` + model-routing + claude-runtime + ví dụ.
 - [x] P5: rà soát đối kháng bằng agent độc lập (probe thật trên hai adapter, so với bản trước PR). Tìm ra 9 nhóm lỗi thật (fork là cửa thứ hai, route khi không biết nhãn, `mcp_script`, doctrine lệch policy về brief V3, cổng mở khi một file state hỏng, consult đọc "không đọc được" thành "không có ai", claim "cụm cũ không đổi" sai, doc drift, lỗ hổng test); đã sửa hết, mỗi cái có test. Bảng đầy đủ: `docs/multi-supervisor-topology.md` "Đã sửa sau rà soát độc lập".
 - [x] P6a: reviewer chạy lại toàn bộ probe trên b2f4578: mọi lỗi cũ đã đóng; còn 3 lỗi thấp (miễn trừ không nhãn tính cả domain khác dưới `multi`, consult nêu đích danh ghế hỏng, doc drift) + 1 nguy cơ mới đáng kể (thay ghế quyết định bằng archive có thể archive chính Lead qua cascade). Đã sửa hết: miễn trừ giới hạn theo jurisdiction, consult đọc strict khi sắp nói "không có ai/không đủ tư cách mà bạn nêu", thay ghế quyết định trở lại là việc của Human, test khoá doctrine scout.
-- [ ] P6b: hỏi advisor lần cuối, rồi mới nói "merge được". Chưa mở PR.
+- [x] P6b: advisor lần cuối: mergeable (origin/main vẫn ở b5d2a06 nên fast-forward, 333/333, mọi lỗi đã xác nhận ở hai vòng review đã đóng và có mutation). Tồn đọng đã ghi trong PR-I "Chưa giải quyết": cổng "không archive tổ tiên", hai create_agent song song, cửa sổ `selfWatch`, chưa chạy daemon thật. Chưa mở PR — việc của user.
 
 ## Open questions / risks
 - (Đã đo, đóng: Paseo archive = soft delete với `archivedAt`; policy bỏ ghế đó ra khỏi danh sách ghế.) Còn mở: hai `create_agent` quyết định trong cùng một lượt (Claude song song) cùng qua cổng; `selfWatch` đọc "không đọc được" thành "không nhãn" (cố ý, xem PR-I); ghế không nhãn có sẵn không bao giờ thu hẹp được.
@@ -41,6 +41,7 @@
 - Ngưỡng "task dài" là phán đoán của Lead (không có số ép). Nếu thực tế Lead không dựng ghế quan sát, cần xem lại liệu có nên nhắc ở `LEAD_STANDING_AUTHORITY`.
 
 ## Log
+- (2026-10-06) Vòng cuối: advisor "mergeable"; commit cuối 0184e95 đã push (trước đó 5ee7407 → 6b67379 → b2f4578). Reviewer độc lập xác nhận b2f4578; riêng 0184e95 (miễn trừ theo jurisdiction, consult ghế được nêu, "Human thay ghế quyết định") chỉ có test + mutation 6/6 chứ chưa có reviewer độc lập chạy lại.
 - (2026-10-06) P0–P4 xong, commit 5ee7407 đã push lên `claude/lead-workload-supervisors-7lh3uf`. User hỏi "merge được chưa, hỏi advisor đi": advisor nói CHƯA (cổng dựng ghế đổi hành vi mặc định, không có đường thay ghế quyết định), reviewer độc lập xác nhận thêm hàng loạt lỗi thật. Đã đo Paseo 0.10.3 từ npm (archive = soft delete; update_agent gộp nhãn) rồi sửa hết (P5). Chi tiết thiết kế, bảng "Đã giao" và "Đã sửa sau rà soát độc lập": `docs/multi-supervisor-topology.md` §PR-I.
 
 ---

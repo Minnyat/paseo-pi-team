@@ -166,4 +166,6 @@ case where asking the Human is right anyway.
 Never archive a seat that created you. Paseo cascades an archive to every agent the
 seat created ("subagent fleets don't outlive their orchestrator"), and a Lead that a
 Supervisor recovered is that Supervisor's subagent: archiving the Supervisor would
-archive the Lead, and with it the Peers the Lead created.
+archive the Lead, and with it the Peers the Lead created. In that case the Human runs
+`paseo agent detach <the Lead's id>` first, which makes the Lead a root agent, and
+only then archives the Supervisor.

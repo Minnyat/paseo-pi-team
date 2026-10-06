@@ -931,7 +931,8 @@ một ghế nặng thay được mà không mất phần còn lại.
    không dùng được. Không có nhãn = ghế mà pack vốn có (xem mọi thứ và quyết định).
    Cụm chưa dùng nhãn giữ hành vi cũ: ghế không nhãn cạnh ghế không nhãn được dựng như
    trước (cổng "một ghế quyết định" chỉ bật khi cụm đã dùng nhãn: ghế mới hoặc bất kỳ
-   Supervisor nào trong cụm, ghế quan sát kể cả, mang `team.watch`), và hai thay đổi duy nhất
+   Supervisor nào trong cụm, ghế quan sát kể cả, mang `team.watch` — dưới `multi` chỉ tính
+   các ghế có jurisdiction giao với ghế mới), và hai thay đổi duy nhất
    chạm cụm đó là sửa lỗi chứ không phải luật mới: ghế đã archive không còn bị đếm, và
    state hỏng không còn đọc thành "chưa có ai" (xem "Đã sửa sau rà soát độc lập").
 2. **Quyền bị chặn ở chỗ nó có thể bị vi phạm, không ở một chỗ.** Lead dựng ghế
@@ -1035,7 +1036,7 @@ lỗi sau; mỗi cái đã sửa tại chỗ vi phạm được và có test kho
 | Doctrine nói follow-up cho scout không cần khối V3 — nhưng `peer_ask_lead` đòi brief V3 hợp lệ, nên scout không có đường trả lời ngoài activity log | lead.md, SKILL, ví dụ: follow-up mang khối V3 `MODE: read-only` ngắn |
 | Cổng dựng ghế mở khi một file state hỏng (chỉ lỗi root/dir mới là "không nhìn được"): ghế quyết định thứ hai qua cổng | mọi lỗi quét → `SUPERVISOR_LOOKUP_FAILED`, kèm tên bản ghi hỏng; lời khuyên `pteam preflight` (không bao giờ đọc `agents/`) bỏ đi |
 | `lead_ask_supervisor` vẫn đọc state không đọc được thành `NO_SUPERVISOR_SEAT` ("được phép hỏi Human") | khi sắp trả lời "không có ai", consult đọc lại với `supervisorSeats({ strict: true })` → `SUPERVISOR_LOOKUP_FAILED`; ghế đã tìm thấy vẫn được route tới như cũ |
-| Cổng "một ghế quyết định" từ chối ghế không nhãn thứ hai cả trên cụm chưa từng dùng nhãn — thay đổi hành vi mặc định, và ghế đã archive vẫn bị đếm nên không thay được ghế quyết định | cổng chỉ bật khi cụm đã dùng nhãn (ghế mới hoặc bất kỳ Supervisor nào trong cụm mang `team.watch`); ghế có `archivedAt` không được đếm (**đo trên `@getpaseo/server` 0.10.3**: `buildArchivedAgentRecord` ghi `archivedAt`, không xoá file); thay ghế quyết định = Human archive, Lead dựng ghế mới |
+| Cổng "một ghế quyết định" từ chối ghế không nhãn thứ hai cả trên cụm chưa từng dùng nhãn — thay đổi hành vi mặc định, và ghế đã archive vẫn bị đếm nên không thay được ghế quyết định | cổng chỉ bật khi cụm đã dùng nhãn (ghế mới hoặc bất kỳ Supervisor nào trong cụm mang `team.watch`; dưới `multi` chỉ tính ghế có jurisdiction giao với ghế mới); ghế có `archivedAt` không được đếm (**đo trên `@getpaseo/server` 0.10.3**: `buildArchivedAgentRecord` ghi `archivedAt`, không xoá file); thay ghế quyết định = Human archive, Lead dựng ghế mới |
 | Khoá nhãn viết sai (`Team.Watch`) đọc thành "không nhãn" = ghế quyết định | từ chối, nêu tên khoá |
 | `graph.jurisdiction.undecided` tính trên cả host; nhãn không đọc được hiện y như một watch hợp lệ | tính theo từng cluster (`undecidedAgents`); node mang `watchUnreadable`, WebUI cảnh báo |
 | Test: nhánh `AGENT_STATE_DIR_UNREADABLE`, bản ghi hỏng, `team_fork`, `mcp_script` không có test; test recovery chỉ kiểm `!/RECOVERY_NOT_DELEGATED/` | thêm test từng cái; recovery của ghế quyết định/không nhãn kiểm *được cho qua*, không chỉ "không bị chặn bởi luật này" |
@@ -1075,8 +1076,9 @@ sự có mặt của khoá là đủ.
   đọc từ nguồn Paseo 0.10.3, chưa chạy daemon). Lead do Supervisor khôi phục là subagent của
   Supervisor đó, nên Lead archive Supervisor ấy sẽ archive chính nó và các Peer của nó. Policy
   không chặn lời gọi này (nó có sẵn từ trước PR): doctrine nói thay ghế quyết định là việc của
-  Human và cấm archive ghế đã tạo ra mình; một cổng "không archive tổ tiên của chính mình" là
-  bước tiếp theo hợp lý, chưa làm.
+  Human và cấm archive ghế đã tạo ra mình; nếu Supervisor đã khôi phục Lead thì Human chạy
+  `paseo agent detach <id Lead>` trước rồi mới archive. Một cổng "không archive tổ tiên của
+  chính mình" là bước tiếp theo hợp lý, chưa làm.
 - Ghế do Human tạo ngoài `create_agent` với khoá nhãn viết sai (`Team.Watch`) vẫn đọc thành
   "không nhãn" và quyết định — chỉ ghế do Lead dựng mới được cổng bảo vệ. Luật overlap phía
   Lead vẫn đọc danh sách ghế kiểu lenient (một bản ghi đối thủ bị hỏng che mất một overlap
