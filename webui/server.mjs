@@ -470,14 +470,23 @@ export async function startServer(options = {}) {
 	// check must compare against the port actually bound, not the request.
 	let boundPort = port;
 
-	const server = createServer(async (req, res) => {
-		const url = new URL(req.url ?? "/", `http://127.0.0.1:${boundPort}`);
-		const query = Object.fromEntries(url.searchParams.entries());
+	const handleRequest = async (req, res) => {
 		try {
 			if (!isAllowedHost(req, boundPort)) {
 				sendJson(res, 403, { ok: false, code: "HOST_NOT_ALLOWED", message: "this server only answers to localhost" });
 				return;
 			}
+			// A target such as "//" is not a URL against this base and URL() throws
+			// on it. Parsed outside this try it escaped as an unhandled rejection
+			// that took the whole process down, before any Host or token check, so
+			// a single request from any local process or web page could kill the UI.
+			let url;
+			try {
+				url = new URL(req.url ?? "/", `http://127.0.0.1:${boundPort}`);
+			} catch {
+				throw new RouteError(400, "BAD_REQUEST_TARGET", "malformed request target");
+			}
+			const query = Object.fromEntries(url.searchParams.entries());
 			if (url.pathname === "/favicon.ico") {
 				// Browsers ask for it unprompted; a 404 here showed up as a console
 				// error on every page load and looked like something being broken.
@@ -569,6 +578,22 @@ export async function startServer(options = {}) {
 				message: String(error?.message ?? error),
 			});
 		}
+	};
+	const server = createServer((req, res) => {
+		// Last line of defence: the handler answers its own errors, but anything
+		// that still escapes it (a throw while writing the error response, say)
+		// must end this one request, never the process.
+		handleRequest(req, res).catch(() => {
+			if (res.headersSent) {
+				res.destroy();
+				return;
+			}
+			try {
+				sendJson(res, 500, { ok: false, code: "SERVER_ERROR", message: "internal error" });
+			} catch {
+				res.destroy();
+			}
+		});
 	});
 
 	// A busy port must degrade to a notice, not a stack trace. Without an

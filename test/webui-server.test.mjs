@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { connect } from "node:net";
 import {
 	ROUTES,
 	bearerToken,
@@ -314,6 +315,46 @@ assert.equal(bearerToken({ headers: {} }), null);
 		const revalidate = await fetch(`${base}/app.js`, { headers: { "if-none-match": etag } });
 		assert.equal(revalidate.status, 304, "an unchanged asset costs a 304, not a re-download");
 		assert.equal(await revalidate.text(), "");
+	} finally {
+		await handle.close();
+	}
+}
+
+// --- a malformed request target answers 400, it does not kill the server ----
+// `new URL("//", base)` throws. That parse used to sit outside the handler's
+// try, so one request (no token, no Host match needed) crashed the process.
+// fetch() normalises the target, so this goes over a raw socket.
+{
+	const rawHttp = (port, target, headers = {}) =>
+		new Promise((resolve, reject) => {
+			const socket = connect(port, "127.0.0.1");
+			let data = "";
+			socket.setEncoding("utf8");
+			socket.on("data", (chunk) => {
+				data += chunk;
+			});
+			socket.on("end", () => resolve(data));
+			socket.on("error", reject);
+			socket.on("connect", () => {
+				const head = Object.entries({ host: `127.0.0.1:${port}`, connection: "close", ...headers })
+					.map(([key, value]) => `${key}: ${value}`)
+					.join("\r\n");
+				socket.write(`GET ${target} HTTP/1.1\r\n${head}\r\n\r\n`);
+			});
+		});
+
+	const handle = await startServer({ port: 0, quiet: true, token: "t" });
+	try {
+		for (const target of ["//", "///", "//@/x", "//%"]) {
+			const answer = await rawHttp(handle.port, target);
+			assert.match(answer, /^HTTP\/1\.1 400 /, `${target} is a client error, not a dropped connection`);
+			assert.match(answer, /BAD_REQUEST_TARGET/);
+			const alive = await fetch(`http://127.0.0.1:${handle.port}/favicon.ico`);
+			assert.equal(alive.status, 204, `the server must still be up after ${target}`);
+		}
+		// The Host check still runs first: a rebound name gets 403, whatever the target.
+		const rebound = await rawHttp(handle.port, "//", { host: `evil.example:${handle.port}` });
+		assert.match(rebound, /^HTTP\/1\.1 403 /);
 	} finally {
 		await handle.close();
 	}
