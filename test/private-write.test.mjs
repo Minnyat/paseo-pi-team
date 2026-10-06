@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "../scripts/lib-common.mjs";
@@ -39,6 +39,21 @@ if (process.platform === "win32") {
 				assert.equal(modeOf(file), mode.toString(8), `an existing ${mode.toString(8)} file keeps its mode`);
 			}
 
+			// The exact bits are restored, not just "whatever survives the umask": a
+			// 0664 or 0775 file under umask 022, and a 0644 file under a hardened 077.
+			for (const [mode, umask] of [[0o664, 0o022], [0o775, 0o022], [0o644, 0o077]]) {
+				const file = join(dir, `exact-${mode.toString(8)}-${umask.toString(8)}`);
+				writeFileSync(file, "old\n");
+				chmodSync(file, mode);
+				process.umask(umask);
+				try {
+					writeFileAtomic(file, "new\n");
+				} finally {
+					process.umask(0o022);
+				}
+				assert.equal(modeOf(file), mode.toString(8), `${mode.toString(8)} survives umask ${umask.toString(8)} unchanged`);
+			}
+
 			// A brand-new file starts private, whatever the umask.
 			const fresh = join(dir, "fresh.json");
 			writeFileAtomic(fresh, "{}\n");
@@ -50,6 +65,26 @@ if (process.platform === "win32") {
 			assert.equal(modeOf(freshOpenUmask), "600", "umask 0 must not make a new credential file world-readable");
 
 			assert.deepEqual(leftovers(dir), [], "no temp file is left behind");
+		}
+
+		// --- a planted file or symlink at the temp name is refused, not followed --
+		{
+			const dir = join(sandbox, "planted");
+			mkdirSync(dir);
+			const victim = join(dir, "victim");
+			writeFileSync(victim, "keep\n");
+			const target = join(dir, "config.json");
+			const realNow = Date.now;
+			Date.now = () => 1_700_000_000_000; // the temp name embeds pid and time; pin it so it can be pre-planted
+			try {
+				symlinkSync(victim, `${target}.tmp-${process.pid}-1700000000000`);
+				assert.throws(() => writeFileAtomic(target, "attacker-controlled\n"), (error) => error.code === "EEXIST");
+				assert.equal(readFileSync(victim, "utf8"), "keep\n", "the file behind the planted symlink is untouched");
+				writeFileAtomic(target, "{}\n"); // the refusal cleaned up after itself: a retry works
+				assert.equal(readFileSync(target, "utf8"), "{}\n");
+			} finally {
+				Date.now = realNow;
+			}
 		}
 
 		// --- a failed swap cleans up its temp file ----------------------------
@@ -99,8 +134,7 @@ if (process.platform === "win32") {
 			writeJsonAtomic(claudeJson, { mcpServers: { s: { env: { TOKEN: "secret" } } } });
 			assert.equal(modeOf(claudeJson), "600", "install/apply must not widen ~/.claude.json");
 			assert.deepEqual(JSON.parse(readFileSync(claudeJson, "utf8")).mcpServers.s.env, { TOKEN: "secret" });
-			assert.deepEqual(leftovers(root), []);
-			assert.ok(!existsSync(`${claudeJson}.${process.pid}.tmp`));
+			assert.deepEqual(leftovers(root), [], "no temp file is left behind");
 		}
 	} finally {
 		process.umask(realUmask);

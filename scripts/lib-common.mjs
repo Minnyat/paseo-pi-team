@@ -447,6 +447,8 @@ export function importPolicyCore(name = "policy-core.ts", env = process.env) {
 export const PRIVATE_FILE_MODE = 0o600;
 /** Mode for a directory this pack creates to hold such files. */
 export const PRIVATE_DIR_MODE = 0o700;
+// What chmod answers on a filesystem that has no permission bits to set.
+const CHMOD_UNSUPPORTED = new Set(["EPERM", "ENOTSUP", "ENOSYS", "EINVAL"]);
 
 /**
  * Write `content` to `absPath` through a temp sibling and a rename, so a reader
@@ -473,8 +475,17 @@ export function writeFileAtomic(absPath, content) {
 	try {
 		writeFileSync(temp, content, { encoding: "utf8", mode, flag: "wx" });
 		// The mode above is filtered through the umask; set the exact bits. Windows
-		// has no POSIX modes (chmod there only toggles read-only), so leave it.
-		if (process.platform !== "win32") chmodSync(temp, mode);
+		// has no POSIX modes (chmod there only toggles read-only), so leave it. A
+		// filesystem that cannot hold modes (vfat/exFAT, some FUSE and SMB mounts)
+		// refuses the chmod; its files carry no permission bits to preserve, and the
+		// write worked there before, so that refusal must not fail the write.
+		if (process.platform !== "win32") {
+			try {
+				chmodSync(temp, mode);
+			} catch (error) {
+				if (!CHMOD_UNSUPPORTED.has(error?.code)) throw error;
+			}
+		}
 		renameSync(temp, absPath);
 	} catch (error) {
 		rmSync(temp, { force: true });
