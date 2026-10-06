@@ -478,18 +478,40 @@ writeFileSync(
 );
 assert.equal((await send()).recipient, ids.decider, "an archived deciding seat does not make the consult ambiguous");
 
-// One record the scan cannot read may be the very seat being asked about, so
-// "nobody" is not an answer to give: the lookup failed, and the Lead is told so.
+// One torn record elsewhere does not stop a consult whose seat WAS found: it is
+// routed to as it always was, so a broken file in another project cannot take
+// consulting away from every Lead on the host.
 const corrupt = "66666666-6666-4666-8666-666666666666";
 writeFileSync(join(dir, `${corrupt}.json`), '{"id": "66666666-6666-4666-8666-666666666666", "provider": "pi-super');
+assert.equal((await send()).recipient, ids.decider, "a seat that was found is routed to despite an unrelated torn record");
+
+// "Nobody" is the one answer a scan that could not read everything cannot give:
+// the record it missed may be the seat being asked about. Without a seat to
+// route to, a torn record is LOOKUP_FAILED — and with a clean scan the same
+// consult is the honest NO_SUPERVISOR_SEAT.
+const lonely = (withTornRecord) => {
+  const alone = join(home, withTornRecord ? "alone-torn" : "alone-clean");
+  const aloneDir = join(alone, "agents", "D--Code-shop");
+  mkdirSync(aloneDir, { recursive: true });
+  writeFileSync(
+    join(aloneDir, `${ids.lead}.json`),
+    JSON.stringify({ id: ids.lead, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } }),
+  );
+  if (withTornRecord) writeFileSync(join(aloneDir, `${corrupt}.json`), '{"id": "66666666-6666');
+  return sendLeadConsult(CONSULT, {
+    env: { PASEO_AGENT_ID: ids.lead, PASEO_HOME: alone, PASEO_TEAM_CLUSTER: "shop" },
+    runPaseo: async (args) => (calls.push(args), { ok: true, data: {} }),
+  });
+};
 const callsBefore = calls.length;
-await assert.rejects(send(), (error) => {
+await assert.rejects(lonely(false), (error) => error.code === "NO_SUPERVISOR_SEAT");
+await assert.rejects(lonely(true), (error) => {
   assert.equal(error.code, "SUPERVISOR_LOOKUP_FAILED");
   assert.match(error.message, /AGENT_STATE_UNREADABLE/);
   assert.ok(error.message.includes(corrupt), "it names the record");
   return true;
 });
-assert.equal(calls.length, callsBefore, "and sends nothing");
+assert.equal(calls.length, callsBefore, "and neither sends anything");
 
 // The root itself unreadable is the same answer, not NO_SUPERVISOR_SEAT (which
 // tells a Lead it may put the question to the Human).

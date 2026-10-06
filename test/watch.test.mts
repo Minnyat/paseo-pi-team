@@ -448,10 +448,39 @@ test("after that a Lead seats watch seats, and only watch seats", () => {
 			);
 			// An observer needs only that someone decides; a legacy seat does.
 			assert.equal(
-				leadCreateSupervisorArgsBlockReason(seatArgs({ [TEAM_WATCH_LABEL]: "liveness" }), { seats: [seat(DECIDER)] }),
-				null,
+			leadCreateSupervisorArgsBlockReason(seatArgs({ [TEAM_WATCH_LABEL]: "liveness" }), { seats: [seat(DECIDER)] }),
+			null,
 			);
-		});
+
+			// An observer beside the label-free decider IS a cluster that uses the label —
+			// it is the adoption path the Lead skill prescribes — so a second label-free
+			// seat there is the ambiguity this rule exists to prevent, not "as it was".
+			const adopted = [seat(DECIDER), seat(LIVENESS, null, "liveness")];
+			for (const labels of [{}, { [TEAM_WATCH_LABEL]: "decisions" }]) {
+				assert.match(
+					String(leadCreateSupervisorArgsBlockReason(seatArgs(labels), { seats: adopted })),
+					/already has a Supervisor that decides/,
+					JSON.stringify(labels),
+				);
+			}
+			assert.equal(
+				leadCreateSupervisorArgsBlockReason(seatArgs({ [TEAM_WATCH_LABEL]: "cost" }), { seats: adopted }),
+				null,
+				"another observer is fine, as ever",
+			);
+			// ...also under multi, where "the cluster" is every seat in it, not just the
+			// ones whose jurisdiction meets the new one's.
+			assert.match(
+				String(
+					leadCreateSupervisorArgsBlockReason(seatArgs({ "team.domain": "backend.auth" }), {
+						topology: "multi",
+						selfDomain: "backend",
+						seats: [seat(DECIDER, "backend"), seat(LIVENESS, "frontend", "liveness")],
+					}),
+				),
+				/JURISDICTION_OVERLAP/,
+			);
+			});
 
 		test("a label key that is not exactly team.watch is refused, not read as no label", () => {
 			// No label is a seat that watches everything and decides. A typo must not be

@@ -368,29 +368,41 @@ export async function sendLeadConsult(input, options = {}) {
   const topology = core.teamTopology(env);
   const cluster = core.selfCluster(env);
   const leadDomain = core.normalizeDomain(env.PASEO_TEAM_DOMAIN ?? null);
-  let seats;
-  try {
-    // `strict`: the answer on offer includes "nobody", and an agent-state file
-    // the scan could not read may be the very seat being asked about.
-    seats = core.supervisorSeats(env, { cluster, strict: true });
-  } catch (error) {
-    // Fail-closed, and say which half failed: "I could not look" must never be
-    // reported as "there is nobody", or the Lead concludes it may ask the Human.
-    throw Object.assign(
+  // Fail-closed, and say which half failed: "I could not look" must never be
+  // reported as "there is nobody", or the Lead concludes it may ask the Human.
+  const lookupFailed = (error) =>
+    Object.assign(
       new Error(
         `SUPERVISOR_LOOKUP_FAILED: Paseo agent state could not be read, so whether this cluster has a Supervisor is unknown: ${String(error?.message ?? error)}`,
       ),
       { code: "SUPERVISOR_LOOKUP_FAILED" },
     );
+  const readSeats = (strict) => {
+    try {
+      return core.supervisorSeats(env, { cluster, strict });
+    } catch (error) {
+      throw lookupFailed(error);
+    }
+  };
+  const seats = readSeats(false);
+  let supervisor;
+  try {
+    supervisor = chooseSupervisor({
+      seats,
+      topology,
+      leadDomain,
+      domainCovers: core.domainCovers,
+      seatDecides: core.seatDecides,
+      requested: consult.supervisorAgentId,
+    });
+  } catch (error) {
+    // "Nobody" is the one answer a scan that could not read part of the agent
+    // state cannot give: the record it missed may be the seat being asked about.
+    // A seat that WAS found is routed to as it always was, so one torn record in
+    // some other project does not stop every Lead on the host from consulting.
+    if (error?.code === "NO_SUPERVISOR_SEAT") readSeats(true);
+    throw error;
   }
-  const supervisor = chooseSupervisor({
-    seats,
-    topology,
-    leadDomain,
-    domainCovers: core.domainCovers,
-    seatDecides: core.seatDecides,
-    requested: consult.supervisorAgentId,
-  });
   const body = buildConsultBody(consult, { self, domain: leadDomain, header: core.LEAD_CONSULT_HEADER });
   const paseo = options.runPaseo ?? runPaseo;
   // Same one-shot rule as sendPeerMessage: `send` is a mutation with delivery

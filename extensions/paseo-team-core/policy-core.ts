@@ -3063,10 +3063,10 @@ export function leadAskSupervisorToolDescription(): string {
  *     the Lead's own instrument-making. Replacing the DECIDING seat is archive,
  *     then seat: an archived seat is not counted.
  *   - A cluster that has never used `team.watch` is the pack as it was. A seat
- *     with no label beside seats that carry none is allowed exactly as it always
- *     was (its cost, a consult that comes back SUPERVISOR_AMBIGUOUS until one is
- *     archived, is the cost it always had), so the new rules apply to the
- *     clusters that use the label and to no one else.
+ *     with no label in a cluster where no Supervisor carries one is allowed
+ *     exactly as it always was (its cost, a consult that comes back
+ *     SUPERVISOR_AMBIGUOUS until one is archived, is the cost it always had), so
+ *     the new rules apply to the clusters that use the label and to no one else.
  *
  * The cluster label is checked separately by `clusterLabelBlockReason`, which
  * runs for every create_agent on both paths.
@@ -3174,8 +3174,11 @@ export function leadCreateSupervisorArgsBlockReason(
 				(!multi ||
 					(normalizeDomain(seat.domain) !== null && domainConflicts(seat.domain, declared))),
 		);
-		// No label on either side is the pack as it was (see above): allowed.
-		const legacy = watch === null && incumbents.every((seat) => !seat.watch);
+		// A cluster that has never used the label is the pack as it was (see above):
+		// allowed. "Never used" covers the new seat and EVERY Supervisor already there,
+		// observers included — a watch seat beside a label-free decider is a cluster that
+		// uses it, and a second label-free seat there is the ambiguity this rule is for.
+		const legacy = watch === null && context.seats.every((seat) => !seat.watch);
 		if (incumbents.length > 0 && !legacy) {
 			return `Refusing create_agent: this cluster already has a Supervisor that decides (${incumbents.map(named).join(", ")}). A second one would make every consult SUPERVISOR_AMBIGUOUS${multi ? " and make a Lead refuse BOTH on JURISDICTION_OVERLAP" : ""} — the authority to decide is held by exactly one seat. To ADD a seat, make it a WATCH seat: set labels["${TEAM_WATCH_LABEL}"] to what it observes (${WATCH_CONCERNS.filter((concern) => concern !== WATCH_DECISIONS).join(", ")}) and leave \`${WATCH_DECISIONS}\` out. To REPLACE the deciding seat, archive it first (ask it for a handoff note beforehand), then seat the successor: an archived seat is not counted.`;
 		}

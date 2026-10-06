@@ -363,7 +363,7 @@ straight back into asking the Human:
 | `NO_SUPERVISOR_SEAT` | this cluster has no seat that decides — the one case where asking the Human is correct (watch seats alone do not count). The message carries the `create_agent` call that fixes it |
 | `SUPERVISOR_AMBIGUOUS` | two seats that DECIDE claim this Lead; picking one would ratify an overlap the Lead's own runtime refuses as `JURISDICTION_OVERLAP` |
 | `SUPERVISOR_NOT_ELIGIBLE` | the `supervisorAgentId` the Lead named does not govern it: another cluster's seat, or a watch seat (the message points at the seat that decides) |
-| `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable — even one torn record, since it may be the seat being asked about. "Could not look" is never reported as "there is nobody" |
+| `SUPERVISOR_LOOKUP_FAILED` | no seat was found AND the agent state could not be read in full (a torn record may be the seat being asked about). "Could not look" is never reported as "there is nobody"; a seat that was found is used as ever |
 | `CONSULT_FIELD_COLLISION` | a body line like `SCOPE:` would be read back as a field |
 
 A Lead may also **seat the Supervisor that governs it** when the cluster has
@@ -504,11 +504,12 @@ live in it, and the rules keep them apart:
   observation is advice the Lead weighs, never something it acts on.
 - **Authority** (`decisions`) is held by exactly one seat per jurisdiction, because
   it is what the overlap rules exist to keep unique. A seat without it cannot use
-it. No `team.watch` at all is the seat the pack has always had — it watches
-everything and decides. A cluster that never uses the label keeps what it had: the
-seating rules below take hold once a seat carries one (a label-free seat beside
-label-free seats is allowed exactly as before), and an archived Supervisor — Paseo
-archives by soft delete and leaves the record — is no longer counted as a seat.
+  it. No `team.watch` at all is the seat the pack has always had — it watches
+  everything and decides. A cluster that never uses the label keeps what it had: the
+  seating rules below take hold once a seat carries one (a label-free seat in a
+  cluster where no Supervisor carries one is allowed exactly as before), and an
+  archived Supervisor — Paseo archives by soft delete and leaves the record — is no
+  longer counted as a seat.
 
 What the policy enforces, on both runtimes:
 
