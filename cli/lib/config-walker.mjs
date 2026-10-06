@@ -14,17 +14,10 @@
  *   PASEO_CONFIG_JSON     -> default ~/.paseo/config.json
  */
 
-import { teamConfigDir as sharedTeamConfigDir } from "../../scripts/lib-common.mjs";
+import { PRIVATE_DIR_MODE, teamConfigDir as sharedTeamConfigDir, writeFileAtomic } from "../../scripts/lib-common.mjs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import {
-	mkdirSync,
-	writeFileSync,
-	renameSync,
-	copyFileSync,
-	existsSync,
-	readFileSync,
-} from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, readFileSync } from "node:fs";
 
 export function piHome() {
 	return process.env.PI_HOME || join(homedir(), ".pi");
@@ -151,13 +144,13 @@ export function atomicWriteJson(absPath, data) {
 }
 
 export function atomicWrite(absPath, content) {
-	ensureDir(dirname(absPath));
+	// A directory made here holds files that may carry credentials, so it is
+	// private; one that already exists keeps the mode its owner gave it.
+	mkdirSync(dirname(absPath), { recursive: true, mode: PRIVATE_DIR_MODE });
 	if (existsSync(absPath)) {
-		copyFileSync(absPath, `${absPath}.bak-${Date.now()}`);
+		copyFileSync(absPath, `${absPath}.bak-${Date.now()}`); // copyFileSync keeps the source's mode
 	}
-	const tmp = `${absPath}.tmp-${process.pid}-${Date.now()}`;
-	writeFileSync(tmp, content, "utf8");
-	renameSync(tmp, absPath);
+	writeFileAtomic(absPath, content);
 }
 
 export function ensureDir(dir) {

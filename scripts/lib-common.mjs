@@ -10,7 +10,7 @@
 // Nothing in here may import another support script: it sits at the bottom of
 // the dependency graph on purpose.
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -430,4 +430,50 @@ export function policyCorePath(name, env = process.env, here = dirname(fileURLTo
 /** Import a policy-core module by name, from whichever layout is installed. */
 export function importPolicyCore(name = "policy-core.ts", env = process.env) {
 	return import(pathToFileURL(policyCorePath(name, env)).href);
+}
+
+// --- writing files that may hold credentials --------------------------------
+// Config files this pack rewrites (~/.claude.json, ~/.paseo/config.json,
+// provider env blocks, MCP server tokens) are the user's own and are often
+// 0600. A write that goes through a temp sibling and a rename produces a NEW
+// inode, so it gets the process umask instead: a locked-down 0600 file came
+// back 0644, readable by every other account on the host.
+
+/** Mode for a credential-bearing file this pack creates (owner read/write only). */
+export const PRIVATE_FILE_MODE = 0o600;
+/** Mode for a directory this pack creates to hold such files. */
+export const PRIVATE_DIR_MODE = 0o700;
+
+/**
+ * Write `content` to `absPath` through a temp sibling and a rename, so a reader
+ * never sees a half-written file, and keep the destination's permission bits:
+ * an existing file keeps whatever mode its owner gave it, a new one starts
+ * private. The temp file is created exclusively (O_EXCL) with that mode from
+ * the first byte, so there is no window where the content is more readable
+ * than the final file, and a pre-planted file or symlink at the predictable
+ * temp name is refused instead of followed. The temp file is removed on failure.
+ *
+ * The parent directory must already exist.
+ *
+ * @param {string} absPath
+ * @param {string} content
+ */
+export function writeFileAtomic(absPath, content) {
+	let mode = PRIVATE_FILE_MODE;
+	try {
+		mode = statSync(absPath).mode & 0o777;
+	} catch {
+		/* no file yet: it starts private */
+	}
+	const temp = `${absPath}.tmp-${process.pid}-${Date.now()}`;
+	try {
+		writeFileSync(temp, content, { encoding: "utf8", mode, flag: "wx" });
+		// The mode above is filtered through the umask; set the exact bits. Windows
+		// has no POSIX modes (chmod there only toggles read-only), so leave it.
+		if (process.platform !== "win32") chmodSync(temp, mode);
+		renameSync(temp, absPath);
+	} catch (error) {
+		rmSync(temp, { force: true });
+		throw error;
+	}
 }
