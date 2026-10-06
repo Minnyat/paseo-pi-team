@@ -49,7 +49,7 @@ support. Today support exports them by hand, about forty tickets a week. You
 own the server side; T-12 is building the billing-page button against the same
 contract at the same time.
 
-CONSTRAINTS:
+MUST HOLD:
 The seam contract below is fixed. T-12 is coding against it right now, so if
 any of it looks wrong, send me a REOPEN_REQUEST rather than changing it:
 
@@ -67,8 +67,9 @@ please do not leave one (no feature flag, no second route).
 
 WHERE TO WORK:
 T-12 commits at the same time, so work in your own worktree:
-`git worktree add -b agent/T-11 ../billing-wt-T-11 <base-sha>`. Your shell may
-start back in my checkout, so run git there as `git -C ../billing-wt-T-11 …`.
+`git worktree add -b agent/T-11 .worktrees/T-11 <base-sha>`. Your shell may
+start back in my checkout, so run git there as `git -C .worktrees/T-11 …`. Once you have reported, remove the tree
+(`git worktree remove .worktrees/T-11`).
 
 REQUIRED HANDOFF:
 The test command and its result, CANDIDATE_SHA, a clean `git status`, and
@@ -111,7 +112,7 @@ Customers should be able to get their own invoices as a CSV without asking
 support. You own the billing page; T-11 is building the endpoint against the
 same contract at the same time, so it will not exist on your base SHA.
 
-CONSTRAINTS:
+MUST HOLD:
 The seam contract below is fixed. If any of it looks wrong, send me a
 REOPEN_REQUEST rather than changing it:
 
@@ -130,8 +131,9 @@ messages look and are wired is your call.
 
 WHERE TO WORK:
 T-11 commits at the same time, so work in your own worktree:
-`git worktree add -b agent/T-12 ../billing-wt-T-12 <base-sha>`. Your shell may
-start back in my checkout, so run git there as `git -C ../billing-wt-T-12 …`.
+`git worktree add -b agent/T-12 .worktrees/T-12 <base-sha>`. Your shell may
+start back in my checkout, so run git there as `git -C .worktrees/T-12 …`. Once you have reported, remove the tree
+(`git worktree remove .worktrees/T-12`).
 
 REQUIRED HANDOFF:
 The test command and its result, CANDIDATE_SHA, a clean `git status`, and

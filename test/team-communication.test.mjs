@@ -20,7 +20,16 @@ import { classifyRemoteFailure } from "../scripts/reliability.mjs";
 // Peer that ever did it actually had to do. A kind that names the thing is the
 // difference between a channel a Peer can be told to use and a convention it
 // has to invent.
-assert.deepEqual([...MESSAGE_KINDS], ["question", "blocked", "dependency", "progress", "report"]);
+assert.deepEqual([...MESSAGE_KINDS], ["question", "blocked", "dependency", "reopen", "progress", "report"]);
+
+// `reopen` is a premise challenge, and it needs a kind of its own: sent as
+// `blocked` or `question` it reads as routine friction and carries no
+// obligation for the Lead to weigh the evidence. It goes through the same
+// validation as every other kind, no extra envelope fields.
+assert.equal(
+  validatePeerMessage({ kind: "reopen", message: "The cache is invalidated on a different clock than the state it guards.", taskId: "T-9" }).kind,
+  "reopen",
+);
 
 // The kind list exists in four places: policy-core (source of truth), this
 // module, and one tool schema per runtime. A kind a Peer can send but cannot

@@ -48,7 +48,9 @@ KNOWN_EVIDENCE:
 
 QUESTIONS TO ANSWER:
 
-CONSTRAINTS:
+MUST HOLD:
+
+ALREADY DECIDED:
 
 REQUIRED HANDOFF:
 
@@ -108,11 +110,35 @@ worktrees inside the shared workspace, never Paseo workspaces: the independent
 Reviewer's, a detached `git worktree add` at the exact candidate SHA it makes
 itself, and one per writer when two writers commit at the same time (a checkout
 has one HEAD). Name that writer's path in its brief and tell it to run its base
-gate and push as `git -C <path> …`; the paragraph below is for writers without
-one.
+gate and push as `git -C <path> …`; the part after the snippet is for writers
+without one.
 
-So `git status` legitimately shows other people's work. A Peer that reads
-` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
+For a writer you give a worktree, the Peer has no other source for the commands,
+so put them in the body, in your own words:
+
+```text
+Please don't work in the main checkout: other Peers share this workspace. Make
+your own worktree from the base and do everything there (the first line keeps it
+out of the Human's `git status`):
+
+  grep -qx '/.worktrees/' "$(git rev-parse --git-path info/exclude)" || echo '/.worktrees/' >> "$(git rev-parse --git-path info/exclude)"
+  git worktree add -b agent/<TASK_ID> .worktrees/<TASK_ID> <EXPECTED_BASE_SHA>
+
+Keep it under the workspace root (a shell outside it restarts in the workspace on
+every call). Run git as `git -C .worktrees/<TASK_ID> …`; the push is exactly
+`git -C .worktrees/<TASK_ID> push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or
+the same without `-C` once you have `cd`'d into the worktree.
+Only touch your OWNED_SCOPE. When the work is committed and reported, remove the
+tree from the workspace root with `git worktree remove .worktrees/<TASK_ID>` (no
+--force): the branch keeps the commits, and review runs from the SHA in a tree of
+its own, not from yours.
+```
+
+The push guard accepts one leading `-C <path>` (an unquoted path) before `push`,
+and nothing else.
+
+In the shared checkout `git status` legitimately shows other people's work. A
+Peer that reads ` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
 `BLOCKED: DIRTY_INITIAL_WORKTREE` has misread a working system as a broken one,
 and the Lead pays a full round trip to tell it so. Say so in the task body:
 
@@ -132,7 +158,7 @@ dirty environment.
 The rule the Peer applies is the same one the lease already encodes: what makes
 a change yours is `OWNED_SCOPE`, not the state of the directory. The Reviewer is
 the exception, because it works in a worktree it made: there, any dirt at all is
-a blocker.
+a blocker — and so it is in a writer's own worktree.
 
 ## Writing the body: one person talking to another
 
@@ -147,11 +173,23 @@ lead a question, or telling them what it found.
 
 Two of those headings carry most of the weight. OBJECTIVE is the outcome — what
 has to be true afterwards, and why — not the change you expect to produce it; a
-Peer handed only the solution cannot tell you it is the wrong one. CONSTRAINTS is
-where you lock what other work depends on: the seam contract, word for word as
+Peer handed only the solution cannot tell you it is the wrong one. MUST HOLD
+is where you lock what other work depends on: the seam contract, word for word as
 in the other writer's brief, and any transitional state with the task that
 removes it ("Splitting into tasks" in the Lead skill). Helpers, names and how the
-code is laid out inside `OWNED_SCOPE` are not constraints; leave them to the Peer.
+code is laid out inside `OWNED_SCOPE` are neither; leave them to the Peer.
+
+### Requirement, or a choice you made?
+
+`MUST HOLD` is what is true however the work is done: "the brake stops the bike
+within Y metres", "the public API does not change", "tests are not edited".
+`ALREADY DECIDED` is an approach you picked — "use a parachute" — plus what it
+rests on. Keep them apart. A choice dressed as a requirement is invisible to the
+Peer: it will optimize inside it without ever asking whether it was right, and
+every Peer after it inherits the choice as if it were a fact of the world. Give
+`ALREADY DECIDED` its evidence, or leave the item out and ask it under
+`QUESTIONS TO ANSWER`. The Peer may challenge anything in it, with the evidence,
+using `peer_ask_lead` kind `reopen`.
 
 ## `acceptance-verifier` — the standard body
 

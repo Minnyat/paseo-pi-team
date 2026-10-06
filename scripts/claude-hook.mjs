@@ -92,10 +92,18 @@ export function sessionStateDir(env = process.env) {
  * touching the filesystem: a hostile id must never escape the state directory.
  */
 export function sessionStatePath(sessionId, env = process.env) {
-	const safe = String(sessionId ?? "")
-		.replace(/[^A-Za-z0-9._-]/g, "_")
-		.slice(0, 128);
-	return join(sessionStateDir(env), `${safe || "unknown"}.json`);
+	const clean = (value, max) =>
+		String(value ?? "")
+			.replace(/[^A-Za-z0-9._-]/g, "_")
+			.slice(0, max);
+	const safe = clean(sessionId, 128);
+	// Claude's session id is not a seat's identity. A daemon started from a shell
+	// that already carries CLAUDE_CODE_SESSION_ID hands that one id to every agent
+	// it spawns, and they would then share a single file: each Peer's brief
+	// overwriting the last, or one Peer reading another's authority and TASK_ID.
+	// Paseo sets PASEO_AGENT_ID on every seat, so the seat keeps its own file.
+	const agent = clean(env?.PASEO_AGENT_ID, 64);
+	return join(sessionStateDir(env), `${agent ? `${agent}--` : ""}${safe || "unknown"}.json`);
 }
 
 export function readSessionState(sessionId, env = process.env, now = Date.now()) {
@@ -420,7 +428,7 @@ async function leasesForDecision({ core, claude }, role, toolName, toolInput, en
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"])) {
 		return undefined;
 	}
-	if (!core.writerScopeFromCreateAgent(toolInput)) return undefined;
+	if (!core.writerScopesFromCreateAgent(toolInput)) return undefined;
 	try {
 		const { leaseLedger } = await import("./team-lease.mjs");
 		const result = await leaseLedger({}, { role, selfAgentId: env.PASEO_AGENT_ID, now });

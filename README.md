@@ -145,6 +145,27 @@ paseo-team-orchestration/
     └── webui-architecture.md       # CLI <-> WebUI contract, graph schema, measured costs
 ```
 
+## When to use this pack
+
+The three roles earn their cost where work has **vertical dependencies**: a
+later step can expose that an earlier decision was wrong — shared state,
+lifecycles, ordering, tight performance limits, subsystems whose concerns
+overlap. There, a design Peer that may challenge the brief, one owner per
+moving scope, and a review on an exact SHA keep a wrong early choice from
+becoming everyone's invisible constraint.
+
+For **independent, parallelizable** changes (a batch of CRUD endpoints, a set of
+unrelated fixes) the same machinery mostly adds ceremony: staff Peers for the
+work, skip the design round, and one review is enough. For **design-sensitive**
+work where one person's judgment is the product (game feel, UI polish), a
+single agent from start to finish may beat any split. Sizing the Peers is the
+Lead's call and is yours to override; the Supervisor seat and the Human-only
+merge/deploy rule are not part of that sizing.
+
+Adding a role, a message layer or a review step is not the same as improving the
+orchestration; removing one that changes no decision usually is. When you
+trim, trim what shifts no outcome.
+
 ## Roles
 
 | Profile | `PASEO_PI_ROLE` | Default tools |
@@ -276,7 +297,11 @@ tool reads `PASEO_AGENT_ID`, inspects `paseo.parent-agent-id`, sends only to the
 parent Lead, and wraps the payload as `PEER_MESSAGE_V1` carrying `kind`,
 `TASK_ID` and `CORRELATION_ID`.
 
-Message kinds: `question`, `blocked`, `dependency`, `progress`.
+Message kinds: `question`, `blocked`, `dependency`, `reopen`, `progress`,
+`report`. `reopen` is the one that is easy to mistake for a blocker and is not:
+the Peer is saying a premise of its brief fails, with evidence from the code as
+it stands. The Lead is told, on the turn it opens, to weigh that evidence and
+either revise with a fresh full brief or explain why the premise holds.
 
 Failing to resolve the parent is fail-closed — there is no broadcast fallback.
 
@@ -389,6 +414,15 @@ team_lease { action: "claim", scope: "src/auth", ttlMs: <work window> }
 team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
 ```
 
+- `scope` is the writer's `OWNED_SCOPE` exactly as the brief words it: one or
+  more repo-relative paths, comma-separated (`inventory.py, test_inventory.py`),
+  and a glob reads as the directory in front of it (`src/api/**` is `src/api`).
+  The claim and the guard share one parser, so what you wrote in the brief is
+  what you claim. Several paths are one decision — if any is held by another
+  Lead, none is written — and the guard demands that a lease you hold **covers**
+  every one of them. A scope that is not a path inside the repo is a refused
+  claim, and a writer whose `OWNED_SCOPE` cannot be read is treated as owning the
+  whole repo (`.`) rather than nothing.
 - The ledger is an append-only file this pack owns (`scripts/lease-ledger.mjs`).
   A claim is **compare-and-swap**: the board is locked, read and appended to as
   one step, so a claim that collides with a live lease is refused and writes
@@ -1254,8 +1288,13 @@ entries in the Paseo sidebar. Now:
 - A Lead cannot call `create_workspace` or `archive_workspace`.
 - Model, thinking level, mode and workspace are `create_agent` parameters and are **not
   repeated in the message** the Peer reads; the brief carries authority and scope only.
-- A Writer is kept apart by its `OWNED_SCOPE` and scope lease. The independent Reviewer
-  makes its own detached `git worktree add` at the exact SHA, inside the shared workspace.
+- A Writer is kept apart by its `OWNED_SCOPE` and scope lease. Writers that commit at the
+  same time each work in a `git worktree` (`.worktrees/<TASK_ID>`) inside the shared
+  workspace — plain git, so the sidebar shows nothing new — and remove it once they have
+  reported; the independent Reviewer makes its own, detached at the exact SHA. A Peer in a
+  worktree pushes with `git -C .worktrees/<TASK_ID> push -u origin
+  HEAD:refs/heads/agent/<TASK_ID>`: one leading `-C <path>` is the only option the push
+  guard accepts before `push`.
 - `team_fork` refuses a `cwd` other than its source's; `remote-paseo.mjs workspace-create`
   reuses the workspace already open on the path (`reused: true`) and never creates a
   worktree workspace.
@@ -1377,7 +1416,7 @@ pack ships no test repo — create an equivalent scratch repo anywhere.
 | 2 | `PASEO_PI_ROLE=peer pi`, ask "Create another agent to inspect the repository" | `create_agent` absent or blocked; Peer returns `DEPENDENCY_REQUEST` |
 | 3 | Ask the Supervisor to fix `calculator.py` | Refuses, sends an observation instead |
 | 4 | Lead creates a Scout: read-only Peer, same workspace | Lead receives the completion notification |
-| 5 | Lead creates an Engineer (no `workspaceId`, a scope lease claimed first) | The Engineer appears nested under the Lead in the SAME workspace, fixes the bug, runs tests, reports the SHA |
+| 5 | Lead creates an Engineer (no `workspaceId`, a scope lease claimed first) | The Engineer appears nested under the Lead in the SAME workspace, works in the shared checkout (or its own `.worktrees/<TASK_ID>` when another writer commits at the same time), fixes the bug, runs tests, reports the SHA |
 | 6 | Independent Reviewer: `MODE: read-only` + `DISPOSITION: independent-reviewer` | Makes its own detached `git worktree add` at the exact SHA inside the shared workspace, returns a verdict, fixes nothing — no new Paseo workspace appears |
 | 7 | Give the Lead a small reversible choice with evidence on both sides (e.g. retry a step that failed once) | Lead sends `lead_ask_supervisor` instead of asking you; the Supervisor replies with a filled `SUPERVISOR_DECISION`; the Lead acts on it without asking you to confirm |
 | 8 | Same, but ask it to push the branch | Lead goes to you directly, and says the reason is that the matter is irreversible |

@@ -225,7 +225,7 @@ theo khối có header ổn định:
 
 ```text
 PEER_MESSAGE_V1
-KIND: question|blocked|dependency|progress
+KIND: question|blocked|dependency|reopen|progress|report
 CORRELATION_ID: <token>
 TASK_ID: <token>
 FROM_AGENT_ID: <agent id>
@@ -233,7 +233,10 @@ FROM_AGENT_ID: <agent id>
 
 Vì vậy chỉ cần parse timeline/prompt của **Lead** là dựng lại được cạnh
 `peer -> lead` kèm `kind`, `taskId`, `correlationId` — không cần Paseo hỗ trợ
-thêm gì. `kind` chính là màu của cạnh trong đồ thị (`blocked` = đỏ).
+thêm gì. Lưu ý trạng thái hiện tại: `buildGraph` ở đường chạy thật (`cli/lib/graph.mjs`)
+được gọi **không kèm `messages`**, và `parsePeerMessage` mới chỉ có test dùng — nên
+tin `peer_ask_lead` chưa hiện thành cạnh trên đồ thị. Khi nối bước này vào, `kind`
+là thứ để tô màu; `blocked` và `reopen` là hai loại có Peer đang đứng chờ phía sau.
 
 **(c) Lead -> Peer — tin cậy trung bình.** Suy ra từ `paseo logs <id> --filter
 tools` của Lead: các lời gọi `send_agent_prompt` / `create_agent`. Phụ thuộc

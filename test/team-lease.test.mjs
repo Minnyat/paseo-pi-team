@@ -301,4 +301,76 @@ const opts = (ledger, extra = {}) => ({
 	assert.match(String(result.code), /TRUNCATED/);
 }
 
+// --- several paths, one decision ---------------------------------------------
+// The brief's own spelling has to be claimable as written. A Lead that wrote
+// `OWNED_SCOPE: inventory.py, test_inventory.py` and was answered SCOPE_INVALID
+// went on to claim the two files one by one, which is a workaround the pack
+// should not need.
+{
+	const ledger = fakeLedger();
+	const result = await claimScope({ scope: "inventory.py, test_inventory.py" }, opts(ledger));
+	assert.equal(result.ok, true);
+	assert.deepEqual(result.scopes, ["inventory.py", "test_inventory.py"]);
+	assert.equal(result.granted, true);
+	assert.equal(ledger.appended.length, 2, "one record per path, so an older build still reads them");
+	assert.ok(ledger.appended[0].body.includes("SCOPE: inventory.py"));
+	assert.ok(ledger.appended[1].body.includes("SCOPE: test_inventory.py"));
+	assert.deepEqual(result.claims.map((claim) => claim.granted), [true, true]);
+	assert.equal(result.recordIds.length, 2);
+}
+
+{
+	// A glob is claimed as the directory in front of it.
+	const ledger = fakeLedger();
+	const result = await claimScope({ scope: "src/upload/**, src/jobs/**" }, opts(ledger));
+	assert.deepEqual(result.scopes, ["src/upload", "src/jobs"]);
+	assert.equal(result.granted, true);
+}
+
+{
+	// All or nothing. One path held by somebody else refuses the whole claim and
+	// writes NOTHING: half a claim is ground held and not usable.
+	const ledger = fakeLedger([record(OTHER, "claim", "test_inventory.py", NOW - 1000)]);
+	const result = await claimScope({ scope: "inventory.py, test_inventory.py" }, opts(ledger));
+	assert.equal(result.ok, true, "the call worked; it just did not win");
+	assert.equal(result.granted, false);
+	assert.equal(ledger.appended.length, 0, "a partly colliding claim writes zero records");
+	assert.equal(result.holder.agentId, OTHER, "the holder to talk to is named");
+	assert.equal(result.recordId, null);
+	const byScope = Object.fromEntries(result.claims.map((claim) => [claim.scope, claim.granted]));
+	assert.deepEqual(byScope, { "inventory.py": false, "test_inventory.py": false }, "nothing was taken, including the free path");
+}
+
+{
+	// A claim that cannot be read is an error, never the whole repo.
+	for (const scope of ["", "src/my file.py", "src/a.py, ../x", "The whole repository"]) {
+		await assert.rejects(() => claimScope({ scope }, opts(fakeLedger())), (error) => error.code === "SCOPE_INVALID", scope);
+	}
+	const taken = await claimScope({ scope: "." }, opts(fakeLedger()));
+	assert.deepEqual(taken.scopes, ["."], "the whole repo is available, but only when asked for by name");
+}
+
+{
+	// `granted` means a lease WE hold covers the path. Our own narrower lease
+	// keeps the ground and the wider claim is dropped on read, so the old answer
+	// (any holder that is us) said granted:true for ground that was not ours.
+	const ledger = fakeLedger([record(SELF, "claim", "src/auth", NOW - 1000)]);
+	const result = await claimScope({ scope: "src" }, opts(ledger));
+	assert.equal(result.granted, false);
+	assert.match(String(result.note), /narrower lease/);
+}
+
+{
+	// Release and renew take the same list.
+	const ledger = fakeLedger();
+	await claimScope({ scope: "a.py, b.py" }, opts(ledger));
+	const renewed = await renewScope({ scope: "a.py, b.py", ttlMs: 60_000 }, opts(ledger, { now: NOW + 1000 }));
+	assert.equal(renewed.recordIds.length, 2);
+	const released = await releaseScope({ scope: "a.py, b.py" }, opts(ledger, { now: NOW + 2000 }));
+	assert.equal(released.recordIds.length, 2);
+	const status = await leaseStatus({ scope: "a.py, b.py" }, opts(ledger, { now: NOW + 3000 }));
+	assert.equal(status.holder, null, "both are free again");
+	assert.deepEqual(status.holders.map((entry) => entry.holder), [null, null]);
+}
+
 console.log("team-lease tests passed");

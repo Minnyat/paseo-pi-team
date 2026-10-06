@@ -129,6 +129,21 @@ INITIAL_WORKTREE_CLEAN: yes | no
   and `git -C <path> status --porcelain`, since a shell call can start back in
   the Lead's checkout. That tree is yours alone, so any dirt in it is a blocker.
 
+A worktree is plain git, never a Paseo workspace. Your brief names its path
+(`.worktrees/<TASK_ID>`); make it first, then run both gates in it. Make it from
+the base your Lead named, under the workspace root — from outside it your shell restarts in the workspace on every
+call, and some commands that reach out of it are declined:
+
+```bash
+grep -qx '/.worktrees/' "$(git rev-parse --git-path info/exclude)" || echo '/.worktrees/' >> "$(git rev-parse --git-path info/exclude)"
+git worktree add -b agent/<TASK_ID> .worktrees/<TASK_ID> <EXPECTED_BASE_SHA>
+```
+
+The first line keeps `.worktrees/` out of the Human's `git status`; run it. Run
+git from the workspace root as `git -C .worktrees/<TASK_ID> …`; once you have
+`cd`'d into the tree (under the root the shell keeps its directory) the same push
+without `-C` is the other allowed form.
+
 Start editing only when both gates pass.
 
 ## Peer ↔ Lead communication
@@ -136,7 +151,7 @@ Start editing only when both gates pass.
 Use the custom tool `peer_ask_lead` with message kinds:
 
 ```text
-kind: question | blocked | dependency | progress | report
+kind: question | blocked | dependency | reopen | progress | report
 message: evidence + the specific question/proposal
 ```
 
@@ -172,25 +187,26 @@ or the send fails, report `BLOCKED`/`DEPENDENCY_REQUEST`; do not use
 
 ## Escalations
 
-Use one of:
+Name the escalation in your own words and send it as the kind that carries it:
 
 ```text
-REOPEN_REQUEST
-DEPENDENCY_REQUEST
-BLOCKED
-AUTHORITY_MISMATCH
-SCOPE_CONFLICT
+REOPEN_REQUEST                      -> kind: reopen
+DEPENDENCY_REQUEST                  -> kind: dependency
+BLOCKED, AUTHORITY_MISMATCH,
+SCOPE_CONFLICT                      -> kind: blocked
 ```
 
-`REOPEN_REQUEST` must describe the wrong premise, the evidence, and an
-alternative. The premise includes the solution itself: if the change your brief
-asks for would not produce the outcome it is for, say so before you build it.
-Send it with `peer_ask_lead` as `kind: question`, or `kind: blocked` when the
-dependent work cannot go on until it is answered.
+Two headings in your brief mean different things. `MUST HOLD` is true whatever
+approach you take. `ALREADY DECIDED` is a choice your Lead made, with the
+evidence behind it — not a settled fact — and you may `reopen` it with evidence.
 
-The browser grants nothing else: not file-write, not git, not Paseo
-orchestration, not another MCP server. It is per-turn, and a brief with
-`BROWSER_MCP_AUTHORITY: denied` withholds it.
+A `reopen` says a premise of your brief does not hold — and the solution itself
+is one: if the change your brief asks for would not produce the outcome it is
+for, say so before you build it. It needs the wrong premise, evidence from the code as it stands now (a file and line, a command and
+its output), and an alternative you can stand behind. A route that works but is
+not the one you would have picked is a `question`, not a reopen: you have the
+right to raise a premise when the evidence demands it, not an obligation to find
+one. Stop only the part that depends on the premise; keep doing the safe work.
 
 `AUTHORITY_MISMATCH` — for example: the brief requires `CANDIDATE_SHA` but
 does not grant `COMMIT_AUTHORITY: allowed`; or the brief grants `MODE: write`
@@ -279,6 +295,16 @@ RISKS:
 OPEN_QUESTIONS:
 HANDOFF:
 ```
+
+A writer that has a worktree, last of all, once the work is committed (and pushed,
+if your brief lets you push) and `WORKTREE_CLEAN` is recorded: from the workspace
+root run
+`git worktree remove .worktrees/<TASK_ID>`, never with `--force` (it refuses a
+tree with changes, which then need dealing with, not deleting). The branch keeps
+every commit. When a correction arrives your tree may be gone: bring it back from
+the branch, without `-b` (the branch exists), with
+`git worktree add .worktrees/<TASK_ID> agent/<TASK_ID>`; its tip is the base the
+Lead names.
 
 Routing is not yours to report: your brief carries no model, provider or
 workspace, and you do **not invent `OBSERVED_*`** — the Lead is the source of

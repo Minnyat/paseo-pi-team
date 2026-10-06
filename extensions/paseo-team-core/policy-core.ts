@@ -673,6 +673,77 @@ export function scopeConflicts(a: unknown, b: unknown): boolean {
 	return true;
 }
 
+/**
+ * Whether `outer` contains `inner`, so a lease on `outer` is enough to put a
+ * writer on `inner`.
+ *
+ * Distinct from scopeConflicts, which is symmetric ("these two cannot both have
+ * a writer"). Authority is not symmetric: holding `src/auth/login` collides with
+ * a writer on `src/auth`, but it does not cover the rest of `src/auth`, and a
+ * guard that answered the first question when asked the second let a Lead staff
+ * a writer over ground it never held.
+ */
+export function scopeCovers(outer: unknown, inner: unknown): boolean {
+	const o = normalizeScope(outer);
+	const i = normalizeScope(inner);
+	if (!o || !i) return false;
+	if (o === ".") return true;
+	if (i === ".") return false;
+	const ol = o.toLowerCase().split("/");
+	const il = i.toLowerCase().split("/");
+	if (ol.length > il.length) return false;
+	return ol.every((segment, index) => segment === il[index]);
+}
+
+/** More paths than this is a directory in disguise: claim the directory. */
+export const MAX_OWNED_SCOPES = 16;
+
+/**
+ * The repo-relative paths an `OWNED_SCOPE` line, or a `team_lease` `scope`, names.
+ *
+ * ONE parser for both sides on purpose. The claim and the guard used to read the
+ * same words differently: the brief says `OWNED_SCOPE: inventory.py,
+ * test_inventory.py`, the lease accepted exactly one bare path, and the guard
+ * quietly turned anything it could not read into the whole repo. The Lead's
+ * claim of the very string it had just written was refused, and a writer whose
+ * lease was a single file was judged against "." instead.
+ *
+ * Entries are split on commas and newlines. A glob is reduced to the directory
+ * in front of its first wildcard (`src/upload/**` and `src/upload/*.ts` are both
+ * `src/upload`, `*.py` is the repo root): the result is never NARROWER than what
+ * was written, so a glob can only produce a false conflict, never a missed one.
+ * Entries one of the others already contains are dropped.
+ *
+ * Returns null — never a guess — when any entry is not a path inside the repo,
+ * when nothing is named, or when more than MAX_OWNED_SCOPES are. The guard reads
+ * a null as "." (fail closed); the claim reads it as SCOPE_INVALID, because
+ * taking the whole repo by accident is not a thing to do quietly.
+ */
+export function parseOwnedScopes(raw: unknown): string[] | null {
+	if (typeof raw !== "string") return null;
+	const entries = raw
+		.split(/[,\n]/)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry !== "");
+	if (entries.length === 0 || entries.length > MAX_OWNED_SCOPES) return null;
+	const scopes: string[] = [];
+	for (const entry of entries) {
+		const segments = entry.replace(/\\/g, "/").split("/");
+		const wildcard = segments.findIndex((segment) => /[*?[\]{}]/.test(segment));
+		const directory = wildcard < 0 ? entry : segments.slice(0, wildcard).join("/") || ".";
+		const scope = normalizeScope(directory);
+		if (!scope) return null;
+		scopes.push(scope);
+	}
+	return scopes.filter(
+		(scope, index) =>
+			!scopes.some(
+				(other, at) =>
+					at !== index && scopeCovers(other, scope) && (!scopeCovers(scope, other) || at < index),
+			),
+	);
+}
+
 export interface LeaseRecord {
 	action: LeaseAction;
 	scope: string;
@@ -890,7 +961,40 @@ export function leaseHolderFor(
 }
 
 /**
- * The scope a `create_agent` call is about to put a WRITER on, or null when the
+ * Where `selfAgentId` stands on one scope: who else is in the way, and whether
+ * a lease it holds actually covers the ground.
+ *
+ * The ONE place this is decided. The guard on `create_agent` and the answer
+ * `team_lease` gives a Lead after a claim both read it, so a claim that reports
+ * `granted: true` can never be one the guard then refuses — and the old split
+ * (the tool asked "who holds something here?", the guard asked the same) is what
+ * let overlap pass for coverage in the first place.
+ */
+export function leaseCoverage(
+	leases: Map<string, LeaseHolder> | null | undefined,
+	scope: unknown,
+	selfAgentId: string | null | undefined,
+	cluster: string | null = null,
+): { rival: LeaseHolder | null; covered: boolean } {
+	const where = normalizeCluster(cluster);
+	const normalized = normalizeScope(scope);
+	if (!leases || !normalized) return { rival: null, covered: false };
+	const held = [...leases.values()];
+	const rival =
+		held.find(
+			(holder) => holder.agentId !== selfAgentId && leaseConflicts(holder, { scope: normalized, cluster: where }),
+		) ?? null;
+	const covered = held.some(
+		(holder) =>
+			holder.agentId === selfAgentId &&
+			!clustersSeparate(holder.cluster, where) &&
+			scopeCovers(holder.scope, normalized),
+	);
+	return { rival, covered };
+}
+
+/**
+ * The scopes a `create_agent` call is about to put a WRITER on, or null when the
  * call staffs nobody who writes.
  *
  * Read-only researchers, scouts and reviewers share a tree by design; gating
@@ -898,7 +1002,7 @@ export function leaseHolderFor(
  * authority comes from the same V3 brief the Peer will be held to, so the gate
  * and the grant cannot disagree.
  */
-export function writerScopeFromCreateAgent(args: unknown): string | null {
+export function writerScopesFromCreateAgent(args: unknown): string[] | null {
 	if (!args || typeof args !== "object") return null;
 	const record = args as Record<string, unknown>;
 	// A brief arms a Peer whether it arrives at creation (`initialPrompt`) or in
@@ -920,10 +1024,10 @@ export function writerScopeFromCreateAgent(args: unknown): string | null {
 	// alone is how the gate and the grant drifted apart the first time.
 	if (resolvePeerMode(brief) !== "write") return null;
 	if (!peerAuthority(brief).edit) return null;
-	// A write brief with no OWNED_SCOPE is the dangerous one: it writes
-	// somewhere and says nothing about where. Treat it as the whole repo rather
-	// than as exempt.
-	return normalizeScope(brief.fields.get("OWNED_SCOPE")) ?? ".";
+	// A write brief with no OWNED_SCOPE, or one that names something that is not a
+	// path inside the repo, is the dangerous one: it writes somewhere and does not
+	// say where. Treat it as the whole repo rather than as exempt.
+	return parseOwnedScopes(brief.fields.get("OWNED_SCOPE")) ?? ["."];
 }
 
 /**
@@ -950,20 +1054,27 @@ export function leaseBlockReason({
 	cluster?: string | null;
 }): string | null {
 	if (role !== "lead") return null;
-	const scope = writerScopeFromCreateAgent(args);
-	if (!scope) return null;
+	const scopes = writerScopesFromCreateAgent(args);
+	if (!scopes) return null;
 	if (!leases) {
 		return "BLOCKED: LEASE_UNVERIFIABLE — the scope-lease ledger could not be read, so this writer cannot be shown to be the only one on its scope. Fix the ledger read and retry; do not create the writer meanwhile.";
 	}
 	if (!selfAgentId) {
 		return "BLOCKED: LEASE_UNVERIFIABLE — this agent's own id is unknown, so it cannot be matched against the lease holder.";
 	}
-	const holder = leaseHolderFor(leases, scope, normalizeCluster(cluster));
-	if (!holder) {
-		return `BLOCKED: SCOPE_LEASE_MISSING — no live lease covers "${scope}". Claim it first (team_lease claim), then create the writer.`;
+	// Someone else's ground first: that is a conversation to have, whereas a
+	// missing claim is something this Lead can fix on its own.
+	const standing = scopes.map((scope) => ({ scope, ...leaseCoverage(leases, scope, selfAgentId, cluster) }));
+	const blocked = standing.find((entry) => entry.rival);
+	if (blocked?.rival) {
+		const { rival, scope } = blocked;
+		return `BLOCKED: SCOPE_LEASE_HELD — "${rival.scope}" is held by ${rival.agentId} until ${new Date(rival.expiresAt).toISOString()}, and it overlaps "${scope}". Prompt that Lead with what you need instead of starting a second writer.`;
 	}
-	if (holder.agentId !== selfAgentId) {
-		return `BLOCKED: SCOPE_LEASE_HELD — "${holder.scope}" is held by ${holder.agentId} until ${new Date(holder.expiresAt).toISOString()}, and it covers "${scope}". Coordinate with that Lead through the leases room instead of starting a second writer.`;
+	// Then COVERAGE, not mere overlap. A lease on `src/auth/login` overlaps a
+	// writer on `src/auth`, and the old check took that overlap for permission.
+	const uncovered = standing.filter((entry) => !entry.covered).map((entry) => entry.scope);
+	if (uncovered.length > 0) {
+		return `BLOCKED: SCOPE_LEASE_MISSING — no lease you hold covers ${uncovered.map((scope) => `"${scope}"`).join(", ")}. Claim it first (team_lease claim, scope: ${JSON.stringify(uncovered.join(", "))}), then create the writer.`;
 	}
 	return null;
 }
@@ -988,7 +1099,8 @@ export function teamLeaseToolDescription(): string {
 	return (
 		"Take, extend, release or inspect a scope lease — the record of which Lead may put a WRITER on which files. " +
 		"`claim` before creating an engineer; `release` when the work is done; `renew` for long work; `status` to see the board. " +
-		"Scopes are repo-relative paths and nest: holding `src` also holds `src/auth`. " +
+		"`scope` is the writer's OWNED_SCOPE as written: one or more repo-relative paths, comma-separated (`src/api/**` means `src/api`); several paths are taken together or not at all. " +
+		"Scopes nest: holding `src` also holds `src/auth`. " +
 		"A claim can lose — read `granted` in the result, not merely `ok`. " +
 		"Creating a write-mode Peer without a covering lease is refused."
 	);
@@ -1913,6 +2025,13 @@ export const PEER_MESSAGE_HEADER = "PEER_MESSAGE_V1";
  * finished report had to label it `progress`, and a channel that can only be
  * used by mislabelling it is not a channel a Peer can be instructed to use.
  *
+ * `reopen` is the Peer saying the brief's PREMISE does not hold. It is its own
+ * kind because it is neither of its neighbours: `blocked` says "I cannot
+ * proceed" and `question` says "I need a decision I may not make", while a
+ * reopen says "the thing you told me to build on is wrong, and here is the
+ * evidence". Riding either of those, the one message that most needs a Lead to
+ * weigh it arrived looking like routine friction, with no obligation attached.
+ *
  * `team-communication.mjs` MESSAGE_KINDS and both runtimes' tool schemas are
  * copies of this list; team-communication.test.mjs asserts they never drift.
  */
@@ -1920,6 +2039,7 @@ export const PEER_MESSAGE_KINDS = Object.freeze([
 	"question",
 	"blocked",
 	"dependency",
+	"reopen",
 	"progress",
 	"report",
 ] as const);
@@ -2086,6 +2206,8 @@ function peerMessageDirective(kind: PeerMessageKind | null): string {
 			return "The Peer is STOPPED until you answer. This is the one kind with a Peer idling behind it, so answer it before you start anything new.";
 		case "dependency":
 			return "The Peer needs something outside its own scope. Grant it, reassign it, or refuse it with a reason — a silent dependency request reads to the Peer as a refusal it cannot cite.";
+		case "reopen":
+			return "The Peer says a premise of your brief does not hold, and has stopped the part that depends on it. This is not a failure to defend your plan against. Check its evidence against the code as it stands now: if the premise fails, revise the plan and send a fresh full V3 brief; if it holds and the Peer only prefers another route, say why so it carries on. Record the decision either way. If the change would move the Human's stated objective, consult the Supervisor (lead_ask_supervisor), not the Human.";
 		case "question":
 			return "The Peer needs a decision it is not allowed to make. Answer it from your own authority; escalate to the Supervisor only if the call is genuinely not yours.";
 		case "progress":
@@ -3541,8 +3663,9 @@ export function clusterLabelBlockReason({
  *   - create_agent WITHOUT workspaceId puts the new seat in the caller's
  *     workspace, nested under the caller (createAgentParamsBlockReason holds the
  *     call to exactly that);
- *   - a Writer is kept apart by OWNED_SCOPE and the scope lease, not by a tree
- *     of its own;
+ *   - a Writer is kept apart by OWNED_SCOPE and the scope lease, and works in a
+ *     `git worktree` of its own (`.worktrees/<TASK_ID>`) inside the workspace —
+ *     plain git, which Paseo never shows as a workspace;
  *   - the independent Reviewer still reviews from a linked, detached git
  *     worktree at the exact candidate SHA — it makes that worktree itself with
  *     `git worktree add --detach`, INSIDE the shared workspace, and the runtime
@@ -3555,7 +3678,7 @@ export function clusterLabelBlockReason({
  */
 export function leadWorkspaceMutationBlockReason(target: string): string | null {
 	if (!matchesPaseoToolName(target, [...PASEO_TOOLS.workspaceMutation])) return null;
-	return `A Lead does not create or archive workspaces ("${target}" refused). Everything in one job shares the workspace you were started in: call create_agent WITHOUT workspaceId and the new seat lands in yours, nested under you. Isolate a Writer with OWNED_SCOPE and a scope lease; the independent Reviewer makes its own detached \`git worktree add\` at the candidate SHA inside this same workspace. If the job genuinely needs a different project, put that to the Human.`;
+	return `A Lead does not create or archive workspaces ("${target}" refused). Everything in one job shares the workspace you were started in: call create_agent WITHOUT workspaceId and the new seat lands in yours, nested under you. Isolate a Writer with OWNED_SCOPE, a scope lease and its own \`git worktree add\` under .worktrees/<TASK_ID> in this same workspace; the independent Reviewer makes its own detached one at the candidate SHA the same way. If the job genuinely needs a different project, put that to the Human.`;
 }
 
 /**
@@ -4392,7 +4515,11 @@ export function expectedTaskBranch(taskId: string | undefined): string | null {
 	return `agent/${id}`;
 }
 
-const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b/i;
+// `merge` as a subcommand only. `\bmerge\b` also matched `merge-base`,
+// `merge-tree` and `merge-file`, which are read-only, and a Reviewer comparing a
+// candidate against its base (`git merge-base <base> <sha>`) was refused for a
+// merge it never made.
+const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b(?![-.])/i;
 const GIT_AMEND_RE = /\bgit\b[^|;&]*\bcommit\b[^|;&]*--amend\b/i;
 
 export function gitAuthorityBlockReason(

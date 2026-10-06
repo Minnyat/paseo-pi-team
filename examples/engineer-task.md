@@ -49,11 +49,18 @@ QUESTIONS TO ANSWER:
 - Should sqrt(-1) raise ValueError, or return a domain-error sentinel? Choose
   the option that satisfies the existing test expectations.
 
-CONSTRAINTS:
+MUST HOLD:
+- The existing assertions in test_calculator.py are the spec: they do not change.
 - Order is mandatory: format → test → commit → check clean.
 - After your final commit, `git status --porcelain` must print nothing.
 - Report CANDIDATE_SHA = `git rev-parse HEAD` (COMMIT_AUTHORITY was granted).
 - PUSH_TASK_BRANCH_AUTHORITY: denied — do not push; the Lead integrates.
+
+ALREADY DECIDED:
+- Fix this inside the two failing functions rather than wrapping their callers,
+  because the failure output points at them. If another caller turns out to
+  depend on today's behaviour, tell me with a `reopen` rather than working
+  around it.
 
 REQUIRED HANDOFF:
 - FILES_CHANGED, COMMANDS_RUN, exact test output summary

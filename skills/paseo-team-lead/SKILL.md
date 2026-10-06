@@ -81,10 +81,13 @@ it, in that side's brief, attributed to whoever asked. Inside, it reads as
 shared and frozen, and the two copies stop being identical.
 
 Writers that commit at the same time cannot share one checkout: it has one
-HEAD. Give each its own `git worktree` on `agent/<TASK_ID>` and name the path in
-its brief — a git worktree inside your workspace, like the Reviewer's, never a
-Paseo workspace. Its shell may start back in your checkout, so the base gate and
-the push run as `git -C <path> …`; the push guard accepts exactly that spelling.
+HEAD. Give each its own `git worktree` on `agent/<TASK_ID>` and name the path
+(`.worktrees/<TASK_ID>`) in its brief — a git worktree inside your workspace,
+like the Reviewer's, never a Paseo workspace. Its shell may start back in your
+checkout, so the base gate and the push run as `git -C <path> …`; the push guard
+accepts exactly that spelling. Do not tell the writer to leave the tree in
+place: review runs from the SHA, and the writer removes it when it has reported
+(a correction re-adds it from the branch).
 
 ## Accessing Paseo tools
 
@@ -126,14 +129,15 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    ```
 
    Check `granted` in the result, never merely `ok`. A claim that collides
-   with a live lease is REFUSED and writes nothing: the board is locked, read
-   and appended to as one step, so asking is not the same as taking.
+   with a live lease is REFUSED and writes nothing. `<OWNED_SCOPE>` may list
+   several paths, comma-separated (`src/api/**` means `src/api`), taken together
+   or not at all; `claims` shows each.
 
    - `granted: true` → continue the cycle.
    - `granted: false` → another Lead owns ground that covers your scope; the
      result names it. Prompt that Lead directly — see "Coordinating with the
-     other seats" below. Do NOT create the writer, do NOT narrow the scope to sneak under the holder, and do NOT wait
-     out the TTL as a strategy.
+     other seats" below. Do NOT create the writer, narrow the scope to sneak
+     under the holder, or wait out the TTL as a strategy.
    - Ledger unreadable → `BLOCKED: LEASE_UNVERIFIABLE`. This is a real blocker,
      not a warning.
 
@@ -142,20 +146,20 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    you forget to release blocks other Leads until it expires.
 
    Read-only dispositions (repository-scout, documentation-researcher,
-   solution-architect, acceptance-verifier, independent-reviewer) take no lease: they share the tree
-   by design, and gating them would turn the lease into a bottleneck rather
-   than a safety rule.
+   solution-architect, acceptance-verifier, independent-reviewer) take no lease:
+   they share the tree by design.
 
-   The policy enforces this on both runtimes, so a skipped claim surfaces as a
-   refused `create_agent` rather than as two engineers quietly editing the same
-   files.
+   The policy enforces this on both runtimes: a skipped claim is a refused
+   `create_agent`, not two engineers quietly editing the same files.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
 2. Pick `HOST_ID` from the controller-local `cluster-routing.local.json` in the
-   pack's config directory — `~/.paseo-team-orchestration`, or `~/.paseo-pi-team`
-   on a host installed before the rename (`PST_TEAM_CONFIG_DIR` overrides both;
-   never conclude "no routing file" from one path) (capability filter: writers
-   need `git-write`+`focused-test`; reviewers need `git-read`+`independent-review`).
+   pack's config directory (`PST_TEAM_CONFIG_DIR` → `PASEO_TEAM_HOME` → an
+   existing `~/.paseo-pi-team` → `~/.paseo-team-orchestration`; `preflight.mjs`
+   prints it as `team-config-dir`). Writers need `git-write`+`focused-test`;
+   reviewers `git-read`+`independent-review`. A file you cannot find or read is
+   `BLOCKED: HOST_ROUTE_UNAVAILABLE` — check the other directory first, and
+   never choose a model from `list_models` instead.
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
    run the resolver when the role pack repo is available:
@@ -240,11 +244,13 @@ This is the exact failure mode the cluster config exists to prevent.
    left a trail of workspaces nobody could tell apart.
    - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0):
      one writer per scope, enforced before it exists. Writers committing in
-     parallel each add a git worktree ("Splitting into tasks").
+     parallel each add a git worktree under `.worktrees/` ("Splitting into
+     tasks").
    - The **independent Reviewer** still reviews a detached checkout of the exact
      candidate SHA, and still never touches the Engineer's tree — it makes that
      checkout itself with `git worktree add --detach <path> <candidate-sha>`
-     inside your workspace and runs the wrapper against it. The wrapper checks
+     inside your workspace (`.worktrees/review-<TASK_ID>`) and runs the wrapper
+     against it. The wrapper checks
      the git fact (`REVIEW_WORKSPACE_NOT_WORKTREE`), not a Paseo workspace, so
      nothing about it needs a workspace of its own. If the Reviewer cannot make
      the worktree it reports `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — there is
@@ -275,8 +281,8 @@ This is the exact failure mode the cluster config exists to prevent.
    cluster: omit it and `create_agent` is refused with
    `Refusing create_agent: labels["team.cluster"] is required and must be
    "<value>"` — the message names the exact value to pass. Get your own value
-   from `pteam env list` / `PASEO_TEAM_CLUSTER`, or read it off any Peer you
-   already created. A label naming a DIFFERENT cluster than your own is refused
+   from the `cluster` field of any `team_lease` result (`status` changes nothing)
+   or off any Peer you already created; never guess it from the project name. A label naming a DIFFERENT cluster than your own is refused
    too — that would be stamping a new seat into another project's authority,
    not a typo to silently correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
@@ -529,6 +535,24 @@ Use `send_agent_prompt` only for:
 
 Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the current Peer’s `paseo.parent-agent-id` and sends a structured `PEER_MESSAGE_V1`. It cannot target an arbitrary agent. Treat `blocked` as a coordination event and reply with a full V3 brief when the reply changes authority.
 
+### A Peer reopens a premise (`kind: reopen`)
+
+The Peer says the ground under its brief is wrong. Settle it on evidence, not on
+how disruptive the change would be, and land on one of three:
+
+1. **The premise fails in the code as it stands** — a file and line, or a command
+   and its output, that you can reproduce. Revise: send the same Peer a fresh
+   full V3 brief (move `OWNED_SCOPE` through the lease if it changes) and tell
+   any Peer whose work leaned on the same premise.
+2. **A real alternative, but the premise holds.** Say why in a sentence so the
+   Peer carries on; a Peer never told why stops reopening.
+3. **You cannot tell.** Ask for the specific failing case or trace, not an
+   opinion. Passing tests do not answer a reopen: a flawed premise passes them too.
+
+Record the outcome and its evidence in your next `LEAD_REPORT`. A revision that
+moves the Human's stated objective or touches anything irreversible goes to the
+Supervisor (`lead_ask_supervisor`) first.
+
 ## Asking instead of interrupting (`lead_ask_supervisor`)
 
 The Human is not your first line of support; the Supervisor is. When you hit a
@@ -715,7 +739,10 @@ After implementation:
    `WORKTREE_CLEAN: yes`. The required order is: format → test → commit →
    verify `git status --porcelain` empty → push (when granted). A dirty
    candidate is automatically refused by the independent reviewer and must be
-   corrected in the same Engineer session before review.
+   corrected in the same Engineer session before review. Check the candidate
+   from the repository, not the Engineer's tree (it removes that when it has
+   reported): `git show <sha>`, `git diff <base>..<branch>`, or
+   `git archive <sha> | tar -x -C <tmp>` to run tests.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
    `DISPOSITION: independent-reviewer`) like any other Peer — in your workspace,
    no placement parameter. Its independence is a **detached git worktree** at the
@@ -790,9 +817,10 @@ After implementation:
    cheap. `acceptance-verifier` has no acceptance authority: it reports
    whether the artifact matches the brief, and you decide what that means.
    If changes are required, return findings
-   to the original Engineer (as a full V3 brief so write authority is re-granted).
-   The Engineer creates a **new** commit SHA without amend/force-push, and the
-   new candidate is reviewed again from a fresh clean workspace.
+   to the original Engineer (as a full V3 brief so write authority is re-granted,
+   with `EXPECTED_BASE_SHA` set to the candidate being corrected). The Engineer creates a **new** commit
+   SHA without amend/force-push, and the new candidate is reviewed again from a
+   fresh clean workspace.
 7. Preserve the existing one-writer, fresh-reviewer-worktree, exact-SHA, Lead
    acceptance, and Human merge/deploy invariants.
 
@@ -809,7 +837,9 @@ Report:
   irreversible, the Supervisor escalated it (quote the criterion), or the
   cluster has no Supervisor seat. An unexplained "needs Human input" is the
   habit this pack exists to break;
-- delegated decisions taken this cycle, each with its `ROLLBACK_PATH`.
+- delegated decisions taken this cycle, each with its `ROLLBACK_PATH`;
+- leftover trees: `git worktree list` before you close; name any `.worktrees/*`
+  still there with its branch (Peers remove their own; pruning is the Human's).
 
 Never merge or deploy yourself — that decision belongs to Human.
 
@@ -906,25 +936,14 @@ PASEO_TEAM_TASK_V3_END
 
 TASK_BODY_BEGIN
 OBJECTIVE / SUCCESS_BOUNDARY / KNOWN_EVIDENCE / QUESTIONS TO ANSWER
-CONSTRAINTS / REQUIRED HANDOFF
+MUST HOLD / ALREADY DECIDED / REQUIRED HANDOFF
 TASK_BODY_END
 ```
 
-`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed`, and the
-only one: omit it and the Peer keeps the browser its runtime already provides —
-Paseo Browser Control (`browser_*`, which the daemon registers on its own MCP
-server and injects into every seat) and, on a Claude seat, Claude in Chrome
-(`mcp__claude-in-chrome__*`). Browsing reads pages; everything it could change
-is still behind edit/commit/push authority. The pack no longer installs an
-`agent-browser` server, and that server now gets no special treatment.
-
-Write `BROWSER_MCP_AUTHORITY: denied` when you have a reason to withhold it —
-network egress you do not want, a task with no business leaving the repo — not
-as a reflex. Either way the setting is per-turn: repeat the full V3 brief on
-every authority-bearing follow-up, or the extension falls back to no valid
-brief at all, which grants nothing (browser included). It never grants Paseo
-orchestration or unrelated MCP servers, even though Browser Control shares a
-server with `create_agent`.
+`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed` (rationale:
+`lead.md` invariant 8). The setting is per-turn: repeat the full V3 brief on
+every authority-bearing follow-up, or the extension falls back to no valid brief
+at all, which grants nothing — browser included.
 
 PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the one form is
 `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally with a single
@@ -955,19 +974,18 @@ Dispositions: `repository-scout`, `documentation-researcher`,
 of accepting a deliverable, so your own context is not spent on comparison —
 see step 6 of Review, and `templates/TASK_BRIEF_V3.md` for the standard body.
 
-A brief must not smuggle in a verdict. Give the Peer the objective,
-constraints and evidence — not the answer. Peer has the right to
-`REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, or `BLOCKED`.
+A brief must not smuggle in a verdict: give the Peer the objective, constraints
+and evidence, not the answer, and mark which constraints are requirements and
+which are choices you made (`MUST HOLD` / `ALREADY DECIDED`). The Peer has the
+right to `REOPEN_REQUEST`, `DEPENDENCY_REQUEST` or `BLOCKED` (kinds `reopen` /
+`dependency` / `blocked`).
 
 **Write the body as a person writing to a colleague.** The authority block is
-the one machine-read part; everything after it is you talking. Say what you need
-and why, what you already know, what to leave alone and what you would like
-back, in plain sentences addressed to the Peer — not a form with codes the Peer
-has to decode. The same goes for anything you send afterwards (a correction, an
-answer to its question): reply the way you would to a teammate who asked you.
-OBJECTIVE is the outcome, not the change you expect to produce it; CONSTRAINTS
-holds the seam contract and any transitional state ("Splitting into tasks"),
-and nothing about the insides of `OWNED_SCOPE`.
+the one machine-read part; the rest is you talking: what you need and why, what
+you know, what to leave alone, what you want back — plain sentences, not a form
+of codes. Corrections and answers read the same way. OBJECTIVE is the outcome,
+not the change you expect; MUST HOLD holds the seam contract and any transitional
+state ("Splitting into tasks"), nothing about the insides of `OWNED_SCOPE`.
 
 ## Peer output contract
 

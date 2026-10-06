@@ -102,7 +102,7 @@ import {
 	type GovernanceContext,
 	type SupervisorSeat,
 	supportScriptBlockReason,
-	writerScopeFromCreateAgent,
+	writerScopesFromCreateAgent,
 	type ParsedTaskBrief,
 	type PeerMode,
 	type Policy,
@@ -165,7 +165,7 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 	const args = extractCreateAgentArgs(input);
 	// Nothing to gate unless this call staffs a writer; the core decides that
 	// from the same V3 brief the Peer will be held to.
-	if (!writerScopeFromCreateAgent(args)) return null;
+	if (!writerScopesFromCreateAgent(args)) return null;
 
 	let entries: unknown = null;
 	try {
@@ -336,11 +336,11 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 	pi.registerTool({
 		name: PEER_COMMUNICATION_TOOL,
 		label: "peer_ask_lead",
-		description: "Send a question, blocker, dependency request, or progress update to this Peer’s parent Lead only.",
+		description: "Send a question, blocker, dependency request, premise challenge (reopen), progress update, or finished report to this Peer’s parent Lead only.",
 		parameters: {
 			type: "object",
 			properties: {
-				kind: { type: "string", enum: ["question", "blocked", "dependency", "progress", "report"] },
+				kind: { type: "string", enum: ["question", "blocked", "dependency", "reopen", "progress", "report"] },
 				message: { type: "string", minLength: 1, maxLength: 12000 },
 				taskId: { type: "string" },
 				correlationId: { type: "string" },
@@ -402,7 +402,7 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 			type: "object",
 			properties: {
 				action: { type: "string", enum: ["claim", "renew", "release", "status"] },
-				scope: { type: "string", maxLength: 256 },
+				scope: { type: "string", maxLength: 4096 },
 				ttlMs: { type: "integer", minimum: 1, maximum: 43_200_000 },
 				taskId: { type: "string", maxLength: 128 },
 			},

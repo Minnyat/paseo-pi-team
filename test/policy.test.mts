@@ -612,6 +612,29 @@ for (const [command, why] of [
 		`non-exact push form blocked (${why})`,
 	);
 }
+// A writer in its own worktree pushes with `git -C .worktrees/<TASK_ID>`; the
+// block above covers the path spellings the guard admits (relative, `..`,
+// absolute, Windows drive). What must still fail is everything around the path.
+assert.equal(
+	gitAuthorityBlockReason("git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-101", fullAuth, "T-101"),
+	null,
+	"exact push from a relative worktree path is allowed",
+);
+for (const [command, why] of [
+	["git -C ~/other push -u origin HEAD:refs/heads/agent/T-101", "home-relative path"],
+	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/main", "right path, wrong branch"],
+	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-999", "right path, someone else's branch"],
+	["git -C .worktrees/T-101 push origin HEAD:refs/heads/agent/T-101", "missing -u"],
+	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-101 && ls", "chained after the path form"],
+	["git -C .worktrees/T-101 push --force -u origin HEAD:refs/heads/agent/T-101", "force"],
+	["git -C '.worktrees/T 101' push -u origin HEAD:refs/heads/agent/T-101", "quoted path"],
+	["git -C $(pwd) push -u origin HEAD:refs/heads/agent/T-101", "shell expansion in the path"],
+] as const) {
+	assert.ok(
+		gitAuthorityBlockReason(command, fullAuth, "T-101"),
+		`-C push form blocked (${why})`,
+	);
+}
 // Exact form but brief has no TASK_ID → unverifiable scope → blocked.
 assert.match(
 	gitAuthorityBlockReason(EXPECTED_PUSH, fullAuth) ?? "",
@@ -649,6 +672,27 @@ assert.match(
 	gitAuthorityBlockReason("git push origin task/t-1", noAuth) ?? "",
 	/PUSH_TASK_BRANCH_AUTHORITY/,
 );
+// The read-only `merge-*` plumbing is not a merge. A Reviewer needs merge-base
+// to find where a candidate branched, and was refused for it in a live run.
+for (const command of [
+	"git merge-base main HEAD",
+	"git merge-base --is-ancestor abc123 def456",
+	"git -C .worktrees/review-T-101 merge-base main HEAD",
+	"git merge-tree --write-tree main HEAD",
+]) {
+	assert.equal(
+		gitAuthorityBlockReason(command, noAuth),
+		null,
+		`${command} changes nothing and must not need MERGE_AUTHORITY`,
+	);
+}
+for (const command of ["git merge main", "git -C .worktrees/T-101 merge main", "git fetch && git merge origin/main"]) {
+	assert.match(
+		gitAuthorityBlockReason(command, noAuth) ?? "",
+		/MERGE_AUTHORITY/,
+		`${command} is still a merge`,
+	);
+}
 assert.match(
 	gitAuthorityBlockReason("git merge main", fullAuth, "T-101") ?? "",
 	/MERGE_AUTHORITY/,
@@ -2103,6 +2147,34 @@ import {
 	assert.match(notice!, /peer message/i);
 	assert.match(notice!, /PR-X/);
 	assert.equal(peerMessageTurnNotice({ block: null }), null);
+
+	// A reopen is a premise challenge, and the Lead's turn says what that
+	// obliges it to do: weigh the evidence against the code as it stands, revise
+	// with a fresh full brief if the premise fails, explain if it holds, record
+	// the decision, and take an objective-moving change to the Supervisor.
+	const reopen = parsePeerBlock(
+		[
+			"PEER_MESSAGE_V1",
+			"KIND: reopen",
+			"CORRELATION_ID: c-2",
+			"TASK_ID: PR-X",
+			"FROM_AGENT_ID: a",
+			"",
+			"The lifecycle you described does not exist in src/net/replicate.ts:88.",
+		].join("\n"),
+	);
+	assert.equal(reopen!.kind, "reopen");
+	assert.deepEqual(reopen!.malformed, []);
+	const reopenNotice = peerMessageTurnNotice({ block: reopen })!;
+	assert.match(reopenNotice, /premise/i);
+	assert.match(reopenNotice, /fresh full V3 brief/);
+	assert.match(reopenNotice, /lead_ask_supervisor/);
+	assert.doesNotMatch(reopenNotice, /malformed/);
+	assert.notEqual(
+		reopenNotice,
+		peerMessageTurnNotice({ block: parsePeerBlock(message.replace("KIND: report", "KIND: blocked")) })!,
+		"a reopen must not read like a blocker",
+	);
 }
 
 

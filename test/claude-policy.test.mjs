@@ -149,6 +149,20 @@ assert.equal(
 	null,
 	"exact branch-scoped push is the one allowed form",
 );
+assert.equal(
+	decide("peer", "Bash", { command: "git -C .worktrees/T-100 push -u origin HEAD:refs/heads/agent/T-100" }, writeBrief),
+	null,
+	"the same push from the writer's own worktree, by relative path",
+);
+for (const command of [
+	"cd .worktrees/T-100 && git push -u origin HEAD:refs/heads/agent/T-100",
+]) {
+	assert.match(
+		decide("peer", "Bash", { command }, writeBrief) ?? "",
+		/branch-scoped/,
+		`${command} must stay blocked on Claude too`,
+	);
+}
 assert.match(
 	decide("peer", "Bash", { command: "git push -u origin HEAD:refs/heads/main" }, writeBrief) ?? "",
 	/branch-scoped/,

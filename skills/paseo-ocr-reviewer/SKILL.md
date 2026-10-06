@@ -76,7 +76,10 @@ The review checkout MUST be a **linked git worktree** created from the source
 repository, never the Engineer's primary checkout or a standalone clone/project.
 You make it yourself, inside the workspace you were started in — a Reviewer is
 given no workspace of its own — with
-`git worktree add --detach <path> <candidate-sha>`, and run the wrapper with
+`git worktree add --detach <path> <candidate-sha>` (`<path>` under the workspace
+root, e.g. `.worktrees/review-<TASK_ID>`; run
+`grep -qx '/.worktrees/' "$(git rev-parse --git-path info/exclude)" || echo '/.worktrees/' >> "$(git rev-parse --git-path info/exclude)"`
+first so it stays out of the Human's `git status`), and run the wrapper with
 `--repo <path>`. In a linked worktree `git rev-parse --git-dir`
 resolves under `<source>/.git/worktrees/<name>` and differs from
 `--git-common-dir`; if the two resolve to the same directory, stop with:
@@ -349,6 +352,11 @@ Derivation:
 
 HANDOFF:
 ```
+
+When the report is complete, remove the checkout you made:
+`git worktree remove --force .worktrees/review-<TASK_ID>`. It is a throwaway at
+a fixed SHA (a test run leaves untracked files behind, hence `--force`), and the
+commit stays in the repository. The Engineer's own tree is never yours to remove.
 
 Do not output `ACCEPTED`, `MERGE`, or `READY TO MERGE` as project authority.
 Include commands and evidence in `HANDOFF`. If correction is required, the

@@ -39,11 +39,13 @@ import { importPolicyCore, isEntrypoint } from "./lib-common.mjs";
 const {
 	LEASE_ACTIONS,
 	LEASE_MAX_TTL_MS,
+	leaseCoverage,
 	leaseHolderFor,
 	normalizeCluster,
-	normalizeScope,
+	parseOwnedScopes,
 	resolveLeases,
 	selfCluster,
+	MAX_OWNED_SCOPES,
 } = await importPolicyCore();
 import { createLedger } from "./lease-ledger.mjs";
 
@@ -186,12 +188,21 @@ async function readBoard(reader, options, now) {
 	return board;
 }
 
-function requireScope(scope) {
-	const normalized = normalizeScope(scope);
-	if (!normalized) {
-		throw bad("SCOPE_INVALID", `scope must be a repo-relative path (got ${JSON.stringify(scope)})`);
+/**
+ * The paths a `scope` argument names — the same reading the guard gives an
+ * OWNED_SCOPE, so a Lead can claim the string it just wrote into the brief.
+ * Unlike the guard, which fails closed to the whole repo, a claim that cannot be
+ * read is an error: the repo root is not something to take by accident.
+ */
+function requireScopes(scope) {
+	const scopes = parseOwnedScopes(scope);
+	if (!scopes) {
+		throw bad(
+			"SCOPE_INVALID",
+			`scope must be one or more repo-relative paths separated by commas, at most ${MAX_OWNED_SCOPES} (a glob such as src/api/** is read as its directory); got ${JSON.stringify(scope)}. To take the whole repository say "." explicitly`,
+		);
 	}
-	return normalized;
+	return scopes;
 }
 
 function requireTtl(ttlMs) {
@@ -213,7 +224,7 @@ function requireTtl(ttlMs) {
  */
 async function postLease(action, input, options = {}) {
 	if (!LEASE_ACTIONS.includes(action)) throw bad("ACTION_INVALID", `unknown lease action '${action}'`);
-	const scope = requireScope(input?.scope);
+	const scopes = requireScopes(input?.scope);
 	const ttlMs = action === "release" ? null : requireTtl(input?.ttlMs);
 	requireRole(options);
 	const self = requireSelf(options);
@@ -235,6 +246,11 @@ async function postLease(action, input, options = {}) {
 	// somebody re-read the board. Owning the file means a claim that would
 	// collide is REFUSED rather than contested, and nothing is written for it.
 	//
+	// Several paths are one decision, not several: if ANY of them is held by
+	// somebody else, NONE is written. A Lead handed half of what its writer needs
+	// is not better off than one handed nothing — it is worse, because it holds
+	// ground it cannot use and others cannot have.
+	//
 	// A release is exempt: it only ever gives ground up, so there is nothing to
 	// lose a race for.
 	const outcome = await ledger.transaction(async (tx) => {
@@ -247,26 +263,31 @@ async function postLease(action, input, options = {}) {
 			// two-writer outcome this mechanism exists to prevent.
 			return { blocked: { code: error?.code ?? "LEASE_LEDGER_UNREADABLE", message: String(error?.message ?? error) } };
 		}
-		const incumbent = leaseHolderFor(resolveLeases(board.messages, { now }), scope, cluster);
-		if (action !== "release" && incumbent && incumbent.agentId !== self) {
-			return { written: null, holder: incumbent };
-		}
+		const before = resolveLeases(board.messages, { now });
+		const refused =
+			action !== "release" &&
+			scopes.some((scope) => {
+				const incumbent = leaseHolderFor(before, scope, cluster);
+				return incumbent && incumbent.agentId !== self;
+			});
+		if (refused) return { written: [], after: before };
 		// A lease event is a record, not a request. Under the chat room it was
 		// posted with notify:false so no Lead was woken for bookkeeping; a file
 		// wakes nobody by construction, which is the same guarantee for free.
-		const written = await tx.append({ author: self, body: leaseBody(action, scope, ttlMs, cluster), now });
-		const after = resolveLeases([...board.messages, written], { now });
-		return { written, holder: leaseHolderFor(after, scope, cluster) };
+		// One record per path keeps the wire format exactly what an older build
+		// already reads.
+		const written = [];
+		for (const scope of scopes) {
+			written.push(await tx.append({ author: self, body: leaseBody(action, scope, ttlMs, cluster), now }));
+		}
+		return { written, after: resolveLeases([...board.messages, ...written], { now }) };
 	});
 
+	const base = { action, scope: scopes.join(", "), scopes, cluster, ttlMs, ledger: ledger.path };
 	if (outcome.blocked) {
 		return {
 			ok: false,
-			action,
-			scope,
-			cluster,
-			ttlMs,
-			ledger: ledger.path,
+			...base,
 			code: outcome.blocked.code,
 			message: outcome.blocked.message,
 			ledgerReadable: false,
@@ -275,21 +296,31 @@ async function postLease(action, input, options = {}) {
 		};
 	}
 
-	const holder = outcome.holder;
+	// Per path, so a caller sees WHICH of them it did not get. `granted` asks
+	// whether a lease WE hold covers the path, not merely whether someone holds
+	// something there: a claim for `src` dropped behind our own narrower
+	// `src/auth` leaves us the holder of ground that does not cover `src`.
+	const claims = scopes.map((scope) => {
+		const { rival, covered } = leaseCoverage(outcome.after, scope, self, cluster);
+		return { scope, granted: covered && !rival, holder: rival ?? leaseHolderFor(outcome.after, scope, cluster) };
+	});
+	const granted = claims.every((claim) => claim.granted);
+	const others = claims.find((claim) => claim.holder && claim.holder.agentId !== self);
 	return {
 		ok: true,
-		action,
-		scope,
-		cluster,
-		ttlMs,
-		ledger: ledger.path,
-		// Null when the claim was refused before it could be written — the caller
+		...base,
+		// Empty when the claim was refused before it could be written — the caller
 		// has a holder to talk to instead of a record to cite.
-		recordId: outcome.written?.id ?? null,
+		recordId: outcome.written[0]?.id ?? null,
+		recordIds: outcome.written.map((record) => record.id),
 		ledgerReadable: true,
-		holder,
-		// The only field a caller should branch on: did WE end up holding it.
-		granted: Boolean(holder && holder.agentId === self),
+		holder: (others ?? claims[0])?.holder ?? null,
+		claims,
+		// The only field a caller should branch on: did WE end up holding all of it.
+		granted: action === "release" ? false : granted,
+		...(action === "claim" && !granted && !others
+			? { note: "You already hold a narrower lease inside this scope, and the board keeps the older one. Release it first, or claim the paths you need one by one." }
+			: {}),
 	};
 }
 
@@ -331,9 +362,10 @@ export async function leaseStatus(input = {}, options = {}) {
 		return { ok: false, code: result.code, message: result.message, leases: null };
 	}
 	const held = [...result.leases.values()].sort((a, b) => a.claimedAt - b.claimedAt);
-	const scope = input.scope === undefined ? null : requireScope(input.scope);
+	const scopes = input.scope === undefined ? null : requireScopes(input.scope);
 	const cluster =
 		input.cluster === undefined ? selfCluster() : normalizeCluster(input.cluster);
+	const holders = scopes?.map((scope) => ({ scope, holder: leaseHolderFor(result.leases, scope, cluster) }));
 	return {
 		ok: true,
 		cluster,
@@ -342,7 +374,14 @@ export async function leaseStatus(input = {}, options = {}) {
 		// entitled to SEE that another project holds something. Only the `holder`
 		// answer below — the one a decision is actually made on — is narrowed.
 		leases: held.map((holder) => ({ ...holder, expiresAtIso: new Date(holder.expiresAt).toISOString() })),
-		...(scope ? { scope, holder: leaseHolderFor(result.leases, scope, cluster) } : {}),
+		...(scopes
+			? {
+					scope: scopes.join(", "),
+					scopes,
+					holders,
+					holder: holders.find((entry) => entry.holder)?.holder ?? null,
+				}
+			: {}),
 	};
 }
 
