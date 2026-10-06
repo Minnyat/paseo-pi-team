@@ -4496,15 +4496,18 @@ function detectForcePush(command: string): boolean {
  * branch (main, a teammate's branch), other remotes, --all/--tags/--mirror
  * or deletions is structurally impossible in this form.
  *
- * `-C <path>` is the one addition, for a writer in its own worktree. A shell
- * that has left the workspace root starts over in it on every call, so the
- * writer cannot `cd` once and push bare, and `cd <dir> && git push` is a chain.
- * The path is relative and cannot climb (no leading `/` or `~`, no `..`), so it
- * can only name a directory inside the workspace; the refspec still pins the
- * destination to the task's own branch.
+ * Two spellings of that one form: from the shell's own directory, or with a
+ * single leading `-C <path>` for a writer working in a git worktree — its
+ * shell can start back in the Lead's checkout, and `cd <wt> && git push` is a
+ * chain. The path is ONE unquoted token from an allowlist, never starting
+ * with `-`: no `$`, backtick, quote or bracket can reach it, so the shell has
+ * nothing to expand or run before git does (`-C "$(git push origin :main)"`
+ * would otherwise slip a deletion past an anchored match). And `-C` is the
+ * only option allowed before `push`: a lowercase `-c` sets config, and
+ * `core.sshCommand` is a command.
  */
 const EXACT_PUSH_RE =
-	/^\s*git\s+(?:-C\s+((?!\/)(?!~)(?!.*\.\.)[A-Za-z0-9._][A-Za-z0-9._/-]*)\s+)?push\s+-u\s+origin\s+HEAD:refs\/heads\/([A-Za-z0-9][A-Za-z0-9._/-]*)\s*$/;
+	/^\s*git\s+(?:-C\s+(?<dir>[A-Za-z0-9._/@:][A-Za-z0-9._/@:+-]*)\s+)?push\s+-u\s+origin\s+HEAD:refs\/heads\/(?<branch>[A-Za-z0-9][A-Za-z0-9._/-]*)\s*$/;
 
 export function expectedTaskBranch(taskId: string | undefined): string | null {
 	const id = taskId?.trim();
@@ -4536,8 +4539,8 @@ export function gitAuthorityBlockReason(
 		}
 		const expected = expectedTaskBranch(taskId);
 		const match = command.match(EXACT_PUSH_RE);
-		if (expected === null || !match || match[2] !== expected) {
-			return `Push authority is branch-scoped: only "git push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" is allowed. Other branches/remotes, --all, --tags, --mirror, deletions and chained commands are blocked. From your worktree: "git -C .worktrees/<TASK_ID> push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" (relative path inside the workspace). Push first, run other commands separately.`;
+		if (expected === null || match?.groups?.branch !== expected) {
+			return `Push authority is branch-scoped: only "git push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" is allowed, or the same command with one leading "-C <path>" to push from a worktree (one unquoted path: no spaces, quotes or $ — use forward slashes on Windows). Other branches/remotes, other git options, --all, --tags, --mirror, deletions and chained commands are blocked. Push first, run other commands separately.`;
 		}
 	}
 	if (GIT_COMMIT_RE.test(command) && !authority.commit) {

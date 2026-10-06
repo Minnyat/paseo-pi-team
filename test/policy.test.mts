@@ -537,6 +537,25 @@ assert.equal(
 	null,
 	"exact branch-scoped push form is allowed",
 );
+// The same form from a worktree: one leading `-C <path>`, because a writer's
+// shell can start back in the Lead's checkout and `cd <wt> && git push` is a
+// chain. Paths as a live run produced them: absolute and full of dashes,
+// relative, and a Windows drive written with forward slashes.
+for (const dir of [
+	"/tmp/claude-0/-home-user-x/scratchpad/rt/billing-lite-wt-T-101",
+	"../billing-lite-wt-T-101",
+	"C:/work/billing-lite-wt-T-101",
+]) {
+	assert.equal(
+		gitAuthorityBlockReason(
+			`git -C ${dir} push -u origin HEAD:refs/heads/agent/T-101`,
+			fullAuth,
+			"T-101",
+		),
+		null,
+		`worktree spelling of the exact push is allowed (${dir})`,
+	);
+}
 
 // Every push form OTHER than the exact one is blocked when authority is granted.
 for (const [command, why] of [
@@ -557,6 +576,35 @@ for (const [command, why] of [
 		"git fetch && git push -u origin HEAD:refs/heads/agent/T-101",
 		"prefixed chain",
 	],
+	// The `-C` spelling admits one unquoted path and nothing else.
+	["git -C ../wt push -u origin HEAD:refs/heads/agent/T-999", "-C, wrong task branch"],
+	[
+		"git -C ../wt push -u origin HEAD:refs/heads/agent/T-101 && npm test",
+		"-C, chained command",
+	],
+	[
+		'git -C "$(git push origin :main)" push -u origin HEAD:refs/heads/agent/T-101',
+		"-C path is a command substitution",
+	],
+	["git -C $(pwd) push -u origin HEAD:refs/heads/agent/T-101", "-C path expands $()"],
+	["git -C `pwd` push -u origin HEAD:refs/heads/agent/T-101", "-C path is a backtick"],
+	["git -C $HOME/wt push -u origin HEAD:refs/heads/agent/T-101", "-C path expands $VAR"],
+	["git -C 'a b' push -u origin HEAD:refs/heads/agent/T-101", "-C path is quoted"],
+	['git -C "../wt" push -u origin HEAD:refs/heads/agent/T-101', "-C path double-quoted"],
+	["git -C ~/wt push -u origin HEAD:refs/heads/agent/T-101", "-C path with tilde"],
+	["git -C -x push -u origin HEAD:refs/heads/agent/T-101", "-C path looks like an option"],
+	["git -C a -C b push -u origin HEAD:refs/heads/agent/T-101", "two -C options"],
+	[
+		"git -c core.sshCommand=x push -u origin HEAD:refs/heads/agent/T-101",
+		"lowercase -c sets config (sshCommand runs a program)",
+	],
+	["git -C wt -c x=y push -u origin HEAD:refs/heads/agent/T-101", "-C followed by -c"],
+	[
+		"git --git-dir=../wt/.git push -u origin HEAD:refs/heads/agent/T-101",
+		"--git-dir",
+	],
+	["git --work-tree=../wt push -u origin HEAD:refs/heads/agent/T-101", "--work-tree"],
+	["git -C ../wt push origin HEAD:refs/heads/agent/T-101", "-C, missing -u"],
 ] as const) {
 	assert.match(
 		gitAuthorityBlockReason(command, fullAuth, "T-101") ?? "",
@@ -564,20 +612,16 @@ for (const [command, why] of [
 		`non-exact push form blocked (${why})`,
 	);
 }
-// A writer in its own worktree pushes with `git -C <relative path>`: the shell
-// of a seat that has left the workspace root starts over in it on every call,
-// and `cd <dir> && git push` is a chain. The path may only name a directory
-// inside the workspace, and the refspec still pins the task's own branch.
+// A writer in its own worktree pushes with `git -C .worktrees/<TASK_ID>`; the
+// block above covers the path spellings the guard admits (relative, `..`,
+// absolute, Windows drive). What must still fail is everything around the path.
 assert.equal(
 	gitAuthorityBlockReason("git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-101", fullAuth, "T-101"),
 	null,
 	"exact push from a relative worktree path is allowed",
 );
 for (const [command, why] of [
-	["git -C /tmp/elsewhere push -u origin HEAD:refs/heads/agent/T-101", "absolute path"],
 	["git -C ~/other push -u origin HEAD:refs/heads/agent/T-101", "home-relative path"],
-	["git -C ../sibling push -u origin HEAD:refs/heads/agent/T-101", "climbs out of the workspace"],
-	["git -C .worktrees/../../x push -u origin HEAD:refs/heads/agent/T-101", "climbs mid-path"],
 	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/main", "right path, wrong branch"],
 	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-999", "right path, someone else's branch"],
 	["git -C .worktrees/T-101 push origin HEAD:refs/heads/agent/T-101", "missing -u"],

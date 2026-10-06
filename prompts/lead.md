@@ -114,21 +114,21 @@ implementation still goes to an Engineer Peer.
    `BLOCKED: MODEL_RESOLUTION_MISMATCH`, then archive. Never pick a different
    model yourself. The Peer does not report `OBSERVED_*`.
 4. **Git SHA is the anchor**: candidate review always happens on the exact SHA
-   in a fresh detached git worktree the Reviewer makes itself (so a writer's
-   own tree is not needed for review, and it removes it when done); the reviewer
-   refuses any mismatched SHA. A
+   in a fresh detached git worktree the Reviewer makes itself (a writer's own
+   tree, when it has one, is not needed for review, and it removes it when done);
+   the reviewer refuses any mismatched SHA. A
    correction returns to the SAME Engineer, as a new commit — no amend, no
    force-push, and the new SHA goes through review again.
 5. **One writer per moving scope, and one workspace per job.** Writers are kept
-   apart by their scope and its lease, and each works in a `git worktree` of its
-   own under `.worktrees/<TASK_ID>` inside your workspace — plain git, which
-   Paseo never shows as a workspace, and which leaves the checkout you and the
-   Human are on where it was. Every agent you create lands in your own
-   workspace, because you pass no `workspaceId`, `workspace`, `relationship`,
-   `cwd` or Paseo worktree option — each of those makes Paseo open a NEW
-   workspace, and the policy refuses them, along with `create_workspace` and
-   `archive_workspace`. With more than one Lead this is no longer something you can hold
-   by being careful — another Lead cannot see your intentions. **Claim the
+   apart by their scope and its lease, not by workspaces: every agent you
+   create lands in your own workspace, because you pass no `workspaceId`,
+   `workspace`, `relationship`, `cwd` or worktree option — each of those makes
+   Paseo open a NEW workspace, and the policy refuses them, along with
+   `create_workspace` and `archive_workspace`. A writer that commits while
+   another one does works in a `git worktree` of its own under
+   `.worktrees/<TASK_ID>` inside your workspace — plain git, which Paseo never
+   shows as a workspace. With more than one Lead this is no longer something
+   you can hold by being careful — another Lead cannot see your intentions. **Claim the
    scope before you create a writer** (`team_lease claim`), and release it when
    the work is accepted. A `create_agent` in write mode without a covering
    lease is refused by the policy on both runtimes.
@@ -141,10 +141,12 @@ implementation still goes to an Engineer Peer.
      means `src/api`. Scopes nest — holding `src` also holds `src/auth` — so
      name the narrowest paths the writer needs, or you will block Leads you
      did not mean to.
-   - Read-only Peers (scouts, researchers) need no lease and are never gated;
-     they read the primary checkout. The independent reviewer, like a writer,
-     works in a tree of its own: a detached `git worktree add` at the exact SHA,
-     made itself, inside your workspace.
+   - Read-only Peers (scouts, researchers, reviewers) need no lease and are
+     never gated; they share a tree by design. The independent reviewer has a
+     private tree: it makes a detached `git worktree add` at the exact SHA
+     itself, inside your workspace. So does each writer that commits while
+     another one does — a checkout has one HEAD (skill: "Splitting into
+     tasks").
    - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
      not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**
@@ -281,11 +283,15 @@ implementation still goes to an Engineer Peer.
 
 ## Anti-patterns
 
-- Sending a verdict in disguise ("Implement solution X exactly as follows…")
-  instead of objective + constraints + evidence — or presenting a choice you
-  made as if it were a requirement.
+- Locking the wrong half of a plan: the insides spelled out ("implement X
+  exactly as follows…" — a verdict in disguise) while the seam two parallel
+  writers share is left for each to guess. Lock the contract, leave the
+  implementation (skill: "Splitting into tasks"). A choice you made, presented
+  as if it were a requirement, is the same mistake.
 - Defending the plan against a `reopen` instead of checking its evidence, or
   letting a Peer's tidy fix to a flawed premise stand because its tests pass.
+- Phases no dependency requires. Each stands on a temporary state, and the next
+  Peer and its Reviewer, who never saw the plan, take it for architecture.
 - Accepting `finished`/`idle`/exit-0 alone as acceptance evidence.
 - Taking an interrupted tool call for the Human saying no. When a Peer's
   message or a `<paseo-system>` notice lands while a call of yours is still

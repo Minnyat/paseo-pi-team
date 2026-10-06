@@ -93,25 +93,28 @@ Field semantics:
 - `CANDIDATE_SHA` in the output is meaningful only with
   `COMMIT_AUTHORITY: allowed`.
 - `PUSH_TASK_BRANCH_AUTHORITY: allowed` is branch-scoped: the extension allows
-  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` — the writer's
+  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or the same
+  command with one leading `-C <worktree-path>` (an unquoted path) — the writer's
   task branch MUST be named `agent/<TASK_ID>`. Every other push form
-  (different remote/branch, `--all`/`--tags`/`--mirror`, deletion, chained
-  commands) is blocked; force-push in every spelling is always blocked.
+  (different remote/branch, other git options, `--all`/`--tags`/`--mirror`,
+  deletion, chained commands) is blocked; force-push in every spelling is always
+  blocked.
 
-## One workspace per job, one worktree per writer
+## One workspace per job: another Peer's edits are not your environment breaking
 
 Every Peer of one job runs in the workspace its Lead was started in; `create_agent`
-puts it there when `workspaceId` is left out. A writer does not edit that
-workspace's primary checkout: it makes its own `git worktree` under
-`.worktrees/<TASK_ID>` — plain git, so Paseo shows nothing new — and the checkout
-you and the Human are on stays where it was. Who may touch which files is still
-`OWNED_SCOPE` plus the scope lease (one writer per scope, enforced before the
-writer is even created); the worktree decides whose HEAD, index and branch a
-commit lands on. The independent Reviewer does the same, detached at the
-candidate SHA.
+puts it there when `workspaceId` is left out. Isolation does not come from a tree
+of the Peer's own — it comes from `OWNED_SCOPE` plus the scope lease: one writer
+per scope, enforced before the writer is even created. The private trees are git
+worktrees inside the shared workspace, never Paseo workspaces: the independent
+Reviewer's, a detached `git worktree add` at the exact candidate SHA it makes
+itself, and one per writer when two writers commit at the same time (a checkout
+has one HEAD). Name that writer's path in its brief and tell it to run its base
+gate and push as `git -C <path> …`; the part after the snippet is for writers
+without one.
 
-The Peer has no other source for the commands, so put them in the body, in your
-own words:
+For a writer you give a worktree, the Peer has no other source for the commands,
+so put them in the body, in your own words:
 
 ```text
 Please don't work in the main checkout: other Peers share this workspace. Make
@@ -131,9 +134,31 @@ tree from the workspace root with `git worktree remove .worktrees/<TASK_ID>` (no
 its own, not from yours.
 ```
 
-A relative `-C` path inside the workspace is the one `-C` the push guard accepts.
-Files modified in the primary checkout belong to somebody else: what makes a
-change a Peer's is `OWNED_SCOPE`, not the state of a directory.
+The push guard accepts one leading `-C <path>` (an unquoted path) before `push`,
+and nothing else.
+
+In the shared checkout `git status` legitimately shows other people's work. A
+Peer that reads ` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
+`BLOCKED: DIRTY_INITIAL_WORKTREE` has misread a working system as a broken one,
+and the Lead pays a full round trip to tell it so. Say so in the task body:
+
+```text
+Other Peers are working in this same checkout right now, so `git status` WILL
+show files marked ` M` or `??` that are not yours. That is the design, not a
+dirty environment.
+
+- Paths OUTSIDE your OWNED_SCOPE, modified or untracked: NORMAL. Do not report
+  DIRTY_INITIAL_WORKTREE, do not stage them, do not revert, reset or stash
+  them, and do not `git add -A`. Stage your own paths by name.
+- Paths INSIDE your OWNED_SCOPE that are already modified before you start:
+  NOT normal — you are supposed to be the only writer there. Report
+  `BLOCKED: SCOPE_CONFLICT` with the paths, and do not overwrite them.
+```
+
+The rule the Peer applies is the same one the lease already encodes: what makes
+a change yours is `OWNED_SCOPE`, not the state of the directory. The Reviewer is
+the exception, because it works in a worktree it made: there, any dirt at all is
+a blocker — and so it is in a writer's own worktree.
 
 ## Writing the body: one person talking to another
 
@@ -145,6 +170,14 @@ headers, field names or status codes the Peer has to decode; the headings in the
 skeleton above are a checklist for you, and a sentence each is enough. Address
 the Peer directly, and expect it to answer you the same way — a person asking its
 lead a question, or telling them what it found.
+
+Two of those headings carry most of the weight. OBJECTIVE is the outcome — what
+has to be true afterwards, and why — not the change you expect to produce it; a
+Peer handed only the solution cannot tell you it is the wrong one. MUST HOLD
+is where you lock what other work depends on: the seam contract, word for word as
+in the other writer's brief, and any transitional state with the task that
+removes it ("Splitting into tasks" in the Lead skill). Helpers, names and how the
+code is laid out inside `OWNED_SCOPE` are neither; leave them to the Peer.
 
 ### Requirement, or a choice you made?
 

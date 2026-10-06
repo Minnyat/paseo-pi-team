@@ -9,7 +9,9 @@ description: Coordinate research, implementation, correction, and independent re
 
 1. Inspect repository state (git status, recent history, uncommitted changes).
 2. Read relevant project instructions (`AGENTS.md`, `WORKSPACE_PROTOCOL.md` if present).
-3. Identify objective, success boundary and risks.
+3. Identify the outcome — what has to be true afterwards, and for whom —
+   separately from any solution the request names, then the success boundary
+   and risks. A named solution is evidence about the outcome, not the spec.
 4. **Check that this cluster has a Supervisor.** `lead_ask_supervisor` reports
    `NO_SUPERVISOR_SEAT` when it does not, and a cluster without one has no
    delegated decision path — every question in it lands on the Human. Seating
@@ -19,11 +21,14 @@ description: Coordinate research, implementation, correction, and independent re
 
 ## Research
 
-Create read-only Peers when independent work can run in parallel:
-
-- Repository Scout
-- Documentation Researcher
-- Solution Challenger
+Research is for understanding the domain — what the code does today, who owns
+it, what the outcome actually needs — not for starting the build. Staff it by
+open question, not by habit: one read-only Peer per question you cannot answer
+from the repo yourself (a Repository Scout, Documentation Researcher or
+Solution Challenger is the usual shape). If you can already state the outcome,
+the owners and the seams, go straight to Decision. Scaling ceremony to the task
+never scales the invariants: the V3 brief, the lease and the exact-SHA
+independent review apply to a one-line change too.
 
 Every Peer works in YOUR workspace (see step 8 of the routing cycle). Send them a
 **V3 read-only brief** (`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`
@@ -40,8 +45,49 @@ Synthesize evidence. Record:
 - rejected alternatives;
 - owned scope;
 - excluded scope;
+- the seam contract: for every boundary two tasks share (an API, a schema, a
+  behavior, a state another task reads), what is fixed;
+- every transitional state, with the task that removes it;
 - verification;
 - unresolved risks.
+
+### Splitting into tasks
+
+Split along a real dependency or an ownership boundary, never because more
+phases look more rigorous. The test for every task and every phase: if it did
+not exist, what would go wrong? If the answer is "nothing, the plan would just
+be shorter", merge it.
+
+A phase no dependency requires usually stands on a transitional state — a shim,
+a flag, a compatibility path, a half-migrated schema — that exists only so the
+plan's steps can be committed one at a time. Here that state is more dangerous
+than it looks: every task gets a fresh Peer and every candidate a fresh
+Reviewer on its own SHA, and none of them knows the shim was meant to go. Tests
+get written against it, the next task builds on it, review approves it as
+architecture. So when one is unavoidable, name it — what it is, which task
+removes it — in three briefs: the one that creates it, the Reviewer's brief for
+that intermediate SHA, and the one that removes it. The job is not accepted
+while it still exists.
+
+Lock the seams, not the insides. `OWNED_SCOPE` says where a writer may work; a
+brief that also dictates how — which helper, which variable, how the logic is
+laid out — is pseudo-code in prose: the Peer types it out and loses the room to
+tell you the plan is wrong. A brief that leaves the seam open lets two parallel
+writers each build a correct half that does not fit the other. Put the seam
+contract, word for word the same, in both writers' briefs, and leave everything
+behind it to them. The contract holds only what crosses the seam: a fact about
+one side — its rollout flag, a helper name the Human asked for — goes outside
+it, in that side's brief, attributed to whoever asked. Inside, it reads as
+shared and frozen, and the two copies stop being identical.
+
+Writers that commit at the same time cannot share one checkout: it has one
+HEAD. Give each its own `git worktree` on `agent/<TASK_ID>` and name the path
+(`.worktrees/<TASK_ID>`) in its brief — a git worktree inside your workspace,
+like the Reviewer's, never a Paseo workspace. Its shell may start back in your
+checkout, so the base gate and the push run as `git -C <path> …`; the push guard
+accepts exactly that spelling. Do not tell the writer to leave the tree in
+place: review runs from the SHA, and the writer removes it when it has reported
+(a correction re-adds it from the branch).
 
 ## Accessing Paseo tools
 
@@ -83,16 +129,15 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    ```
 
    Check `granted` in the result, never merely `ok`. A claim that collides
-   with a live lease is REFUSED and writes nothing: the board is locked, read
-   and appended to as one step, so asking is not the same as taking.
-   `<OWNED_SCOPE>` may name several paths, comma-separated (`src/api/**` means
-   `src/api`); they are taken together or not at all, and `claims` shows each.
+   with a live lease is REFUSED and writes nothing. `<OWNED_SCOPE>` may list
+   several paths, comma-separated (`src/api/**` means `src/api`), taken together
+   or not at all; `claims` shows each.
 
    - `granted: true` → continue the cycle.
    - `granted: false` → another Lead owns ground that covers your scope; the
      result names it. Prompt that Lead directly — see "Coordinating with the
-     other seats" below. Do NOT create the writer, do NOT narrow the scope to sneak under the holder, and do NOT wait
-     out the TTL as a strategy.
+     other seats" below. Do NOT create the writer, narrow the scope to sneak
+     under the holder, or wait out the TTL as a strategy.
    - Ledger unreadable → `BLOCKED: LEASE_UNVERIFIABLE`. This is a real blocker,
      not a warning.
 
@@ -101,23 +146,20 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    you forget to release blocks other Leads until it expires.
 
    Read-only dispositions (repository-scout, documentation-researcher,
-   solution-architect, acceptance-verifier, independent-reviewer) take no lease: they share the tree
-   by design, and gating them would turn the lease into a bottleneck rather
-   than a safety rule.
+   solution-architect, acceptance-verifier, independent-reviewer) take no lease:
+   they share the tree by design.
 
-   The policy enforces this on both runtimes, so a skipped claim surfaces as a
-   refused `create_agent` rather than as two engineers quietly editing the same
-   files.
+   The policy enforces this on both runtimes: a skipped claim is a refused
+   `create_agent`, not two engineers quietly editing the same files.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
-2. Pick `HOST_ID` from the controller-local cluster routing file
-   `cluster-routing.local.json` in the pack's config directory
-   (`PST_TEAM_CONFIG_DIR` → `PASEO_TEAM_HOME` → an existing `~/.paseo-pi-team` →
-   `~/.paseo-team-orchestration`; `preflight.mjs` prints the one in use as
-   `team-config-dir`). Capability filter: writers need `git-write`+`focused-test`;
-   reviewers need `git-read`+`independent-review`. A file you cannot find or read
-   is `BLOCKED: HOST_ROUTE_UNAVAILABLE` — look in the other directory first, and
-   never fill the gap by choosing a model from `list_models`.
+2. Pick `HOST_ID` from the controller-local `cluster-routing.local.json` in the
+   pack's config directory (`PST_TEAM_CONFIG_DIR` → `PASEO_TEAM_HOME` → an
+   existing `~/.paseo-pi-team` → `~/.paseo-team-orchestration`; `preflight.mjs`
+   prints it as `team-config-dir`). Writers need `git-write`+`focused-test`;
+   reviewers `git-read`+`independent-review`. A file you cannot find or read is
+   `BLOCKED: HOST_ROUTE_UNAVAILABLE` — check the other directory first, and
+   never choose a model from `list_models` instead.
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
    run the resolver when the role pack repo is available:
@@ -200,18 +242,10 @@ This is the exact failure mode the cluster config exists to prevent.
    `baseBranch`, `refName` or `githubPrNumber`. Each of those is Paseo's way of
    minting a NEW workspace or detaching the agent, and a Lead that used them
    left a trail of workspaces nobody could tell apart.
-   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0) —
-     one writer per scope, enforced before it exists — and works in a
-     `git worktree` of its own at `.worktrees/<TASK_ID>` inside your workspace
-     (plain git, so Paseo shows nothing new and the checkout you and the Human
-     are on never moves). Put the commands in its brief
-     (`templates/TASK_BRIEF_V3.md`). Keep it under the workspace root: from
-     outside it a shell restarts in the workspace on every call and some
-     commands are declined. Do not tell a writer to leave its tree in place:
-     review runs from the SHA in a tree of its own, the branch keeps the
-     commits, and the writer removes its tree when it has reported. A
-     correction brings it back with `git worktree add .worktrees/<TASK_ID>
-     agent/<TASK_ID>`.
+   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0):
+     one writer per scope, enforced before it exists. Writers committing in
+     parallel each add a git worktree under `.worktrees/` ("Splitting into
+     tasks").
    - The **independent Reviewer** still reviews a detached checkout of the exact
      candidate SHA, and still never touches the Engineer's tree — it makes that
      checkout itself with `git worktree add --detach <path> <candidate-sha>`
@@ -247,9 +281,8 @@ This is the exact failure mode the cluster config exists to prevent.
    cluster: omit it and `create_agent` is refused with
    `Refusing create_agent: labels["team.cluster"] is required and must be
    "<value>"` — the message names the exact value to pass. Get your own value
-   from the `cluster` field of any `team_lease` result (`status` changes nothing),
-   or read it off any Peer you already created; do not guess it from the project
-   name, and `pteam env list` only lists settings, not your cluster. A label naming a DIFFERENT cluster than your own is refused
+   from the `cluster` field of any `team_lease` result (`status` changes nothing)
+   or off any Peer you already created; never guess it from the project name. A label naming a DIFFERENT cluster than your own is refused
    too — that would be stamping a new seat into another project's authority,
    not a typo to silently correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
@@ -504,22 +537,21 @@ Peer-to-Lead communication is parent-scoped: `peer_ask_lead` resolves the curren
 
 ### A Peer reopens a premise (`kind: reopen`)
 
-The Peer is telling you the ground under its brief is wrong. Settle it on
-evidence, not on how disruptive the change would be, and land on one of three:
+The Peer says the ground under its brief is wrong. Settle it on evidence, not on
+how disruptive the change would be, and land on one of three:
 
 1. **The premise fails in the code as it stands** — a file and line, or a command
    and its output, that you can reproduce. Revise: send the same Peer a fresh
-   full V3 brief (move `OWNED_SCOPE` through the lease if it changes), and tell any
-   other Peer whose work leaned on the same premise.
+   full V3 brief (move `OWNED_SCOPE` through the lease if it changes) and tell
+   any Peer whose work leaned on the same premise.
 2. **A real alternative, but the premise holds.** Say why in a sentence so the
-   Peer carries on. Not a defeat; a Peer that is never told why stops reopening.
-3. **You cannot tell.** Ask for the specific failing case or trace, not for an
-   opinion. Passing tests do not answer a reopen: they are what a flawed premise
-   also passes.
+   Peer carries on; a Peer never told why stops reopening.
+3. **You cannot tell.** Ask for the specific failing case or trace, not an
+   opinion. Passing tests do not answer a reopen: a flawed premise passes them too.
 
-Record the outcome with its evidence in your next `LEAD_REPORT`. A revision that
-moves the Human's stated objective, or touches anything irreversible, goes to
-the Supervisor (`lead_ask_supervisor`) before you act on it.
+Record the outcome and its evidence in your next `LEAD_REPORT`. A revision that
+moves the Human's stated objective or touches anything irreversible goes to the
+Supervisor (`lead_ask_supervisor`) first.
 
 ## Asking instead of interrupting (`lead_ask_supervisor`)
 
@@ -708,9 +740,9 @@ After implementation:
    verify `git status --porcelain` empty → push (when granted). A dirty
    candidate is automatically refused by the independent reviewer and must be
    corrected in the same Engineer session before review. Check the candidate
-   from the repository, never from the Engineer's tree — it removes that when it
-   has reported: `git show <sha>`, `git diff <base>..<branch>`, or
-   `git archive <sha> | tar -x -C <tmp>` for a test run.
+   from the repository, not the Engineer's tree (it removes that when it has
+   reported): `git show <sha>`, `git diff <base>..<branch>`, or
+   `git archive <sha> | tar -x -C <tmp>` to run tests.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
    `DISPOSITION: independent-reviewer`) like any other Peer — in your workspace,
    no placement parameter. Its independence is a **detached git worktree** at the
@@ -743,7 +775,9 @@ After implementation:
    expensive seat for what is actually judgement: contradictions nobody
    flagged, an argument that does not hold, a risk the diff creates.
 
-   So structure the review in two passes:
+   So when the mechanical part is large, split the review in two passes (a
+   small diff is one pass; the exact-SHA worktree and the independent verdict
+   never shrink):
    - **Pass A (mechanical, cheap).** A script, or a `FAST_READ` Peer whose
      brief is a checklist, produces a RAW FINDINGS LIST: file, line, what was
      compared, matched/mismatched. It states facts and takes no view.
@@ -784,8 +818,7 @@ After implementation:
    whether the artifact matches the brief, and you decide what that means.
    If changes are required, return findings
    to the original Engineer (as a full V3 brief so write authority is re-granted,
-   with `EXPECTED_BASE_SHA` set to the candidate being corrected; its tree may be
-   gone, and it re-adds it from the branch). The Engineer creates a **new** commit
+   with `EXPECTED_BASE_SHA` set to the candidate being corrected). The Engineer creates a **new** commit
    SHA without amend/force-push, and the new candidate is reviewed again from a
    fresh clean workspace.
 7. Preserve the existing one-writer, fresh-reviewer-worktree, exact-SHA, Lead
@@ -805,10 +838,8 @@ Report:
   cluster has no Supervisor seat. An unexplained "needs Human input" is the
   habit this pack exists to break;
 - delegated decisions taken this cycle, each with its `ROLLBACK_PATH`;
-- leftover trees: `git worktree list` before you close, and name any
-  `.worktrees/*` still there with its branch. Peers remove their own when
-  they finish; one that is still around is a tree somebody has not finished
-  with, or a Peer that never got to it — the Human's to prune, not yours.
+- leftover trees: `git worktree list` before you close; name any `.worktrees/*`
+  still there with its branch (Peers remove their own; pruning is the Human's).
 
 Never merge or deploy yourself — that decision belongs to Human.
 
@@ -914,14 +945,12 @@ TASK_BODY_END
 every authority-bearing follow-up, or the extension falls back to no valid brief
 at all, which grants nothing — browser included.
 
-PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
-extension permits is exactly
-`git push -u origin HEAD:refs/heads/agent/<TASK_ID>` (no other remote,
-branch, flag, deletion or chained command; force-push in any spelling —
-`-f`, `-uf`, `-fu`, `--force*`, `+refspec` — is always blocked). Task
-branches therefore MUST be named `agent/<TASK_ID>`. Branch protection on
-the shared remote stays mandatory; the extension is a guard, not the full
-security boundary.
+PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the one form is
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally with a single
+`-C <path>` for a worktree (an unquoted path). Every other remote, branch,
+option, deletion or chain is blocked, and force-push in any spelling. Task
+branches MUST be named `agent/<TASK_ID>`. Branch protection on the remote stays
+mandatory; the extension is a guard, not the security boundary.
 
 The brief carries authority and scope, never routing. There is no model,
 provider, thinking, host, workspace or agent field in it: those are parameters
@@ -945,18 +974,18 @@ Dispositions: `repository-scout`, `documentation-researcher`,
 of accepting a deliverable, so your own context is not spent on comparison —
 see step 6 of Review, and `templates/TASK_BRIEF_V3.md` for the standard body.
 
-A brief must not smuggle in a verdict. Give the Peer the objective,
-constraints and evidence — not the answer, and mark which of your constraints
-are requirements and which are choices you made (`MUST HOLD` / `ALREADY DECIDED`
-in the template). Peer has the right to `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`,
-or `BLOCKED`, sent as the `reopen` / `dependency` / `blocked` kinds.
+A brief must not smuggle in a verdict: give the Peer the objective, constraints
+and evidence, not the answer, and mark which constraints are requirements and
+which are choices you made (`MUST HOLD` / `ALREADY DECIDED`). The Peer has the
+right to `REOPEN_REQUEST`, `DEPENDENCY_REQUEST` or `BLOCKED` (kinds `reopen` /
+`dependency` / `blocked`).
 
 **Write the body as a person writing to a colleague.** The authority block is
-the one machine-read part; everything after it is you talking. Say what you need
-and why, what you already know, what to leave alone and what you would like
-back, in plain sentences addressed to the Peer — not a form with codes the Peer
-has to decode. The same goes for anything you send afterwards (a correction, an
-answer to its question): reply the way you would to a teammate who asked you.
+the one machine-read part; the rest is you talking: what you need and why, what
+you know, what to leave alone, what you want back — plain sentences, not a form
+of codes. Corrections and answers read the same way. OBJECTIVE is the outcome,
+not the change you expect; MUST HOLD holds the seam contract and any transitional
+state ("Splitting into tasks"), nothing about the insides of `OWNED_SCOPE`.
 
 ## Peer output contract
 

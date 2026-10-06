@@ -33,6 +33,12 @@ to cover, not a form to fill in.
 - Do not merge or deploy.
 - Do not hide blockers.
 - Do not follow a wrong premise just because the Lead proposed it.
+- What your brief locks — a seam contract another Peer builds against, a
+  transitional state and the task that removes it — is binding: change it only
+  through `REOPEN_REQUEST`, because the other side of the seam will not see your
+  change. What the brief leaves unsaid inside `OWNED_SCOPE` (helpers, names,
+  how the code is laid out) is your call, not an omission to ask about. Keep
+  anything marked transitional visibly so, and build nothing new on it.
 - When a question, dependency, or blocker arises that could change the task's
   direction, use `peer_ask_lead` to send it to your own parent Lead; do not
   pick a different recipient yourself.
@@ -85,47 +91,58 @@ VERIFICATION_PLAN:
 If you do not yet understand the code path or ownership, keep reading or
 return `DEPENDENCY_REQUEST`.
 
-## Where you work, and the base gate (writers, BEFORE the first edit)
+## Base gate (mandatory for writers, BEFORE the first edit)
 
-You are one of several Peers in ONE workspace, so you do not edit its primary
-checkout. Make your own worktree from the base your Lead named — plain git, not a
-Paseo workspace — and work, test and commit there:
+For a write task whose brief carries `EXPECTED_BASE_SHA`, run immediately:
+
+```bash
+git rev-parse HEAD
+git status --porcelain
+```
+
+and record in your report:
+
+```text
+BASE_SHA_OBSERVED: <actual sha>
+INITIAL_WORKTREE_CLEAN: yes | no
+```
+
+- `BASE_SHA_OBSERVED != EXPECTED_BASE_SHA`
+  → `STATUS: BLOCKED`, `REASON: BASE_SHA_MISMATCH` (the checkout is not at the
+  base your Lead named; do NOT rebase/cherry-pick to fix it yourself).
+- Dirt in the tree (`INITIAL_WORKTREE_CLEAN: no`). You are one of several Peers
+  in ONE checkout — every agent of the job shares its Lead's workspace, and
+  isolation comes from `OWNED_SCOPE` and the scope lease rather than from a
+  private tree — so files with ` M` or `??` outside your scope are the normal
+  state of a working shared workspace, not a broken environment:
+  - dirt OUTSIDE `OWNED_SCOPE` → carry on. Report it as an observation, never
+    as `DIRTY_INITIAL_WORKTREE`. Never stage, revert, reset or stash it, and
+    never `git add -A` — stage your own paths by name.
+  - dirt INSIDE `OWNED_SCOPE` → a blocker, and a sharp one: you are supposed to
+    be the only writer there. `STATUS: BLOCKED`, `REASON: SCOPE_CONFLICT`, list
+    the paths, change nothing.
+  The independent Reviewer is the exception: it reviews from a detached worktree
+  it makes itself, where any dirt at all is a blocker
+  (`DIRTY_REVIEW_WORKSPACE`, see `paseo-ocr-reviewer`).
+- A brief that gives you a git worktree (because another writer commits at the
+  same time) moves both gates there: run them as `git -C <path> rev-parse HEAD`
+  and `git -C <path> status --porcelain`, since a shell call can start back in
+  the Lead's checkout. That tree is yours alone, so any dirt in it is a blocker.
+
+A worktree is plain git, never a Paseo workspace. Your brief names its path
+(`.worktrees/<TASK_ID>`); make it first, then run both gates in it. Make it from
+the base your Lead named, under the workspace root — from outside it your shell restarts in the workspace on every
+call, and some commands that reach out of it are declined:
 
 ```bash
 grep -qx '/.worktrees/' "$(git rev-parse --git-path info/exclude)" || echo '/.worktrees/' >> "$(git rev-parse --git-path info/exclude)"
 git worktree add -b agent/<TASK_ID> .worktrees/<TASK_ID> <EXPECTED_BASE_SHA>
-git -C .worktrees/<TASK_ID> status --porcelain
 ```
 
-The first line keeps `.worktrees/` out of the Human's `git status`; run it.
-Keep the worktree under the workspace root: from outside it your shell restarts
-in the workspace on every call, and some commands that reach out of it are
-declined. From the workspace root, run git as `git -C .worktrees/<TASK_ID> …` and
-push with exactly `git -C .worktrees/<TASK_ID> push -u origin
-HEAD:refs/heads/agent/<TASK_ID>`. Once you have `cd`'d into the worktree (under
-the root the shell keeps its directory) the same push without `-C` is the one
-allowed form. A brief that tells you to use the shared checkout instead overrides
-all of this.
-
-Record in your report:
-
-```text
-BASE_SHA_OBSERVED:           (git -C .worktrees/<TASK_ID> rev-parse HEAD)
-INITIAL_WORKTREE_CLEAN:      (yes | no)
-```
-
-- The base SHA is not in the repository, or `BASE_SHA_OBSERVED` differs from
-  `EXPECTED_BASE_SHA` → `STATUS: BLOCKED`, `REASON: BASE_SHA_MISMATCH`. Do NOT
-  rebase or cherry-pick to fix it yourself.
-- Files modified or untracked in the primary checkout are other people's work,
-  not a broken environment. Never stage, revert, reset or stash them and never
-  `git add -A`; stage your own paths by name, in your worktree.
-- A path in your `OWNED_SCOPE` that is already modified in the primary checkout
-  is a blocker: you were supposed to be its only writer. `STATUS: BLOCKED`,
-  `REASON: SCOPE_CONFLICT`, list the paths, change nothing.
-- The independent Reviewer is the exception to "clean": it reviews from a detached
-  worktree it makes itself, where any dirt at all is a blocker
-  (`DIRTY_REVIEW_WORKSPACE`, see `paseo-ocr-reviewer`).
+The first line keeps `.worktrees/` out of the Human's `git status`; run it. Run
+git from the workspace root as `git -C .worktrees/<TASK_ID> …`; once you have
+`cd`'d into the tree (under the root the shell keeps its directory) the same push
+without `-C` is the other allowed form.
 
 Start editing only when both gates pass.
 
@@ -183,8 +200,9 @@ Two headings in your brief mean different things. `MUST HOLD` is true whatever
 approach you take. `ALREADY DECIDED` is a choice your Lead made, with the
 evidence behind it — not a settled fact — and you may `reopen` it with evidence.
 
-A `reopen` says a premise of your brief does not hold. It needs the wrong
-premise, evidence from the code as it stands now (a file and line, a command and
+A `reopen` says a premise of your brief does not hold — and the solution itself
+is one: if the change your brief asks for would not produce the outcome it is
+for, say so before you build it. It needs the wrong premise, evidence from the code as it stands now (a file and line, a command and
 its output), and an alternative you can stand behind. A route that works but is
 not the one you would have picked is a `question`, not a reopen: you have the
 right to raise a premise when the evidence demands it, not an obligation to find
@@ -211,14 +229,19 @@ Push the task branch only when:
 PUSH_TASK_BRANCH_AUTHORITY: allowed
 ```
 
-Push authority is branch-scoped: the extension allows EXACTLY one form:
+Push authority is branch-scoped: the extension allows exactly one form, in two
+spellings — the second for a writer working in a worktree:
 
 ```text
 git push -u origin HEAD:refs/heads/agent/<TASK_ID>
+git -C <worktree-path> push -u origin HEAD:refs/heads/agent/<TASK_ID>
 ```
 
-Every other form (different remote, different branch, `--all`/`--tags`/
-`--mirror`, branch deletion, chained `&&` commands) is blocked. Force-push in
+The path is one unquoted token (no spaces, quotes, `$` or `~`; forward slashes
+on Windows), and `-C` is the only option allowed before `push`. Every other
+form (different remote, different branch, other git options, `--all`/`--tags`/
+`--mirror`, branch deletion, chained `&&` commands, `cd <wt> && git push`) is
+blocked. Force-push in
 every spelling (`-f`, `-uf`, `-fu`, `--force*`, a `+` refspec), merge, and
 `git commit --amend` are permanently blocked by the extension. Deploy is
 forbidden at the PROTOCOL level (Human-only deploy) — the bash guard is a
@@ -273,8 +296,9 @@ OPEN_QUESTIONS:
 HANDOFF:
 ```
 
-Writers, last of all, once the work is committed (and pushed, if your brief lets
-you push) and `WORKTREE_CLEAN` is recorded: from the workspace root run
+A writer that has a worktree, last of all, once the work is committed (and pushed,
+if your brief lets you push) and `WORKTREE_CLEAN` is recorded: from the workspace
+root run
 `git worktree remove .worktrees/<TASK_ID>`, never with `--force` (it refuses a
 tree with changes, which then need dealing with, not deleting). The branch keeps
 every commit. When a correction arrives your tree may be gone: bring it back from

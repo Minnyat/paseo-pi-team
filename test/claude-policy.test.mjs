@@ -155,8 +155,6 @@ assert.equal(
 	"the same push from the writer's own worktree, by relative path",
 );
 for (const command of [
-	"git -C /tmp/other push -u origin HEAD:refs/heads/agent/T-100",
-	"git -C ../other push -u origin HEAD:refs/heads/agent/T-100",
 	"cd .worktrees/T-100 && git push -u origin HEAD:refs/heads/agent/T-100",
 ]) {
 	assert.match(
@@ -168,6 +166,26 @@ for (const command of [
 assert.match(
 	decide("peer", "Bash", { command: "git push -u origin HEAD:refs/heads/main" }, writeBrief) ?? "",
 	/branch-scoped/,
+);
+assert.equal(
+	decide(
+		"peer",
+		"Bash",
+		{ command: "git -C ../billing-lite-wt-T-100 push -u origin HEAD:refs/heads/agent/T-100" },
+		writeBrief,
+	),
+	null,
+	"the same push from a worktree, spelled with one -C, is allowed on Claude too",
+);
+assert.match(
+	decide(
+		"peer",
+		"Bash",
+		{ command: 'git -C "$(git push origin :main)" push -u origin HEAD:refs/heads/agent/T-100' },
+		writeBrief,
+	) ?? "",
+	/branch-scoped/,
+	"a -C path the shell would expand is refused",
 );
 assert.match(
 	decide("peer", "Bash", { command: "git push --force origin HEAD:refs/heads/agent/T-100" }, writeBrief) ?? "",
