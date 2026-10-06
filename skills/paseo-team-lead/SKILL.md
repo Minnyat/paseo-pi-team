@@ -80,6 +80,12 @@ one side — its rollout flag, a helper name the Human asked for — goes outsid
 it, in that side's brief, attributed to whoever asked. Inside, it reads as
 shared and frozen, and the two copies stop being identical.
 
+Writers that commit at the same time cannot share one checkout: it has one
+HEAD. Give each its own `git worktree` on `agent/<TASK_ID>` and name the path in
+its brief — a git worktree inside your workspace, like the Reviewer's, never a
+Paseo workspace. Its shell may start back in your checkout, so the base gate and
+the push run as `git -C <path> …`; the push guard accepts exactly that spelling.
+
 ## Accessing Paseo tools
 
 Paseo tools are not separate tools in the prompt — they are reached through the
@@ -232,8 +238,9 @@ This is the exact failure mode the cluster config exists to prevent.
    `baseBranch`, `refName` or `githubPrNumber`. Each of those is Paseo's way of
    minting a NEW workspace or detaching the agent, and a Lead that used them
    left a trail of workspaces nobody could tell apart.
-   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0),
-     not by a tree of its own: one writer per scope, enforced before it exists.
+   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0):
+     one writer per scope, enforced before it exists. Writers committing in
+     parallel each add a git worktree ("Splitting into tasks").
    - The **independent Reviewer** still reviews a detached checkout of the exact
      candidate SHA, and still never touches the Engineer's tree — it makes that
      checkout itself with `git worktree add --detach <path> <candidate-sha>`
@@ -919,14 +926,12 @@ brief at all, which grants nothing (browser included). It never grants Paseo
 orchestration or unrelated MCP servers, even though Browser Control shares a
 server with `create_agent`.
 
-PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
-extension permits is exactly
-`git push -u origin HEAD:refs/heads/agent/<TASK_ID>` (no other remote,
-branch, flag, deletion or chained command; force-push in any spelling —
-`-f`, `-uf`, `-fu`, `--force*`, `+refspec` — is always blocked). Task
-branches therefore MUST be named `agent/<TASK_ID>`. Branch protection on
-the shared remote stays mandatory; the extension is a guard, not the full
-security boundary.
+PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the one form is
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally with a single
+`-C <path>` for a worktree (an unquoted path). Every other remote, branch,
+option, deletion or chain is blocked, and force-push in any spelling. Task
+branches MUST be named `agent/<TASK_ID>`. Branch protection on the remote stays
+mandatory; the extension is a guard, not the security boundary.
 
 The brief carries authority and scope, never routing. There is no model,
 provider, thinking, host, workspace or agent field in it: those are parameters

@@ -11,6 +11,9 @@ other Peer's brief, and two paraphrases of a contract are two contracts.
 Everything behind the seam (helpers, names, how the rows are produced, how the
 button is wired) is left to the Peer that owns it.
 
+Both writers commit at the same time, and one checkout has one HEAD, so each
+gets its own git worktree inside the Lead's workspace, named in its brief.
+
 ## T-11 — the server half
 
 ```text
@@ -61,6 +64,11 @@ any of it looks wrong, send me a REOPEN_REQUEST rather than changing it:
 Everything behind it is yours: how you query, whether you stream, where the
 helper lives and what it is called. No transitional state is planned, so
 please do not leave one (no feature flag, no second route).
+
+WHERE TO WORK:
+T-12 commits at the same time, so work in your own worktree:
+`git worktree add -b agent/T-11 ../billing-wt-T-11 <base-sha>`. Your shell may
+start back in my checkout, so run git there as `git -C ../billing-wt-T-11 …`.
 
 REQUIRED HANDOFF:
 The test command and its result, CANDIDATE_SHA, a clean `git status`, and
@@ -119,6 +127,11 @@ Because the endpoint is not there yet, stub it inside your own test files only.
 A mock route or fixture server shipped in the app would be a transitional state
 nobody planned to remove. How the range picker, the button and the error
 messages look and are wired is your call.
+
+WHERE TO WORK:
+T-11 commits at the same time, so work in your own worktree:
+`git worktree add -b agent/T-12 ../billing-wt-T-12 <base-sha>`. Your shell may
+start back in my checkout, so run git there as `git -C ../billing-wt-T-12 …`.
 
 REQUIRED HANDOFF:
 The test command and its result, CANDIDATE_SHA, a clean `git status`, and

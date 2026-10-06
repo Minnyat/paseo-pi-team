@@ -91,19 +91,25 @@ Field semantics:
 - `CANDIDATE_SHA` in the output is meaningful only with
   `COMMIT_AUTHORITY: allowed`.
 - `PUSH_TASK_BRANCH_AUTHORITY: allowed` is branch-scoped: the extension allows
-  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` — the writer's
+  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or the same
+  command with one leading `-C <worktree-path>` (an unquoted path) — the writer's
   task branch MUST be named `agent/<TASK_ID>`. Every other push form
-  (different remote/branch, `--all`/`--tags`/`--mirror`, deletion, chained
-  commands) is blocked; force-push in every spelling is always blocked.
+  (different remote/branch, other git options, `--all`/`--tags`/`--mirror`,
+  deletion, chained commands) is blocked; force-push in every spelling is always
+  blocked.
 
 ## One workspace per job: another Peer's edits are not your environment breaking
 
 Every Peer of one job runs in the workspace its Lead was started in; `create_agent`
 puts it there when `workspaceId` is left out. Isolation does not come from a tree
 of the Peer's own — it comes from `OWNED_SCOPE` plus the scope lease: one writer
-per scope, enforced before the writer is even created. The one private tree is the
-independent Reviewer's: it makes a detached `git worktree add` at the exact
-candidate SHA itself, inside the shared workspace.
+per scope, enforced before the writer is even created. The private trees are git
+worktrees inside the shared workspace, never Paseo workspaces: the independent
+Reviewer's, a detached `git worktree add` at the exact candidate SHA it makes
+itself, and one per writer when two writers commit at the same time (a checkout
+has one HEAD). Name that writer's path in its brief and tell it to run its base
+gate and push as `git -C <path> …`; the paragraph below is for writers without
+one.
 
 So `git status` legitimately shows other people's work. A Peer that reads
 ` M docs/OTHER.md` or `?? notes/other-peer.md` and reports

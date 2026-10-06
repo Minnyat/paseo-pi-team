@@ -121,7 +121,8 @@ CANDIDATE_REF  <repository-url>@<commit-sha>
 reviewer nằm hai host — vì vậy cross-host review **bắt buộc**
 `COMMIT_AUTHORITY: allowed` + `PUSH_TASK_BRANCH_AUTHORITY: allowed` trong
 brief của Engineer (push authority là branch-scoped: chỉ
-`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`), và reviewer dùng fresh
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, hoặc cùng lệnh đó với một
+`-C <worktree-path>` đứng trước), và reviewer dùng fresh
 clone/fetch tới đúng SHA.
 
 ## Failure & recovery

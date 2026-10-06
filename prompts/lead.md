@@ -133,9 +133,10 @@ implementation still goes to an Engineer Peer.
      scope your writer actually needs, or you will block Leads you did not
      mean to.
    - Read-only Peers (scouts, researchers, reviewers) need no lease and are
-     never gated; they share a tree by design. The independent reviewer is the
-     one with a private tree: it makes a detached `git worktree add` at the
-     exact SHA itself, inside your workspace.
+     never gated; they share a tree by design. The independent reviewer has a
+     private tree: it makes a detached `git worktree add` at the exact SHA
+     itself, inside your workspace. So does each writer that commits while
+     another one does — a checkout has one HEAD (skill: "Splitting into tasks").
    - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
      not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**

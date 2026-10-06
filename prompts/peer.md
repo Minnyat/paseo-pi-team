@@ -124,6 +124,10 @@ INITIAL_WORKTREE_CLEAN: yes | no
   The independent Reviewer is the exception: it reviews from a detached worktree
   it makes itself, where any dirt at all is a blocker
   (`DIRTY_REVIEW_WORKSPACE`, see `paseo-ocr-reviewer`).
+- A brief that gives you a git worktree (because another writer commits at the
+  same time) moves both gates there: run them as `git -C <path> rev-parse HEAD`
+  and `git -C <path> status --porcelain`, since a shell call can start back in
+  the Lead's checkout. That tree is yours alone, so any dirt in it is a blocker.
 
 Start editing only when both gates pass.
 
@@ -209,14 +213,19 @@ Push the task branch only when:
 PUSH_TASK_BRANCH_AUTHORITY: allowed
 ```
 
-Push authority is branch-scoped: the extension allows EXACTLY one form:
+Push authority is branch-scoped: the extension allows exactly one form, in two
+spellings — the second for a writer working in a worktree:
 
 ```text
 git push -u origin HEAD:refs/heads/agent/<TASK_ID>
+git -C <worktree-path> push -u origin HEAD:refs/heads/agent/<TASK_ID>
 ```
 
-Every other form (different remote, different branch, `--all`/`--tags`/
-`--mirror`, branch deletion, chained `&&` commands) is blocked. Force-push in
+The path is one unquoted token (no spaces, quotes, `$` or `~`; forward slashes
+on Windows), and `-C` is the only option allowed before `push`. Every other
+form (different remote, different branch, other git options, `--all`/`--tags`/
+`--mirror`, branch deletion, chained `&&` commands, `cd <wt> && git push`) is
+blocked. Force-push in
 every spelling (`-f`, `-uf`, `-fu`, `--force*`, a `+` refspec), merge, and
 `git commit --amend` are permanently blocked by the extension. Deploy is
 forbidden at the PROTOCOL level (Human-only deploy) — the bash guard is a
