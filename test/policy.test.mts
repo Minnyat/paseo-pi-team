@@ -564,6 +564,33 @@ for (const [command, why] of [
 		`non-exact push form blocked (${why})`,
 	);
 }
+// A writer in its own worktree pushes with `git -C <relative path>`: the shell
+// of a seat that has left the workspace root starts over in it on every call,
+// and `cd <dir> && git push` is a chain. The path may only name a directory
+// inside the workspace, and the refspec still pins the task's own branch.
+assert.equal(
+	gitAuthorityBlockReason("git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-101", fullAuth, "T-101"),
+	null,
+	"exact push from a relative worktree path is allowed",
+);
+for (const [command, why] of [
+	["git -C /tmp/elsewhere push -u origin HEAD:refs/heads/agent/T-101", "absolute path"],
+	["git -C ~/other push -u origin HEAD:refs/heads/agent/T-101", "home-relative path"],
+	["git -C ../sibling push -u origin HEAD:refs/heads/agent/T-101", "climbs out of the workspace"],
+	["git -C .worktrees/../../x push -u origin HEAD:refs/heads/agent/T-101", "climbs mid-path"],
+	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/main", "right path, wrong branch"],
+	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-999", "right path, someone else's branch"],
+	["git -C .worktrees/T-101 push origin HEAD:refs/heads/agent/T-101", "missing -u"],
+	["git -C .worktrees/T-101 push -u origin HEAD:refs/heads/agent/T-101 && ls", "chained after the path form"],
+	["git -C .worktrees/T-101 push --force -u origin HEAD:refs/heads/agent/T-101", "force"],
+	["git -C '.worktrees/T 101' push -u origin HEAD:refs/heads/agent/T-101", "quoted path"],
+	["git -C $(pwd) push -u origin HEAD:refs/heads/agent/T-101", "shell expansion in the path"],
+] as const) {
+	assert.ok(
+		gitAuthorityBlockReason(command, fullAuth, "T-101"),
+		`-C push form blocked (${why})`,
+	);
+}
 // Exact form but brief has no TASK_ID → unverifiable scope → blocked.
 assert.match(
 	gitAuthorityBlockReason(EXPECTED_PUSH, fullAuth) ?? "",
@@ -601,6 +628,27 @@ assert.match(
 	gitAuthorityBlockReason("git push origin task/t-1", noAuth) ?? "",
 	/PUSH_TASK_BRANCH_AUTHORITY/,
 );
+// The read-only `merge-*` plumbing is not a merge. A Reviewer needs merge-base
+// to find where a candidate branched, and was refused for it in a live run.
+for (const command of [
+	"git merge-base main HEAD",
+	"git merge-base --is-ancestor abc123 def456",
+	"git -C .worktrees/review-T-101 merge-base main HEAD",
+	"git merge-tree --write-tree main HEAD",
+]) {
+	assert.equal(
+		gitAuthorityBlockReason(command, noAuth),
+		null,
+		`${command} changes nothing and must not need MERGE_AUTHORITY`,
+	);
+}
+for (const command of ["git merge main", "git -C .worktrees/T-101 merge main", "git fetch && git merge origin/main"]) {
+	assert.match(
+		gitAuthorityBlockReason(command, noAuth) ?? "",
+		/MERGE_AUTHORITY/,
+		`${command} is still a merge`,
+	);
+}
 assert.match(
 	gitAuthorityBlockReason("git merge main", fullAuth, "T-101") ?? "",
 	/MERGE_AUTHORITY/,

@@ -334,7 +334,7 @@ you may create an agent:
   `PASEO_TEAM_TOPOLOGY=multi` it must be a domain INSIDE your own
   `team.domain` (see *Jurisdiction*), or the call is blocked;
 - `settings.thinkingOptionId` is MANDATORY — routed from
-  `~/.paseo-pi-team/cluster-routing.local.json` (never drop model/thinking and
+  `cluster-routing.local.json` in the pack's config directory (never drop model/thinking and
   let the daemon choose);
 - `title` and `initialPrompt` are required, and nothing places the successor
   anywhere: no `workspaceId`, `workspace`, `relationship` or `cwd`. It lands in

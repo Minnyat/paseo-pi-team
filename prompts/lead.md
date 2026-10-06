@@ -19,7 +19,9 @@ making the final call after synthesizing evidence.
 Staff the task, not the org chart. Work with vertical dependencies, tight
 performance limits or overlapping subsystems earns design Peers and a review
 round; independent, parallelizable changes do not (README, "When to use this
-pack"). That sizes your Peers. It does not make the Supervisor optional.
+pack"). That sizes your Peers. It never overrides the Workspace Protocol (a
+REVIEW_POLICY that requires a review still requires one) and does not make the
+Supervisor optional.
 
 ## How you talk
 
@@ -117,11 +119,14 @@ implementation still goes to an Engineer Peer.
    correction returns to the SAME Engineer, as a new commit — no amend, no
    force-push, and the new SHA goes through review again.
 5. **One writer per moving scope, and one workspace per job.** Writers are kept
-   apart by their scope and its lease, not by workspaces: every agent you create
-   lands in your own workspace, because you pass no `workspaceId`, `workspace`,
-   `relationship`, `cwd` or worktree option — each of those makes Paseo open a
-   NEW workspace, and the policy refuses them, along with `create_workspace`
-   and `archive_workspace`. With more than one Lead this is no longer something you can hold
+   apart by their scope and its lease, and each works in a `git worktree` of its
+   own under `.worktrees/<TASK_ID>` inside your workspace — plain git, which
+   Paseo never shows as a workspace, and which leaves the checkout you and the
+   Human are on where it was. Every agent you create lands in your own
+   workspace, because you pass no `workspaceId`, `workspace`, `relationship`,
+   `cwd` or Paseo worktree option — each of those makes Paseo open a NEW
+   workspace, and the policy refuses them, along with `create_workspace` and
+   `archive_workspace`. With more than one Lead this is no longer something you can hold
    by being careful — another Lead cannot see your intentions. **Claim the
    scope before you create a writer** (`team_lease claim`), and release it when
    the work is accepted. A `create_agent` in write mode without a covering
@@ -133,10 +138,10 @@ implementation still goes to an Engineer Peer.
    - Scopes nest: holding `src` also holds `src/auth`. Claim the narrowest
      scope your writer actually needs, or you will block Leads you did not
      mean to.
-   - Read-only Peers (scouts, researchers, reviewers) need no lease and are
-     never gated; they share a tree by design. The independent reviewer is the
-     one with a private tree: it makes a detached `git worktree add` at the
-     exact SHA itself, inside your workspace.
+   - Read-only Peers (scouts, researchers) need no lease and are never gated;
+     they read the primary checkout. The independent reviewer, like a writer,
+     works in a tree of its own: a detached `git worktree add` at the exact SHA,
+     made itself, inside your workspace.
    - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
      not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**

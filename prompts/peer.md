@@ -85,38 +85,46 @@ VERIFICATION_PLAN:
 If you do not yet understand the code path or ownership, keep reading or
 return `DEPENDENCY_REQUEST`.
 
-## Base gate (mandatory for writers, BEFORE the first edit)
+## Where you work, and the base gate (writers, BEFORE the first edit)
 
-For a write task whose brief carries `EXPECTED_BASE_SHA`, run immediately:
+You are one of several Peers in ONE workspace, so you do not edit its primary
+checkout. Make your own worktree from the base your Lead named — plain git, not a
+Paseo workspace — and work, test and commit there:
 
 ```bash
-git rev-parse HEAD
-git status --porcelain
+grep -qx '/.worktrees/' "$(git rev-parse --git-path info/exclude)" || echo '/.worktrees/' >> "$(git rev-parse --git-path info/exclude)"
+git worktree add -b agent/<TASK_ID> .worktrees/<TASK_ID> <EXPECTED_BASE_SHA>
+git -C .worktrees/<TASK_ID> status --porcelain
 ```
 
-and record in your report:
+The first line keeps `.worktrees/` out of the Human's `git status`; run it.
+Keep the worktree under the workspace root: from outside it your shell restarts
+in the workspace on every call, and some commands that reach out of it are
+declined. From the workspace root, run git as `git -C .worktrees/<TASK_ID> …` and
+push with exactly `git -C .worktrees/<TASK_ID> push -u origin
+HEAD:refs/heads/agent/<TASK_ID>`. Once you have `cd`'d into the worktree (under
+the root the shell keeps its directory) the same push without `-C` is the one
+allowed form. A brief that tells you to use the shared checkout instead overrides
+all of this.
+
+Record in your report:
 
 ```text
-BASE_SHA_OBSERVED: <actual sha>
-INITIAL_WORKTREE_CLEAN: yes | no
+BASE_SHA_OBSERVED:           (git -C .worktrees/<TASK_ID> rev-parse HEAD)
+INITIAL_WORKTREE_CLEAN:      (yes | no)
 ```
 
-- `BASE_SHA_OBSERVED != EXPECTED_BASE_SHA`
-  → `STATUS: BLOCKED`, `REASON: BASE_SHA_MISMATCH` (the checkout is not at the
-  base your Lead named; do NOT rebase/cherry-pick to fix it yourself).
-- Dirt in the tree (`INITIAL_WORKTREE_CLEAN: no`). You are one of several Peers
-  in ONE checkout — every agent of the job shares its Lead's workspace, and
-  isolation comes from `OWNED_SCOPE` and the scope lease rather than from a
-  private tree — so files with ` M` or `??` outside your scope are the normal
-  state of a working shared workspace, not a broken environment:
-  - dirt OUTSIDE `OWNED_SCOPE` → carry on. Report it as an observation, never
-    as `DIRTY_INITIAL_WORKTREE`. Never stage, revert, reset or stash it, and
-    never `git add -A` — stage your own paths by name.
-  - dirt INSIDE `OWNED_SCOPE` → a blocker, and a sharp one: you are supposed to
-    be the only writer there. `STATUS: BLOCKED`, `REASON: SCOPE_CONFLICT`, list
-    the paths, change nothing.
-  The independent Reviewer is the exception: it reviews from a detached worktree
-  it makes itself, where any dirt at all is a blocker
+- The base SHA is not in the repository, or `BASE_SHA_OBSERVED` differs from
+  `EXPECTED_BASE_SHA` → `STATUS: BLOCKED`, `REASON: BASE_SHA_MISMATCH`. Do NOT
+  rebase or cherry-pick to fix it yourself.
+- Files modified or untracked in the primary checkout are other people's work,
+  not a broken environment. Never stage, revert, reset or stash them and never
+  `git add -A`; stage your own paths by name, in your worktree.
+- A path in your `OWNED_SCOPE` that is already modified in the primary checkout
+  is a blocker: you were supposed to be its only writer. `STATUS: BLOCKED`,
+  `REASON: SCOPE_CONFLICT`, list the paths, change nothing.
+- The independent Reviewer is the exception to "clean": it reviews from a detached
+  worktree it makes itself, where any dirt at all is a blocker
   (`DIRTY_REVIEW_WORKSPACE`, see `paseo-ocr-reviewer`).
 
 Start editing only when both gates pass.

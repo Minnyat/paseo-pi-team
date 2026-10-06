@@ -98,37 +98,39 @@ Field semantics:
   (different remote/branch, `--all`/`--tags`/`--mirror`, deletion, chained
   commands) is blocked; force-push in every spelling is always blocked.
 
-## One workspace per job: another Peer's edits are not your environment breaking
+## One workspace per job, one worktree per writer
 
 Every Peer of one job runs in the workspace its Lead was started in; `create_agent`
-puts it there when `workspaceId` is left out. Isolation does not come from a tree
-of the Peer's own — it comes from `OWNED_SCOPE` plus the scope lease: one writer
-per scope, enforced before the writer is even created. The one private tree is the
-independent Reviewer's: it makes a detached `git worktree add` at the exact
-candidate SHA itself, inside the shared workspace.
+puts it there when `workspaceId` is left out. A writer does not edit that
+workspace's primary checkout: it makes its own `git worktree` under
+`.worktrees/<TASK_ID>` — plain git, so Paseo shows nothing new — and the checkout
+you and the Human are on stays where it was. Who may touch which files is still
+`OWNED_SCOPE` plus the scope lease (one writer per scope, enforced before the
+writer is even created); the worktree decides whose HEAD, index and branch a
+commit lands on. The independent Reviewer does the same, detached at the
+candidate SHA.
 
-So `git status` legitimately shows other people's work. A Peer that reads
-` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
-`BLOCKED: DIRTY_INITIAL_WORKTREE` has misread a working system as a broken one,
-and the Lead pays a full round trip to tell it so. Say so in the task body:
+The Peer has no other source for the commands, so put them in the body, in your
+own words:
 
 ```text
-Other Peers are working in this same checkout right now, so `git status` WILL
-show files marked ` M` or `??` that are not yours. That is the design, not a
-dirty environment.
+Please don't work in the main checkout: other Peers share this workspace. Make
+your own worktree from the base and do everything there (the first line keeps it
+out of the Human's `git status`):
 
-- Paths OUTSIDE your OWNED_SCOPE, modified or untracked: NORMAL. Do not report
-  DIRTY_INITIAL_WORKTREE, do not stage them, do not revert, reset or stash
-  them, and do not `git add -A`. Stage your own paths by name.
-- Paths INSIDE your OWNED_SCOPE that are already modified before you start:
-  NOT normal — you are supposed to be the only writer there. Report
-  `BLOCKED: SCOPE_CONFLICT` with the paths, and do not overwrite them.
+  grep -qx '/.worktrees/' "$(git rev-parse --git-path info/exclude)" || echo '/.worktrees/' >> "$(git rev-parse --git-path info/exclude)"
+  git worktree add -b agent/<TASK_ID> .worktrees/<TASK_ID> <EXPECTED_BASE_SHA>
+
+Keep it under the workspace root (a shell outside it restarts in the workspace on
+every call). Run git as `git -C .worktrees/<TASK_ID> …`; the push is exactly
+`git -C .worktrees/<TASK_ID> push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or
+the same without `-C` once you have `cd`'d into the worktree.
+Only touch your OWNED_SCOPE.
 ```
 
-The rule the Peer applies is the same one the lease already encodes: what makes
-a change yours is `OWNED_SCOPE`, not the state of the directory. The Reviewer is
-the exception, because it works in a worktree it made: there, any dirt at all is
-a blocker.
+A relative `-C` path inside the workspace is the one `-C` the push guard accepts.
+Files modified in the primary checkout belong to somebody else: what makes a
+change a Peer's is `OWNED_SCOPE`, not the state of a directory.
 
 ## Writing the body: one person talking to another
 

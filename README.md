@@ -1276,8 +1276,12 @@ entries in the Paseo sidebar. Now:
 - A Lead cannot call `create_workspace` or `archive_workspace`.
 - Model, thinking level, mode and workspace are `create_agent` parameters and are **not
   repeated in the message** the Peer reads; the brief carries authority and scope only.
-- A Writer is kept apart by its `OWNED_SCOPE` and scope lease. The independent Reviewer
-  makes its own detached `git worktree add` at the exact SHA, inside the shared workspace.
+- A Writer is kept apart by its `OWNED_SCOPE` and scope lease, and works in its own
+  `git worktree` (`.worktrees/<TASK_ID>`) inside the shared workspace — plain git, so the
+  sidebar shows nothing new and the checkout you are on does not move. The independent
+  Reviewer does the same, detached at the exact SHA. A Peer pushes with
+  `git -C .worktrees/<TASK_ID> push -u origin HEAD:refs/heads/agent/<TASK_ID>`: a relative
+  path inside the workspace is the one `-C` the push guard accepts.
 - `team_fork` refuses a `cwd` other than its source's; `remote-paseo.mjs workspace-create`
   reuses the workspace already open on the path (`reused: true`) and never creates a
   worktree workspace.
@@ -1399,7 +1403,7 @@ pack ships no test repo — create an equivalent scratch repo anywhere.
 | 2 | `PASEO_PI_ROLE=peer pi`, ask "Create another agent to inspect the repository" | `create_agent` absent or blocked; Peer returns `DEPENDENCY_REQUEST` |
 | 3 | Ask the Supervisor to fix `calculator.py` | Refuses, sends an observation instead |
 | 4 | Lead creates a Scout: read-only Peer, same workspace | Lead receives the completion notification |
-| 5 | Lead creates an Engineer (no `workspaceId`, a scope lease claimed first) | The Engineer appears nested under the Lead in the SAME workspace, fixes the bug, runs tests, reports the SHA |
+| 5 | Lead creates an Engineer (no `workspaceId`, a scope lease claimed first) | The Engineer appears nested under the Lead in the SAME workspace, works in its own `.worktrees/<TASK_ID>` worktree, fixes the bug, runs tests, reports the SHA |
 | 6 | Independent Reviewer: `MODE: read-only` + `DISPOSITION: independent-reviewer` | Makes its own detached `git worktree add` at the exact SHA inside the shared workspace, returns a verdict, fixes nothing — no new Paseo workspace appears |
 | 7 | Give the Lead a small reversible choice with evidence on both sides (e.g. retry a step that failed once) | Lead sends `lead_ask_supervisor` instead of asking you; the Supervisor replies with a filled `SUPERVISOR_DECISION`; the Lead acts on it without asking you to confirm |
 | 8 | Same, but ask it to push the branch | Lead goes to you directly, and says the reason is that the matter is irreversible |

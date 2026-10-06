@@ -166,6 +166,25 @@ assert.equal(runHook("pre-tool-use", { session_id: "s0", tool_name: "Write" }, b
 		assert.equal(dirname(path), stateDir, `${hostile} escaped to ${path}`);
 	}
 	assert.equal(dirname(sessionStatePath(undefined, baseEnv)), stateDir);
+
+	// One Claude session id, several seats. A daemon started from a shell that
+	// already carries CLAUDE_CODE_SESSION_ID gives every agent it spawns the same
+	// id; without the seat's own id in the file name they would share one file,
+	// each Peer's brief overwriting the last (seen in a live run: T-3 lost its
+	// COMMIT authority to its sibling's turn).
+	const a = { ...baseEnv, PASEO_AGENT_ID: "agent-a" };
+	const b = { ...baseEnv, PASEO_AGENT_ID: "agent-b" };
+	assert.notEqual(sessionStatePath("shared", a), sessionStatePath("shared", b));
+	assert.equal(dirname(sessionStatePath("shared", a)), stateDir);
+	assert.equal(
+		dirname(sessionStatePath("shared", { ...baseEnv, PASEO_AGENT_ID: "../../evil" })),
+		stateDir,
+		"a hostile agent id cannot leave the state directory either",
+	);
+	writeSessionState("shared", { updatedAt: new Date().toISOString(), role: "peer", marker: "A" }, a);
+	assert.equal(readSessionState("shared", b), null, "seat B must not see seat A's brief");
+	assert.equal(readSessionState("shared", a)?.marker, "A");
+	clearSessionState("shared", a);
 }
 
 // --- transcript fallback ------------------------------------------------------

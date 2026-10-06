@@ -109,8 +109,13 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
 2. Pick `HOST_ID` from the controller-local cluster routing file
-   `~/.paseo-pi-team/cluster-routing.local.json` (capability filter: writers
-   need `git-write`+`focused-test`; reviewers need `git-read`+`independent-review`).
+   `cluster-routing.local.json` in the pack's config directory
+   (`PST_TEAM_CONFIG_DIR` → `PASEO_TEAM_HOME` → an existing `~/.paseo-pi-team` →
+   `~/.paseo-team-orchestration`; `preflight.mjs` prints the one in use as
+   `team-config-dir`). Capability filter: writers need `git-write`+`focused-test`;
+   reviewers need `git-read`+`independent-review`. A file you cannot find or read
+   is `BLOCKED: HOST_ROUTE_UNAVAILABLE` — look in the other directory first, and
+   never fill the gap by choosing a model from `list_models`.
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
    run the resolver when the role pack repo is available:
@@ -193,12 +198,19 @@ This is the exact failure mode the cluster config exists to prevent.
    `baseBranch`, `refName` or `githubPrNumber`. Each of those is Paseo's way of
    minting a NEW workspace or detaching the agent, and a Lead that used them
    left a trail of workspaces nobody could tell apart.
-   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0),
-     not by a tree of its own: one writer per scope, enforced before it exists.
+   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0) —
+     one writer per scope, enforced before it exists — and works in a
+     `git worktree` of its own at `.worktrees/<TASK_ID>` inside your workspace
+     (plain git, so Paseo shows nothing new and the checkout you and the Human
+     are on never moves). Put the commands in its brief
+     (`templates/TASK_BRIEF_V3.md`). Keep it under the workspace root: from
+     outside it a shell restarts in the workspace on every call and some
+     commands are declined.
    - The **independent Reviewer** still reviews a detached checkout of the exact
      candidate SHA, and still never touches the Engineer's tree — it makes that
      checkout itself with `git worktree add --detach <path> <candidate-sha>`
-     inside your workspace and runs the wrapper against it. The wrapper checks
+     inside your workspace (`.worktrees/review-<TASK_ID>`) and runs the wrapper
+     against it. The wrapper checks
      the git fact (`REVIEW_WORKSPACE_NOT_WORKTREE`), not a Paseo workspace, so
      nothing about it needs a workspace of its own. If the Reviewer cannot make
      the worktree it reports `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — there is

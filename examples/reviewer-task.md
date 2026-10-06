@@ -55,7 +55,7 @@ QUESTIONS TO ANSWER:
 MUST HOLD:
 - Work in a fresh checkout of the assigned SHA — not the engineer's tree:
   git fetch origin agent/T-001
-  git worktree add --detach ../reviews/T-001-<short-sha> <candidate-sha>
+  git worktree add --detach .worktrees/review-T-001-<short-sha> <candidate-sha>
 - Verify `git rev-parse HEAD` equals `ASSIGNED_CANDIDATE_SHA` and
   `REVIEW_CANDIDATE_SHA` equals `ASSIGNED_CANDIDATE_SHA`; any missing or
   differing value is `BLOCKED: CANDIDATE_SHA_MISMATCH`.

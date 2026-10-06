@@ -3551,8 +3551,9 @@ export function clusterLabelBlockReason({
  *   - create_agent WITHOUT workspaceId puts the new seat in the caller's
  *     workspace, nested under the caller (createAgentParamsBlockReason holds the
  *     call to exactly that);
- *   - a Writer is kept apart by OWNED_SCOPE and the scope lease, not by a tree
- *     of its own;
+ *   - a Writer is kept apart by OWNED_SCOPE and the scope lease, and works in a
+ *     `git worktree` of its own (`.worktrees/<TASK_ID>`) inside the workspace —
+ *     plain git, which Paseo never shows as a workspace;
  *   - the independent Reviewer still reviews from a linked, detached git
  *     worktree at the exact candidate SHA — it makes that worktree itself with
  *     `git worktree add --detach`, INSIDE the shared workspace, and the runtime
@@ -3565,7 +3566,7 @@ export function clusterLabelBlockReason({
  */
 export function leadWorkspaceMutationBlockReason(target: string): string | null {
 	if (!matchesPaseoToolName(target, [...PASEO_TOOLS.workspaceMutation])) return null;
-	return `A Lead does not create or archive workspaces ("${target}" refused). Everything in one job shares the workspace you were started in: call create_agent WITHOUT workspaceId and the new seat lands in yours, nested under you. Isolate a Writer with OWNED_SCOPE and a scope lease; the independent Reviewer makes its own detached \`git worktree add\` at the candidate SHA inside this same workspace. If the job genuinely needs a different project, put that to the Human.`;
+	return `A Lead does not create or archive workspaces ("${target}" refused). Everything in one job shares the workspace you were started in: call create_agent WITHOUT workspaceId and the new seat lands in yours, nested under you. Isolate a Writer with OWNED_SCOPE, a scope lease and its own \`git worktree add\` under .worktrees/<TASK_ID> in this same workspace; the independent Reviewer makes its own detached one at the candidate SHA the same way. If the job genuinely needs a different project, put that to the Human.`;
 }
 
 /**
@@ -4382,9 +4383,16 @@ function detectForcePush(command: string): boolean {
  * be exactly agent/<TASK_ID> from the current brief — pushing any other
  * branch (main, a teammate's branch), other remotes, --all/--tags/--mirror
  * or deletions is structurally impossible in this form.
+ *
+ * `-C <path>` is the one addition, for a writer in its own worktree. A shell
+ * that has left the workspace root starts over in it on every call, so the
+ * writer cannot `cd` once and push bare, and `cd <dir> && git push` is a chain.
+ * The path is relative and cannot climb (no leading `/` or `~`, no `..`), so it
+ * can only name a directory inside the workspace; the refspec still pins the
+ * destination to the task's own branch.
  */
 const EXACT_PUSH_RE =
-	/^\s*git\s+push\s+-u\s+origin\s+HEAD:refs\/heads\/([A-Za-z0-9][A-Za-z0-9._/-]*)\s*$/;
+	/^\s*git\s+(?:-C\s+((?!\/)(?!~)(?!.*\.\.)[A-Za-z0-9._][A-Za-z0-9._/-]*)\s+)?push\s+-u\s+origin\s+HEAD:refs\/heads\/([A-Za-z0-9][A-Za-z0-9._/-]*)\s*$/;
 
 export function expectedTaskBranch(taskId: string | undefined): string | null {
 	const id = taskId?.trim();
@@ -4392,7 +4400,11 @@ export function expectedTaskBranch(taskId: string | undefined): string | null {
 	return `agent/${id}`;
 }
 
-const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b/i;
+// `merge` as a subcommand only. `\bmerge\b` also matched `merge-base`,
+// `merge-tree` and `merge-file`, which are read-only, and a Reviewer comparing a
+// candidate against its base (`git merge-base <base> <sha>`) was refused for a
+// merge it never made.
+const GIT_MERGE_RE = /\bgit\b[^|;&]*\bmerge\b(?![-.])/i;
 const GIT_AMEND_RE = /\bgit\b[^|;&]*\bcommit\b[^|;&]*--amend\b/i;
 
 export function gitAuthorityBlockReason(
@@ -4412,8 +4424,8 @@ export function gitAuthorityBlockReason(
 		}
 		const expected = expectedTaskBranch(taskId);
 		const match = command.match(EXACT_PUSH_RE);
-		if (expected === null || !match || match[1] !== expected) {
-			return `Push authority is branch-scoped: only "git push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" is allowed. Other branches/remotes, --all, --tags, --mirror, deletions and chained commands are blocked. Push first, run other commands separately.`;
+		if (expected === null || !match || match[2] !== expected) {
+			return `Push authority is branch-scoped: only "git push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" is allowed. Other branches/remotes, --all, --tags, --mirror, deletions and chained commands are blocked. From your worktree: "git -C .worktrees/<TASK_ID> push -u origin HEAD:refs/heads/${expected ?? "agent/<TASK_ID>"}" (relative path inside the workspace). Push first, run other commands separately.`;
 		}
 	}
 	if (GIT_COMMIT_RE.test(command) && !authority.commit) {

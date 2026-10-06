@@ -68,7 +68,7 @@ HOST_CAPABILITY_REQUIREMENTS:
 
 GIT_POLICY:
 ONE_WRITER_PER_MOVING_SCOPE: true
-WRITER_WORKTREE_REQUIRED: true
+WRITER_WORKTREE: .worktrees/<TASK_ID>   # inside the shared workspace; plain git, never a Paseo workspace
 TASK_BRANCH_PATTERN: agent/<task-id>
 FORCE_PUSH: denied
 PEER_MERGE: denied

@@ -685,7 +685,7 @@ export function buildArgv(command, opts, endpoint) {
 			if (isolation !== "local") {
 				throw new RemoteError(
 					"WORKSPACE_ISOLATION_REFUSED",
-					`--isolation must be "local" (got "${isolation}"): everything in one job shares one workspace. A Writer is kept apart by OWNED_SCOPE and a scope lease; the independent Reviewer makes its own detached \`git worktree add\` inside the shared workspace.`,
+					`--isolation must be "local" (got "${isolation}"): everything in one job shares one workspace. A Writer is kept apart by OWNED_SCOPE, a scope lease and its own \`git worktree add\` under .worktrees/<TASK_ID> inside the shared workspace; the independent Reviewer makes its own detached one the same way.`,
 					{ isolation },
 				);
 			}
