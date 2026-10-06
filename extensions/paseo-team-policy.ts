@@ -98,7 +98,7 @@ import {
 	sendAgentPromptTargetId,
 	supervisorAttribution,
 	supervisorSeats,
-	supervisorSeatsForSeating,
+	lookupSupervisorSeatsForSeating,
 	supervisorTurnNotice,
 	supervisorTurnVerdict,
 	teamTopology,
@@ -271,7 +271,9 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 		// them — so they are read for that call alone. A Supervisor's own
 		// recovery create_agent is held to its own watch instead.
 		if (role === "lead" && seatsSupervisor(extractCreateAgentArgs(input))) {
-			context.seats = supervisorSeatsForSeating(process.env, { cluster: context.cluster });
+			const lookup = lookupSupervisorSeatsForSeating(process.env, { cluster: context.cluster });
+			context.seats = lookup.seats;
+			context.seatsFault = lookup.fault;
 		}
 		if (role === "supervisor") context.selfWatch = selfWatch();
 	}

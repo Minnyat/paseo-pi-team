@@ -50,8 +50,10 @@ const {
 	normalizeCluster,
 	forkRouteDecision,
 	parseRoleProvider,
+	recoveryNotDelegatedReason,
 	routeEnforcement,
 	seatModeBlockReason,
+	selfWatch,
 	MODEL_CLASS_LABEL,
 } = await importPolicyCore();
 const { paseoAgentsRoot, readAgentStates } = await importPolicyCore("agent-directory.ts");
@@ -172,7 +174,7 @@ function readState(agentId, options = {}) {
  * checked. The table is read only when enforcement is on, so an opted-out host
  * — and every test that injects its own — never touches the route files.
  */
-function forkRoute(role, provider, modelClass, model, thinking, options) {
+function forkRoute(role, provider, modelClass, model, thinking, options, labels = null) {
 	const env = options.env ?? process.env;
 	const routeTable =
 		options.routeTable !== undefined
@@ -180,13 +182,22 @@ function forkRoute(role, provider, modelClass, model, thinking, options) {
 			: routeEnforcement(env) === "on"
 				? gateRouteTable({ env })
 				: null;
-	return forkRouteDecision({ role, provider, modelClass, model, thinking, routeTable, env });
+	return forkRouteDecision({ role, provider, modelClass, model, thinking, labels, routeTable, env });
 }
 
 function requireRole(options) {
 	const role = (options.role ?? process.env.PASEO_PI_ROLE ?? "").trim().toLowerCase();
 	if (!FORK_ROLES.includes(role)) {
 		throw bad("ROLE_NOT_ALLOWED", `ROLE_NOT_ALLOWED: forking is a ${FORK_ROLES.join("/")} act (a Peer has no agent to fork)`);
+	}
+	// A Supervisor's fork is a successor Lead — the same act create_agent gates
+	// as a recovery. A watch seat observes; this is the second door to it, and it
+	// is asked here because this script serves both runtimes.
+	if (role === "supervisor") {
+		const watch =
+			options.selfWatch !== undefined ? options.selfWatch : selfWatch(options.env ?? process.env);
+		const notDelegated = recoveryNotDelegatedReason(watch);
+		if (notDelegated) throw bad("RECOVERY_NOT_DELEGATED", notDelegated);
 	}
 	return role;
 }
@@ -233,6 +244,17 @@ export async function forkAgent(input = {}, options = {}) {
 	if (parsed.role === "peer" && input.disposition === "lead") {
 		throw bad("FORK_PROVIDER_INVALID", "the provider role and the declared disposition disagree");
 	}
+	// The same, for the independent role this script can be pointed at by its
+	// PROVIDER rather than by what the caller calls it. The disposition scan is a
+	// substring match on free text ("governance seat" passes it); a Supervisor
+	// is seated by create_agent, where team.watch, the seat count and the route
+	// class are all checked, and none of them is checked here.
+	if (parsed.role === "supervisor") {
+		throw bad(
+			"FORK_ROLE_MUST_BE_INDEPENDENT",
+			"BLOCKED: FORK_ROLE_MUST_BE_INDEPENDENT — a Supervisor seat is never the product of a fork: it exists to question what the source believed, and a fork inherits that verbatim. Seat it with create_agent and a briefing (labels.purpose \"governance\", team.watch, routed settings).",
+		);
+	}
 	// Which mode the fork must end up on. Checked here, before a single byte is
 	// copied, for the same reason the provider is: a request that can never
 	// produce a usable seat should not leave a session file behind.
@@ -255,6 +277,7 @@ export async function forkAgent(input = {}, options = {}) {
 		typeof input.model === "string" ? input.model : null,
 		typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
 		options,
+		input.labels && typeof input.labels === "object" ? input.labels : null,
 	);
 	if (!route.ok) throw bad("FORK_ROUTE_BLOCKED", route.reason);
 
@@ -438,6 +461,7 @@ export async function verifyFork(input = {}, options = {}) {
 		typeof input.model === "string" ? input.model : null,
 		typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
 		options,
+		state.labels,
 	);
 	const reason =
 		(route.ok ? null : route.reason.replace(/^BLOCKED: /, "BLOCKED: FORK_MODEL_UNROUTABLE — ")) ??

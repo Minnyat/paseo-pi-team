@@ -588,6 +588,7 @@ const AGENT_PEER = "11111111-aaaa-4aaa-8aaa-111111111111";
 const AGENT_UNLABELLED = "22222222-bbbb-4bbb-8bbb-222222222222";
 const AGENT_LEAD = "33333333-cccc-4ccc-8ccc-333333333333";
 const AGENT_MISSING = "44444444-dddd-4ddd-8ddd-444444444444";
+const AGENT_WATCHER = "55555555-eeee-4eee-8eee-555555555555";
 
 /** A PASEO_HOME with agent state files, read back through routeTargetFor. */
 const paseoHome = join(sandbox, "paseo-home");
@@ -599,7 +600,8 @@ const paseoHome = join(sandbox, "paseo-home");
 	write(AGENT_PEER, "pi-peer/Mx/mid", { "team.model-class": "CODING_MEDIUM" });
 	write(AGENT_UNLABELLED, "pi-peer/Mx/mid", {});
 	write(AGENT_LEAD, "pi-lead/Mx/big", { "team.model-class": "LEAD_RECOVERY" });
-}
+		write(AGENT_WATCHER, "pi-supervisor/Mx/cheap", { "team.model-class": "MONITOR_ECONOMY", "team.watch": "liveness,cost" });
+	}
 const PASEO_ENV = { PASEO_HOME: paseoHome };
 const target = (id: string) => routeTargetFor(id, PASEO_ENV);
 
@@ -626,10 +628,32 @@ function decideUpdate(
 }
 
 test("update_agent: routeTargetFor reads the class off Paseo's own agent state", () => {
-	assert.deepEqual(target(AGENT_PEER), { agentId: AGENT_PEER, provider: "pi-peer/Mx/mid", modelClass: "CODING_MEDIUM" });
+	assert.deepEqual(target(AGENT_PEER), {
+		agentId: AGENT_PEER,
+		provider: "pi-peer/Mx/mid",
+		modelClass: "CODING_MEDIUM",
+		watch: null,
+	});
+	// A watch seat's label travels with the target: it is what lets an observer stay
+	// on the economy route it was seated on, while a seat that decides cannot.
+	assert.equal(target(AGENT_WATCHER)?.watch, "liveness,cost");
 	assert.equal(target(AGENT_UNLABELLED)?.modelClass, null);
 	assert.equal(target(AGENT_MISSING), null, "an agent with no state is null, never a classless target");
 	assert.equal(target("not-an-id"), null);
+});
+
+test("update_agent: an observer seated on MONITOR_ECONOMY stays on it; read as a seat that decides, it never had it", () => {
+	const watcher = target(AGENT_WATCHER);
+	assert.ok(watcher);
+	const move = { agentId: AGENT_WATCHER, settings: { model: "Mx/cheap", thinkingOptionId: "low" } };
+	for (const runtime of RUNTIMES) {
+		assert.equal(decideUpdate(runtime, "lead", move, watcher, clusterHost), null, `${runtime}: an observer on the economy route`);
+		blocked(
+			decideUpdate(runtime, "lead", move, { ...watcher, watch: null }, clusterHost),
+			/ROUTE_CLASS_WRONG_FLOW.*routes from SUPERVISOR_GOVERNANCE/,
+			`${runtime}: a seat that decides never had the economy route`,
+		);
+	}
 });
 
 test("update_agent: model/thinking on the target's own route pass; anything else is refused naming the route", () => {

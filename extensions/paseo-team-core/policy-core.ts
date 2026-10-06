@@ -22,6 +22,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import {
 	type AgentState,
+	type StateDegraded,
 	isAgentId,
 	paseoAgentsRoot,
 	readAgentStates,
@@ -243,10 +244,13 @@ const SUPERVISOR_MCP_SCRIPT_TARGETS: string[] = [
  * a script's ARGUMENTS cannot be statically verified, and both create_agent and
  * send_agent_prompt carry the brief that arms a writer. Allowing them here would
  * leave a first-class path that the scope-lease gate — which inspects arguments
- * — never sees.
+ * — never sees. update_agent is in the same position: its route gate and the
+ * labels it may not set (team.model-class, team.watch) are read off the call's
+ * arguments, which a script hides.
  */
 const LEAD_MCP_SCRIPT_TARGETS: string[] = LEAD_ALLOWED_MCP_TARGETS.filter(
-	(tool) => tool !== "create_agent" && tool !== "send_agent_prompt",
+	(tool) =>
+		tool !== "create_agent" && tool !== "send_agent_prompt" && tool !== "update_agent",
 );
 
 /**
@@ -3056,7 +3060,13 @@ export function leadAskSupervisorToolDescription(): string {
  *     seat observes and does not name `decisions`. A second deciding seat would
  *     make every consult SUPERVISOR_AMBIGUOUS (and, under `multi`, make the Lead
  *     refuse both). Watch seats cannot manufacture authority, so seating them is
- *     the Lead's own instrument-making; replacing the DECIDING seat is not.
+ *     the Lead's own instrument-making. Replacing the DECIDING seat is archive,
+ *     then seat: an archived seat is not counted.
+ *   - A cluster that has never used `team.watch` is the pack as it was. A seat
+ *     with no label beside seats that carry none is allowed exactly as it always
+ *     was (its cost, a consult that comes back SUPERVISOR_AMBIGUOUS until one is
+ *     archived, is the cost it always had), so the new rules apply to the
+ *     clusters that use the label and to no one else.
  *
  * The cluster label is checked separately by `clusterLabelBlockReason`, which
  * runs for every create_agent on both paths.
@@ -3071,6 +3081,8 @@ export interface LeadSeatingContext {
 	 * be read, which is refused — "could not look" is not "nobody is there".
 	 */
 	seats?: SupervisorSeat[] | null;
+	/** What could not be read when `seats` is null; named in the refusal. */
+	seatsFault?: string | null;
 }
 
 export function leadCreateSupervisorArgsBlockReason(
@@ -3122,6 +3134,17 @@ export function leadCreateSupervisorArgsBlockReason(
 		}
 	}
 
+	// Label keys are exact. `Team.Watch` or `team_watch` is not `team.watch`, so
+	// the seat would carry no watch at all — and no watch is a seat that watches
+	// everything and decides. A typo must not be the way to get that seat.
+	const nearMiss = Object.keys(labels ?? {}).find(
+		(key) =>
+			key !== TEAM_WATCH_LABEL && key.toLowerCase().replace(/[^a-z0-9]/g, "") === "teamwatch",
+	);
+	if (nearMiss !== undefined) {
+		return `Refusing create_agent: the label key "${nearMiss}" is not "${TEAM_WATCH_LABEL}". Label keys are exact, so this seat would carry no watch and would read as one that watches everything and decides. Spell it labels["${TEAM_WATCH_LABEL}"].`;
+	}
+
 	// What the seat watches. No label is the seat the pack has always had; a
 	// label that is present must say something this pack can read.
 	const rawWatch = labels?.[TEAM_WATCH_LABEL];
@@ -3137,7 +3160,7 @@ export function leadCreateSupervisorArgsBlockReason(
 	}
 	if (context.seats === undefined) return null;
 	if (context.seats === null) {
-		return "BLOCKED: SUPERVISOR_LOOKUP_FAILED — Paseo's agent state could not be read, so whether this cluster already has a Supervisor that decides is unknown. A new seat is not created on a guess about the governance that is already there; fix the read (`pteam preflight`) and retry.";
+		return `BLOCKED: SUPERVISOR_LOOKUP_FAILED — Paseo's agent state could not be read in full${context.seatsFault ? ` (${context.seatsFault})` : ""}, so whether this cluster already has a Supervisor that decides is unknown. A new seat is not created on a guess about the governance that is already there. Retry once; if it persists, tell the Human which state file or directory is unreadable (under $PASEO_HOME/agents, default ~/.paseo/agents).`;
 	}
 
 	const named = (seat: SupervisorSeat): string =>
@@ -3151,8 +3174,10 @@ export function leadCreateSupervisorArgsBlockReason(
 				(!multi ||
 					(normalizeDomain(seat.domain) !== null && domainConflicts(seat.domain, declared))),
 		);
-		if (incumbents.length > 0) {
-			return `Refusing create_agent: this cluster already has a Supervisor that decides (${incumbents.map(named).join(", ")}). A second one would make every consult SUPERVISOR_AMBIGUOUS${multi ? " and make a Lead refuse BOTH on JURISDICTION_OVERLAP" : ""} — the authority to decide is held by exactly one seat. Seat a WATCH seat instead: set labels["${TEAM_WATCH_LABEL}"] to what it observes (${WATCH_CONCERNS.filter((concern) => concern !== WATCH_DECISIONS).join(", ")}) and leave \`${WATCH_DECISIONS}\` out. Replacing the deciding seat itself is the Human's call.`;
+		// No label on either side is the pack as it was (see above): allowed.
+		const legacy = watch === null && incumbents.every((seat) => !seat.watch);
+		if (incumbents.length > 0 && !legacy) {
+			return `Refusing create_agent: this cluster already has a Supervisor that decides (${incumbents.map(named).join(", ")}). A second one would make every consult SUPERVISOR_AMBIGUOUS${multi ? " and make a Lead refuse BOTH on JURISDICTION_OVERLAP" : ""} — the authority to decide is held by exactly one seat. To ADD a seat, make it a WATCH seat: set labels["${TEAM_WATCH_LABEL}"] to what it observes (${WATCH_CONCERNS.filter((concern) => concern !== WATCH_DECISIONS).join(", ")}) and leave \`${WATCH_DECISIONS}\` out. To REPLACE the deciding seat, archive it first (ask it for a handoff note beforehand), then seat the successor: an archived seat is not counted.`;
 		}
 		return null;
 	}
@@ -3359,10 +3384,16 @@ function supervisorSeatsFrom(
 	// refusal for a cluster that has one Supervisor. Narrowing here is what stops
 	// that — and only where separation is proven, so an unlabelled host keeps
 	// exactly today's answer.
+	//
+	// An ARCHIVED Supervisor is not a seat. Paseo archives by soft delete — the
+	// record stays on disk with `archivedAt` set — so without this a Supervisor
+	// the Lead replaced would be counted for as long as the host lives: every
+	// consult SUPERVISOR_AMBIGUOUS, and no way to seat the successor.
 	const own = normalizeCluster(cluster);
 	return Object.values(states)
 		.filter(
-			(state) => parseRoleProvider(state.provider ?? "")?.role === "supervisor",
+			(state) =>
+				!state.archived && parseRoleProvider(state.provider ?? "")?.role === "supervisor",
 		)
 		.map((state) => ({
 			agentId: state.agentId,
@@ -3373,13 +3404,44 @@ function supervisorSeatsFrom(
 		.filter((seat) => !clustersSeparate(seat.cluster, own));
 }
 
-/** Every seat Paseo knows about that runs the supervisor role. */
+/** A short, bounded account of what a scan could not read, for a refusal. */
+function describeStateFaults(faults: StateDegraded[]): string {
+	const shown = faults
+		.slice(0, 3)
+		.map(
+			(fault) =>
+				`${fault.reason}${fault.agentId ? ` (${fault.agentId})` : ""}${fault.detail ? `: ${fault.detail}` : ""}`,
+		)
+		.join("; ");
+	return faults.length > 3 ? `${shown}; and ${faults.length - 3} more` : shown;
+}
+
+/**
+ * Every seat Paseo knows about that runs the supervisor role.
+ *
+ * `strict` is for the caller whose answer is "there is nobody": it throws when
+ * the scan could not read part of the agent state, because a file it could not
+ * read may be the very seat being asked about. The default stays lenient for the
+ * overlap rule, which can only REMOVE a restriction — an empty list there is
+ * the safe answer.
+ */
 export function supervisorSeats(
 	env: Record<string, string | undefined> = process.env,
-	options: { cluster?: string | null } = {},
+	options: { cluster?: string | null; strict?: boolean } = {},
 ): SupervisorSeat[] {
-	const { states } = readAllAgentStates(env);
+	const { states, degraded } = readAllAgentStates(env);
+	if (options.strict && degraded.length > 0) {
+		throw new Error(`agent state could not be read in full: ${describeStateFaults(degraded)}`);
+	}
 	return supervisorSeatsFrom(states, options.cluster);
+}
+
+/** What a seating decision learned from the state directory. */
+export interface SeatLookup {
+	/** Null: it could not look, which is not the same as "nobody is there". */
+	seats: SupervisorSeat[] | null;
+	/** What could not be read, when `seats` is null. */
+	fault: string | null;
 }
 
 /**
@@ -3388,32 +3450,31 @@ export function supervisorSeats(
  * `supervisorSeats` reads a state directory it cannot open as an empty cluster,
  * which is the right answer for the questions it serves (the overlap rule only
  * ever REMOVES a restriction). Seating is the opposite: it is the one decision
- * made on the strength of "nobody is there yet", so an unreadable directory has
- * to come back as null — "could not look" — and not as an empty list. A root
- * that does not exist at all is the ordinary state of a host Paseo has not
- * written state on, and is an empty list.
+ * made on the strength of "nobody is there yet", so anything the scan could not
+ * read — the root, a project directory, or ONE record that is not valid JSON,
+ * which may be the incumbent — comes back as "could not look" and not as an empty
+ * list. A root that does not exist at all is the ordinary state of a host Paseo
+ * has not written state on, and is an empty list.
  */
+export function lookupSupervisorSeatsForSeating(
+	env: Record<string, string | undefined> = process.env,
+	options: { cluster?: string | null } = {},
+): SeatLookup {
+	try {
+		const { states, degraded } = readAllAgentStates(env);
+		if (degraded.length > 0) return { seats: null, fault: describeStateFaults(degraded) };
+		return { seats: supervisorSeatsFrom(states, options.cluster), fault: null };
+	} catch (error) {
+		return { seats: null, fault: String((error as Error)?.message ?? error) };
+	}
+}
+
 export function supervisorSeatsForSeating(
 	env: Record<string, string | undefined> = process.env,
 	options: { cluster?: string | null } = {},
 ): SupervisorSeat[] | null {
-	try {
-		const { states, degraded } = readAllAgentStates(env);
-		if (
-			degraded.some(
-				(fault) =>
-					fault.reason === "AGENT_STATE_ROOT_UNREADABLE" ||
-					fault.reason === "AGENT_STATE_DIR_UNREADABLE",
-			)
-		) {
-			return null;
-		}
-		return supervisorSeatsFrom(states, options.cluster);
-	} catch {
-		return null;
-	}
+	return lookupSupervisorSeatsForSeating(env, options).seats;
 }
-
 
 // ---------------------------------------------------------------------------
 // PR-E — fork / handoff.
@@ -3903,9 +3964,10 @@ export function routeEnforcementNotice(
  * the one whose reasoning quality is load-bearing — it decides what the Human is
  * never asked — so it keeps the governance route, and a watch seat cannot be
  * promoted to deciding by the class it was routed from. `labels` is what tells
- * the two apart, and only a create_agent has it: an update_agent or a fork acts
- * on a seat that already exists and already carries whichever class it was
- * seated from, so they pass nothing and see both.
+ * the two apart: a create_agent and a fork pass the labels the new seat will
+ * carry, an update_agent passes the target's own (RouteTarget.watch). A caller
+ * that knows nothing about the seat gets the one class every Supervisor has
+ * always had — never the cheap one on a guess.
  */
 export function modelClassesForFlow(
 	creator: TeamRole,
@@ -3914,7 +3976,6 @@ export function modelClassesForFlow(
 ): readonly string[] {
 	if (creator === "supervisor" || target.role === "lead") return [LEAD_RECOVERY_CLASS];
 	if (target.role === "supervisor") {
-		if (labels === undefined) return [SUPERVISOR_GOVERNANCE_CLASS, MONITOR_ECONOMY_CLASS];
 		// An observer is a seat whose label is READABLE and lacks `decisions`. One
 		// that cannot be read decides nothing (seatDecides) but is not an observer
 		// either, and must not buy the cheap route by being unreadable.
@@ -4107,6 +4168,12 @@ export interface RouteTarget {
 	provider: string | null;
 	/** labels["team.model-class"] as recorded on the agent; null when absent. */
 	modelClass: string | null;
+	/**
+	 * labels["team.watch"] as recorded on the agent; null/undefined when absent.
+	 * It is what lets an observer seat stay on the economy route it was seated
+	 * on while the seat that decides stays on governance.
+	 */
+	watch?: string | null;
 }
 
 /**
@@ -4127,6 +4194,7 @@ export function routeTargetFor(
 		agentId: state.agentId,
 		provider: state.provider,
 		modelClass: typeof label === "string" && label !== "" ? label : null,
+		watch: state.watch,
 	};
 }
 
@@ -4224,7 +4292,7 @@ export function updateAgentRouteBlockReason({
 	if (!seat) {
 		return `BLOCKED: ROUTE_PROVIDER_UNKNOWN — ${target.agentId} runs provider "${target.provider ?? "<unknown>"}", which is not a role provider this pack routes, so no class route can apply to it. Refusing to move its model.`;
 	}
-	const allowed = modelClassesForFlow(role, seat);
+	const allowed = modelClassesForFlow(role, seat, { [TEAM_WATCH_LABEL]: target.watch });
 	const classReason = declaredClassReason(
 		target.modelClass,
 		allowed,
@@ -4261,6 +4329,7 @@ export function forkRouteDecision({
 	modelClass,
 	model,
 	thinking,
+	labels,
 	routeTable,
 	env = process.env,
 }: {
@@ -4271,6 +4340,8 @@ export function forkRouteDecision({
 	/** The model/thinking the caller asked for; omitted = take the route's. */
 	model?: string | null;
 	thinking?: string | null;
+	/** The labels the fork will carry; see modelClassesForFlow. */
+	labels?: Record<string, unknown> | null;
 	routeTable?: RouteTable | null;
 	env?: Record<string, string | undefined>;
 }): { ok: true; enforced: boolean; model: string | null; thinking: string | null } | { ok: false; reason: string } {
@@ -4281,7 +4352,7 @@ export function forkRouteDecision({
 	if (!seat) {
 		return { ok: false, reason: `BLOCKED: ROUTE_PROVIDER_UNKNOWN — fork provider "${provider || "<missing>"}" is not a role provider this pack routes.` };
 	}
-	const allowed = modelClassesForFlow(role, seat);
+	const allowed = modelClassesForFlow(role, seat, labels);
 	const classReason = declaredClassReason(modelClass, allowed, "every team_fork (pass modelClass)");
 	if (classReason) return { ok: false, reason: classReason };
 	if (!allowed.includes(modelClass as string)) {
@@ -4538,6 +4609,20 @@ export function supervisorCreateAgentBlockReason(
 }
 
 /**
+ * Why a seat may not put a successor Lead in place, or null when it may: a seat
+ * that decides (or carries no `team.watch`) recovers, a watch seat observes.
+ * Recovery has two doors — create_agent (supervisorCreateAgentArgsBlockReason)
+ * and team_fork (scripts/team-fork.mjs) — and both ask this one question, so the
+ * answer cannot differ between them.
+ */
+export function recoveryNotDelegatedReason(
+	watch: SeatWatch | null | undefined,
+): string | null {
+	if (seatDecides(watch)) return null;
+	return `BLOCKED: RECOVERY_NOT_DELEGATED — this seat is a watch seat (${TEAM_WATCH_LABEL}: ${describeWatch(watch)}). It observes; creating a successor Lead is the act of the seat that holds \`${WATCH_DECISIONS}\`. Send the Lead an observation with the evidence, and let that seat (or the Human) decide on recovery.`;
+}
+
+/**
  * What the recovery gate needs to know about the supervisor doing the
  * recovering. Empty by default so the single-supervisor behaviour — the one
  * running in production — is exactly what it was before PR-D.
@@ -4572,8 +4657,9 @@ export function supervisorCreateAgentArgsBlockReason(
 	// Recovery is the one ACTION a Supervisor has — everything else it does is a
 	// message the Lead can weigh — so it is the one thing the Lead's verdict
 	// cannot refuse after the fact. A watch seat has to be stopped here.
-	if (context.selfWatch !== undefined && !seatDecides(context.selfWatch)) {
-		return `BLOCKED: RECOVERY_NOT_DELEGATED — this seat is a watch seat (${TEAM_WATCH_LABEL}: ${describeWatch(context.selfWatch)}). It observes; creating a successor Lead is the act of the seat that holds \`${WATCH_DECISIONS}\`. Send the Lead an observation with the evidence, and let that seat (or the Human) decide on recovery.`;
+	if (context.selfWatch !== undefined) {
+		const notDelegated = recoveryNotDelegatedReason(context.selfWatch);
+		if (notDelegated) return notDelegated;
 	}
 	const rec = args as Record<string, unknown>;
 	const provider = typeof rec.provider === "string" ? rec.provider : "";
@@ -4976,6 +5062,8 @@ export interface GovernanceContext extends SupervisorRecoveryContext {
 	 * (LeadSeatingContext.seats carries the semantics of undefined and null).
 	 */
 	seats?: SupervisorSeat[] | null;
+	/** What could not be read when `seats` is null; named in the refusal. */
+	seatsFault?: string | null;
 	/** Where PASEO_TEAM_ROUTE_ENFORCE is read from; defaults to process.env. */
 	env?: Record<string, string | undefined>;
 }
@@ -5033,6 +5121,7 @@ export function mcpBlockReason(
 			topology: context.topology,
 			selfDomain: context.selfDomain,
 			seats: context.seats,
+			seatsFault: context.seatsFault,
 		});
 		if (supervisorBlock) return supervisorBlock;
 	}

@@ -560,7 +560,31 @@ function fakeRunner(overrides = {}) {
 		now: 0,
 	});
 	assert.equal(broken.jurisdiction.undecided, true);
-}
+	// ...and the board says which part it could not read, so a seat with a typo does
+	// not look like a plausible watch.
+	assert.deepEqual(broken.nodes.find((n) => n.id === "decider").watchUnreadable, ["vibes"]);
+	assert.deepEqual(healthy.nodes.find((n) => n.id === "watch-a").watchUnreadable, []);
+	assert.deepEqual(solo.nodes.find((n) => n.id === "second").watchUnreadable, []);
+
+	// Judged per cluster: a deciding seat in another project settles nothing here.
+	const inCluster = (id, cluster) => ({ ...states[id], labels: { "team.cluster": cluster } });
+	const apart = buildGraph({
+		agents: pick("decider", "watch-a"),
+		states: { decider: inCluster("decider", "pod-a"), "watch-a": inCluster("watch-a", "pod-b") },
+		now: 0,
+	});
+	assert.equal(apart.jurisdiction.undecided, true);
+	assert.deepEqual(apart.jurisdiction.undecidedAgents, ["watch-a"]);
+	const together = buildGraph({
+		agents: pick("decider", "watch-a"),
+		states: { decider: inCluster("decider", "pod-a"), "watch-a": inCluster("watch-a", "pod-a") },
+		now: 0,
+	});
+	assert.equal(together.jurisdiction.undecided, false);
+	assert.deepEqual(together.jurisdiction.undecidedAgents, []);
+	// A cluster that cannot be told apart is not proven separate: any decider counts.
+	assert.equal(healthy.jurisdiction.undecided, false);
+	}
 
 // --- cluster diagnostic: the workspace axis, surfaced before it bites ------
 // `supervisorTurnVerdict` (policy-core.ts) already refuses every

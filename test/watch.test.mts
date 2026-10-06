@@ -45,16 +45,20 @@ import {
 	agentOwnership,
 	createAgentRouteBlockReason,
 	describeWatch,
+	forkRouteDecision,
 	leadAskSupervisorToolDescription,
 	leadConsultTurnNotice,
 	leadConsultVerdict,
 	leadCreateSupervisorArgsBlockReason,
+	lookupSupervisorSeatsForSeating,
 	mcpBlockReason,
+	mcpScriptBlockReason,
 	modelClassesForFlow,
 	parseLeadConsultBlock,
 	parseRoleProvider,
 	parseSupervisorBlock,
 	parseWatch,
+	recoveryNotDelegatedReason,
 	seatDecides,
 	seatsSupervisor,
 	selfWatch,
@@ -89,7 +93,15 @@ const sandbox = mkdtempSync(join(tmpdir(), "pteam-watch-"));
 after(() => rmSync(sandbox, { recursive: true, force: true }));
 
 let homeCount = 0;
-type Seat = { id: string; provider: string; labels?: Record<string, string> };
+type Seat = {
+id: string;
+provider: string;
+labels?: Record<string, string>;
+/** More of the record, as Paseo writes it (archivedAt, ...). */
+extra?: Record<string, unknown>;
+/** The file's exact contents, for a record that is not valid JSON. */
+raw?: string;
+};
 
 /** A PASEO_HOME whose agent-state files are exactly the given seats. */
 function stateHome(seats: Seat[]): { home: string; env: Record<string, string> } {
@@ -98,8 +110,9 @@ function stateHome(seats: Seat[]): { home: string; env: Record<string, string> }
 	mkdirSync(dir, { recursive: true });
 	for (const seat of seats) {
 		writeFileSync(
-			join(dir, `${seat.id}.json`),
-			JSON.stringify({ id: seat.id, provider: seat.provider, labels: seat.labels ?? {} }),
+		join(dir, `${seat.id}.json`),
+		seat.raw ??
+			JSON.stringify({ id: seat.id, provider: seat.provider, labels: seat.labels ?? {}, ...(seat.extra ?? {}) }),
 		);
 	}
 	return { home, env: { PASEO_HOME: home } };
@@ -260,6 +273,100 @@ test("only a Supervisor create_agent needs the seat list", () => {
 });
 
 // ---------------------------------------------------------------------------
+// A seat that is no longer there, and a state directory that cannot be read in
+// full
+// ---------------------------------------------------------------------------
+
+const ARCHIVED_AT = "2026-10-06T10:00:00.000Z";
+const SHOP = { "team.cluster": "shop" };
+
+test("an archived Supervisor is not a seat: Paseo archives by soft delete and the record stays", () => {
+	// Measured on @getpaseo/server 0.10.3 (agent/agent-archive.js): archiving
+	// writes archivedAt into the record, it does not remove the file.
+	assert.equal(normalizeAgentState({ id: DECIDER, provider: "x", archivedAt: ARCHIVED_AT }, DECIDER)?.archived, true);
+	for (const archivedAt of [null, "", "  ", undefined, 0, false]) {
+		assert.equal(
+			normalizeAgentState({ id: DECIDER, provider: "x", archivedAt }, DECIDER)?.archived,
+			false,
+			String(archivedAt),
+		);
+	}
+
+	const { env } = stateHome([
+		{ id: LEAD, provider: "pi-lead/anthropic/model", labels: SHOP },
+		{
+			id: DECIDER,
+			provider: "pi-supervisor/anthropic/model",
+			labels: { ...SHOP, [TEAM_WATCH_LABEL]: "decisions" },
+			extra: { archivedAt: ARCHIVED_AT },
+		},
+		{ id: LIVENESS, provider: "pi-supervisor/Mx/cheap", labels: { ...SHOP, [TEAM_WATCH_LABEL]: "liveness" } },
+		{ id: GENERALIST, provider: "pi-supervisor/anthropic/model", labels: SHOP, extra: { archivedAt: null } },
+	]);
+	const live = [GENERALIST, LIVENESS].sort();
+	assert.deepEqual(supervisorSeats(env, { cluster: "shop" }).map((seat) => seat.agentId).sort(), live);
+	assert.deepEqual(supervisorSeatsForSeating(env, { cluster: "shop" })?.map((seat) => seat.agentId).sort(), live);
+});
+
+test("replacing the deciding seat is archive, then seat — and the archived one stops blocking it", () => {
+	const decider = (extra?: Record<string, unknown>): Seat => ({
+		id: DECIDER,
+		provider: "pi-supervisor/anthropic/model",
+		labels: { ...SHOP, [TEAM_WATCH_LABEL]: "decisions" },
+		extra,
+	});
+	const watcher: Seat = {
+		id: LIVENESS,
+		provider: "pi-supervisor/Mx/cheap",
+		labels: { ...SHOP, [TEAM_WATCH_LABEL]: "liveness" },
+	};
+	const successor = seatArgs({ [TEAM_WATCH_LABEL]: "decisions" });
+	const seatsOf = (seats: Seat[]) => supervisorSeatsForSeating(stateHome(seats).env, { cluster: "shop" });
+
+	// Before: the incumbent is a seat, the successor is refused, and the refusal
+	// says how to get there.
+	const refusal = String(leadCreateSupervisorArgsBlockReason(successor, { seats: seatsOf([decider(), watcher]) }));
+	assert.match(refusal, /already has a Supervisor that decides/);
+	assert.match(refusal, /To REPLACE the deciding seat, archive it first/);
+	// After: the record is still on disk, flagged, and it no longer counts.
+	assert.equal(
+		leadCreateSupervisorArgsBlockReason(successor, { seats: seatsOf([decider({ archivedAt: ARCHIVED_AT }), watcher]) }),
+		null,
+	);
+});
+
+test("one record that cannot be parsed is 'could not look': it may be the incumbent", () => {
+	const { env } = stateHome([
+		{ id: LEAD, provider: "pi-lead/anthropic/model", labels: SHOP },
+		{ id: LIVENESS, provider: "pi-supervisor/Mx/cheap", labels: { ...SHOP, [TEAM_WATCH_LABEL]: "liveness" } },
+		// The only deciding seat, torn in half.
+		{ id: DECIDER, provider: "pi-supervisor/anthropic/model", raw: `{"id": "${DECIDER}", "provider": "pi-supervisor/anth` },
+	]);
+	const lookup = lookupSupervisorSeatsForSeating(env, { cluster: "shop" });
+	assert.equal(lookup.seats, null, "the torn record may be the seat that decides");
+	assert.match(String(lookup.fault), /AGENT_STATE_UNREADABLE/);
+	assert.ok(String(lookup.fault).includes(DECIDER), "it names the record");
+	assert.equal(supervisorSeatsForSeating(env, { cluster: "shop" }), null);
+
+	// So the gate does not allow a second decider on the strength of "nobody is
+	// there", and tells the Lead what could not be read.
+	const reason = String(leadCreateSupervisorArgsBlockReason(seatArgs(), { seats: lookup.seats, seatsFault: lookup.fault }));
+	assert.match(reason, /SUPERVISOR_LOOKUP_FAILED/);
+	assert.ok(reason.includes(DECIDER));
+	assert.ok(!/pteam preflight/.test(reason), "no advice that cannot work: preflight reads nothing under agents/");
+
+	// The plain list stays lenient — the overlap rule can only lose a restriction
+	// — and the strict one, for a caller that may answer "nobody", throws.
+	assert.doesNotThrow(() => supervisorSeats(env, { cluster: "shop" }));
+	assert.throws(
+		() => supervisorSeats(env, { cluster: "shop", strict: true }),
+		/could not be read in full.*AGENT_STATE_UNREADABLE/,
+	);
+	// A host Paseo has written nothing on is still just empty.
+	assert.deepEqual(supervisorSeats({ PASEO_HOME: join(sandbox, "never-written-2") }, { strict: true }), []);
+});
+
+// ---------------------------------------------------------------------------
 // A Lead seating Supervisors: one that decides, then as many watch seats as
 // the job wants
 // ---------------------------------------------------------------------------
@@ -294,7 +401,7 @@ test("the first Supervisor a Lead seats must be the one that decides", () => {
 });
 
 test("after that a Lead seats watch seats, and only watch seats", () => {
-	const governed = [seat(DECIDER), seat(LIVENESS, null, "liveness")];
+	const governed = [seat(DECIDER, null, "decisions"), seat(LIVENESS, null, "liveness")];
 	assert.equal(
 		leadCreateSupervisorArgsBlockReason(seatArgs({ [TEAM_WATCH_LABEL]: "process,evidence" }), { seats: governed }),
 		null,
@@ -313,10 +420,53 @@ test("after that a Lead seats watch seats, and only watch seats", () => {
 		assert.match(reason, /already has a Supervisor that decides/, JSON.stringify(labels));
 		assert.ok(reason.includes(DECIDER), "it names the incumbent");
 		assert.match(reason, /SUPERVISOR_AMBIGUOUS/);
-		assert.match(reason, /Seat a WATCH seat instead/);
-		assert.match(reason, /Replacing the deciding seat itself is the Human's call/);
-	}
-});
+		assert.match(reason, /To ADD a seat, make it a WATCH seat/);
+		// The way out is stated, not left to the Human: archive, then seat.
+		assert.match(reason, /To REPLACE the deciding seat, archive it first/);
+		}
+		});
+
+		test("a cluster that has never used team.watch is allowed exactly what it always was", () => {
+			// No label on the new seat and none on the seats that decide: the pack as it
+			// was. A second deciding seat is allowed (it is how a Lead has always
+			// replaced one) and costs what it always cost, an ambiguous consult until the
+			// old one is archived. The refusals above apply to clusters that use the label.
+			const legacy = [seat(DECIDER), seat(GENERALIST)];
+			assert.equal(leadCreateSupervisorArgsBlockReason(seatArgs(), { seats: legacy }), null);
+			assert.equal(leadCreateSupervisorArgsBlockReason(seatArgs(), { seats: [seat(DECIDER)] }), null);
+
+			// The label is what opts a cluster in — on either side of the pair.
+			assert.match(
+				String(leadCreateSupervisorArgsBlockReason(seatArgs({ [TEAM_WATCH_LABEL]: "decisions" }), { seats: legacy })),
+				/already has a Supervisor that decides/,
+				"a labelled decider beside a legacy one",
+			);
+			assert.match(
+				String(leadCreateSupervisorArgsBlockReason(seatArgs(), { seats: [seat(DECIDER, null, "decisions")] })),
+				/already has a Supervisor that decides/,
+				"a legacy seat beside a labelled decider",
+			);
+			// An observer needs only that someone decides; a legacy seat does.
+			assert.equal(
+				leadCreateSupervisorArgsBlockReason(seatArgs({ [TEAM_WATCH_LABEL]: "liveness" }), { seats: [seat(DECIDER)] }),
+				null,
+			);
+		});
+
+		test("a label key that is not exactly team.watch is refused, not read as no label", () => {
+			// No label is a seat that watches everything and decides. A typo must not be
+			// the way to get that seat.
+			for (const key of ["Team.Watch", "team_watch", "team-watch", "team.watch ", " team.watch", "TEAM.WATCH", "teamwatch"]) {
+				const reason = String(
+					leadCreateSupervisorArgsBlockReason(seatArgs({ [key]: "liveness" }), { seats: [seat(DECIDER)] }),
+				);
+				assert.match(reason, /Label keys are exact/, JSON.stringify(key));
+				assert.ok(reason.includes(key), "it names the key it saw");
+			}
+			// And a different key is still just another label.
+			assert.equal(leadCreateSupervisorArgsBlockReason(seatArgs({ "team.watchdog": "x" }), { seats: [] }), null);
+			assert.equal(leadCreateSupervisorArgsBlockReason(seatArgs({ note: "watch" }), { seats: [] }), null);
+		});
 
 test("a label the pack cannot read is refused by name, whatever else is true", () => {
 	for (const seats of [undefined, [], [seat(DECIDER)]]) {
@@ -365,13 +515,22 @@ test("under multi only seats whose jurisdiction meets the new one's contend", ()
 			String(
 				leadCreateSupervisorArgsBlockReason(seatArgs(labels("backend.auth")), {
 					...multi,
-					seats: [seat(DECIDER, incumbent)],
-				}),
-			),
-			/JURISDICTION_OVERLAP/,
-			incumbent,
-		);
-	}
+					seats: [seat(DECIDER, incumbent, "decisions")],
+					}),
+					),
+					/JURISDICTION_OVERLAP/,
+					incumbent,
+					);
+					// ...unless neither side uses the label: the pack as it was.
+					assert.equal(
+						leadCreateSupervisorArgsBlockReason(seatArgs(labels("backend.auth")), {
+							...multi,
+							seats: [seat(DECIDER, incumbent)],
+						}),
+						null,
+						`${incumbent}, no label on either side`,
+					);
+					}
 	// A watch seat needs a deciding seat that covers THIS Lead, not just any.
 	assert.match(
 		String(
@@ -423,7 +582,7 @@ function decideCreate(
 }
 
 test("the seating rules bite identically through the Pi and Claude adapters", () => {
-	const governed = [seat(DECIDER)];
+	const governed = [seat(DECIDER, null, "decisions")];
 	for (const runtime of RUNTIMES) {
 		assert.equal(
 			decideCreate(runtime, "lead", seatArgs({ [TEAM_WATCH_LABEL]: "liveness,cost" }), { seats: governed }),
@@ -434,7 +593,22 @@ test("the seating rules bite identically through the Pi and Claude adapters", ()
 			String(decideCreate(runtime, "lead", seatArgs(), { seats: governed })),
 			/already has a Supervisor that decides/,
 			`${runtime}: a second deciding seat is refused`,
-		);
+			);
+			assert.equal(
+				decideCreate(runtime, "lead", seatArgs(), { seats: [seat(DECIDER)] }),
+				null,
+				`${runtime}: a cluster that never used the label is left as it was`,
+			);
+			assert.match(
+				String(decideCreate(runtime, "lead", seatArgs({ "Team.Watch": "liveness" }), { seats: governed })),
+				/Label keys are exact/,
+				`${runtime}: a mistyped label key is refused`,
+			);
+			assert.match(
+				String(decideCreate(runtime, "lead", seatArgs(), { seats: null, seatsFault: "AGENT_STATE_UNREADABLE (x): bad json" })),
+				/SUPERVISOR_LOOKUP_FAILED.*AGENT_STATE_UNREADABLE \(x\): bad json/,
+				`${runtime}: the refusal names what could not be read`,
+			);
 		assert.match(
 			String(decideCreate(runtime, "lead", seatArgs({ [TEAM_WATCH_LABEL]: "liveness" }), { seats: [] })),
 			/none covers this Lead yet/,
@@ -501,9 +675,11 @@ test("the cheap economy route is for the seat that only observes", () => {
 	]);
 	// An unreadable label is not an observer either: it must not buy the cheap route.
 	assert.deepEqual(modelClassesForFlow("lead", lead, { [TEAM_WATCH_LABEL]: "liveness,vibes" }), ["SUPERVISOR_GOVERNANCE"]);
-	// Acting on a seat that already exists (update_agent, a fork) passes no labels
-	// and sees both classes — the seat carries whichever it was seated from.
-	assert.deepEqual(modelClassesForFlow("lead", lead), ["SUPERVISOR_GOVERNANCE", MONITOR_ECONOMY_CLASS]);
+	// A caller that knows nothing about the seat gets the class every Supervisor
+	// has always had — never the cheap one on a guess. (A fork passes the labels it
+	// will carry, an update_agent the target's own.)
+	assert.deepEqual(modelClassesForFlow("lead", lead), ["SUPERVISOR_GOVERNANCE"]);
+	assert.deepEqual(modelClassesForFlow("lead", lead, null), ["SUPERVISOR_GOVERNANCE"]);
 	// Nothing else moved.
 	assert.deepEqual(modelClassesForFlow("supervisor", parseRoleProvider("pi-lead/x/y")!), ["LEAD_RECOVERY"]);
 	assert.deepEqual(modelClassesForFlow("lead", parseRoleProvider("pi-lead/x/y")!, {}), ["LEAD_RECOVERY"]);
@@ -547,14 +723,60 @@ test("the route gate lets an observer take MONITOR_ECONOMY and a decider not", (
 });
 
 test("re-routing an observer that was seated on the economy route is not 'the wrong flow'", () => {
-	const reason = updateAgentRouteBlockReason({
+const update = (watch: string | null | undefined) =>
+	updateAgentRouteBlockReason({
 		role: "lead",
 		args: { agentId: LIVENESS, settings: { thinkingOptionId: "low" } },
-		target: { agentId: LIVENESS, provider: "pi-supervisor/Mx/cheap", modelClass: "MONITOR_ECONOMY" },
+		target: { agentId: LIVENESS, provider: "pi-supervisor/Mx/cheap", modelClass: "MONITOR_ECONOMY", watch },
 		routeTable: ROUTES,
 		env: {},
 	});
-	assert.equal(reason, null);
+assert.equal(update("liveness,cost"), null);
+// The seat that decides never had the economy route, whatever it is labelled
+// now: re-routing it is the wrong flow, so the cheap class cannot be reached
+// through a door that passes no labels.
+for (const watch of [undefined, null, "decisions", "liveness,vibes"]) {
+	assert.match(String(update(watch)), /ROUTE_CLASS_WRONG_FLOW/, String(watch));
+}
+});
+
+test("a fork onto a Supervisor seat is held to the same classes as a create_agent", () => {
+const fork = (labels?: Record<string, unknown> | null) =>
+	forkRouteDecision({ role: "lead", provider: "pi-supervisor", modelClass: "MONITOR_ECONOMY", labels, routeTable: ROUTES, env: {} });
+// No labels, no label, `decisions`, or one that cannot be read: the seat that
+// decides (or that decides nothing and is not an observer) keeps governance.
+for (const labels of [undefined, null, {}, { [TEAM_WATCH_LABEL]: "decisions" }, { [TEAM_WATCH_LABEL]: "liveness,vibes" }]) {
+	const decision = fork(labels);
+	assert.equal(decision.ok, false, JSON.stringify(labels));
+	assert.match(JSON.stringify(decision), /ROUTE_CLASS_WRONG_FLOW/, JSON.stringify(labels));
+}
+// An observer may be seated on the economy route, by a fork as by create_agent.
+assert.equal(fork({ [TEAM_WATCH_LABEL]: "liveness,cost" }).ok, true);
+});
+
+test("recovery has one answer, whichever door it is asked at", () => {
+assert.equal(recoveryNotDelegatedReason(null), null, "no label: the generalist recovers");
+assert.equal(recoveryNotDelegatedReason(undefined), null);
+assert.equal(recoveryNotDelegatedReason(parseWatch("decisions,process")), null);
+for (const watch of ["liveness,cost", "process", "vibes", "liveness,vibes"]) {
+	const reason = String(recoveryNotDelegatedReason(parseWatch(watch)));
+	assert.match(reason, /RECOVERY_NOT_DELEGATED/, watch);
+	assert.match(reason, /watch seat/, watch);
+}
+// create_agent asks the same question, so its answer is this one.
+for (const watch of ["liveness,cost", "decisions"]) {
+	const args = {
+		provider: "pi-lead/anthropic/claude-opus-5",
+		labels: { purpose: "recovery", recovery_for: "shop" },
+		settings: { thinkingOptionId: "high" },
+	};
+	const viaCreate = supervisorCreateAgentArgsBlockReason(args, { selfWatch: parseWatch(watch) });
+	assert.equal(
+		/RECOVERY_NOT_DELEGATED/.test(String(viaCreate)),
+		recoveryNotDelegatedReason(parseWatch(watch)) !== null,
+		watch,
+	);
+}
 });
 
 // ---------------------------------------------------------------------------
@@ -938,10 +1160,14 @@ const withSeat = (labels: Record<string, string>) => ({
 
 test("the Claude hook feeds the seating gate the cluster's real seats", async () => {
 	const governed = stateHome([
-		{ id: LEAD, provider: "claude-lead/claude-opus-5", labels: { "team.cluster": "shop" } },
-		{ id: DECIDER, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "shop" } },
-		// Another project's deciding seat must not make this cluster's second.
-		{ id: FOREIGN, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "other" } },
+	{ id: LEAD, provider: "claude-lead/claude-opus-5", labels: { "team.cluster": "shop" } },
+	{
+		id: DECIDER,
+		provider: "pi-supervisor/anthropic/model",
+		labels: { "team.cluster": "shop", [TEAM_WATCH_LABEL]: "decisions" },
+	},
+	// Another project's deciding seat must not make this cluster's second.
+	{ id: FOREIGN, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "other" } },
 	]);
 	const env = hookEnv("lead", LEAD, governed.home);
 	const call = (labels: Record<string, string>) => hookCall(env, "mcp__paseo__create_agent", withSeat(labels));
@@ -952,6 +1178,17 @@ test("the Claude hook feeds the seating gate the cluster's real seats", async ()
 	assert.match(String(second?.hookSpecificOutput?.permissionDecisionReason), /already has a Supervisor that decides/);
 	assert.ok(String(second?.hookSpecificOutput?.permissionDecisionReason).includes(DECIDER));
 	assert.ok(!String(second?.hookSpecificOutput?.permissionDecisionReason).includes(FOREIGN), "the other cluster's seat is not an incumbent");
+
+	// A cluster that never used the label is left as it was.
+	const legacy = stateHome([
+		{ id: LEAD, provider: "claude-lead/claude-opus-5", labels: { "team.cluster": "shop" } },
+		{ id: DECIDER, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "shop" } },
+	]);
+	assert.equal(
+		await hookCall(hookEnv("lead", LEAD, legacy.home), "mcp__paseo__create_agent", withSeat({}), "w-1b"),
+		null,
+		"a label-free second seat beside a label-free one",
+	);
 
 	// Nobody deciding yet: a watch seat is refused, the deciding seat is not.
 	const empty = stateHome([{ id: LEAD, provider: "claude-lead/claude-opus-5", labels: { "team.cluster": "shop" } }]);
@@ -966,6 +1203,18 @@ test("the Claude hook feeds the seating gate the cluster's real seats", async ()
 	writeFileSync(join(blocked, "agents"), "not a directory");
 	const lookup = await hookCall(hookEnv("lead", LEAD, blocked), "mcp__paseo__create_agent", withSeat({}), "w-3");
 	assert.match(String(lookup?.hookSpecificOutput?.permissionDecisionReason), /SUPERVISOR_LOOKUP_FAILED/);
+
+	// One record that is not valid JSON may be the incumbent: not "nobody" either,
+	// and the refusal names it so the Human knows where to look.
+	const torn = stateHome([
+		{ id: LEAD, provider: "claude-lead/claude-opus-5", labels: { "team.cluster": "shop" } },
+		{ id: DECIDER, provider: "pi-supervisor/anthropic/model", raw: `{"id": "${DECIDER}", "prov` },
+	]);
+	const tornOut = await hookCall(hookEnv("lead", LEAD, torn.home), "mcp__paseo__create_agent", withSeat({}), "w-3b");
+	const tornReason = String(tornOut?.hookSpecificOutput?.permissionDecisionReason);
+	assert.match(tornReason, /SUPERVISOR_LOOKUP_FAILED/);
+	assert.match(tornReason, /AGENT_STATE_UNREADABLE/);
+	assert.ok(tornReason.includes(DECIDER), "it names the record");
 });
 
 test("the Claude hook holds a watch seat's recovery to its own label, and leaves a generalist alone", async () => {
@@ -982,10 +1231,11 @@ test("the Claude hook holds a watch seat's recovery to its own label, and leaves
 	assert.match(String(refused?.hookSpecificOutput?.permissionDecisionReason), /RECOVERY_NOT_DELEGATED/);
 
 	for (const id of [DECIDER, PEER /* no label at all: the generalist case */]) {
-		const outcome = await hookCall(hookEnv("supervisor", id, home), "mcp__paseo__create_agent", recovery, "w-5");
-		assert.ok(
-			!/RECOVERY_NOT_DELEGATED/.test(String(outcome?.hookSpecificOutput?.permissionDecisionReason ?? "")),
-			`${id} is not stopped by the watch rule`,
+		// Allowed outright — not merely "refused for some other reason".
+		assert.equal(
+			await hookCall(hookEnv("supervisor", id, home), "mcp__paseo__create_agent", recovery, "w-5"),
+			null,
+			`${id} may recover a Lead`,
 		);
 	}
 	// And a call that is not a create_agent never reads the state for this.
@@ -1183,9 +1433,13 @@ test("the Pi extension reads a decision's sender against its own state", async (
 
 test("the Pi extension feeds the seating gate the cluster's real seats", async () => {
 	const governed = stateHome([
-		{ id: LEAD, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } },
-		{ id: DECIDER, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "shop" } },
-		{ id: FOREIGN, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "other" } },
+	{ id: LEAD, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } },
+	{
+		id: DECIDER,
+		provider: "pi-supervisor/anthropic/model",
+		labels: { "team.cluster": "shop", [TEAM_WATCH_LABEL]: "decisions" },
+	},
+	{ id: FOREIGN, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "other" } },
 	]);
 	const create = async (home: string, labels: Record<string, string>) =>
 		(await piSeat("lead", LEAD, home))(
@@ -1203,6 +1457,12 @@ test("the Pi extension feeds the seating gate the cluster's real seats", async (
 	assert.ok(String(second?.reason).includes(DECIDER));
 	assert.ok(!String(second?.reason).includes(FOREIGN), "another project's seat is not an incumbent");
 
+	const legacy = stateHome([
+	{ id: LEAD, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } },
+	{ id: DECIDER, provider: "pi-supervisor/anthropic/model", labels: { "team.cluster": "shop" } },
+	]);
+	assert.equal((await create(legacy.home, {}))?.block, undefined, "a cluster that never used the label is left as it was");
+
 	const empty = stateHome([{ id: LEAD, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } }]);
 	assert.match(String((await create(empty.home, { [TEAM_WATCH_LABEL]: "liveness" }))?.reason), /none covers this Lead yet/);
 	assert.equal((await create(empty.home, {}))?.block, undefined, "the deciding seat comes first");
@@ -1211,6 +1471,27 @@ test("the Pi extension feeds the seating gate the cluster's real seats", async (
 	mkdirSync(blocked, { recursive: true });
 	writeFileSync(join(blocked, "agents"), "not a directory");
 	assert.match(String((await create(blocked, {}))?.reason), /SUPERVISOR_LOOKUP_FAILED/);
+
+	const torn = stateHome([
+		{ id: LEAD, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } },
+		{ id: DECIDER, provider: "pi-supervisor/anthropic/model", raw: `{"id": "${DECIDER}", "prov` },
+	]);
+	const tornReason = String((await create(torn.home, {}))?.reason);
+	assert.match(tornReason, /SUPERVISOR_LOOKUP_FAILED/);
+	assert.match(tornReason, /AGENT_STATE_UNREADABLE/);
+	assert.ok(tornReason.includes(DECIDER), "it names the record");
+
+	// An archived incumbent is not one: the successor is seated.
+	const archived = stateHome([
+		{ id: LEAD, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } },
+		{
+			id: DECIDER,
+			provider: "pi-supervisor/anthropic/model",
+			labels: { "team.cluster": "shop", [TEAM_WATCH_LABEL]: "decisions" },
+			extra: { archivedAt: ARCHIVED_AT },
+		},
+	]);
+	assert.equal((await create(archived.home, { [TEAM_WATCH_LABEL]: "decisions" }))?.block, undefined);
 });
 
 test("the Pi extension holds a watch seat's recovery to its own label", async () => {
@@ -1236,8 +1517,7 @@ test("the Pi extension holds a watch seat's recovery to its own label", async ()
 	assert.equal(refused?.block, true);
 	assert.match(String(refused?.reason), /RECOVERY_NOT_DELEGATED/);
 	for (const id of [DECIDER, PEER]) {
-		const outcome = await recover(id);
-		assert.ok(!/RECOVERY_NOT_DELEGATED/.test(String(outcome?.reason ?? "")), `${id} is not stopped by the watch rule`);
+		assert.equal(await recover(id), undefined, `${id} may recover a Lead`);
 	}
 });
 
@@ -1252,7 +1532,33 @@ test("the Pi extension refuses to let a Lead relabel a seat's watch", async () =
 	);
 	assert.equal(out?.block, true);
 	assert.match(String(out?.reason), /WATCH_IMMUTABLE/);
-});
+	});
+
+	test("a Lead's mcp_script cannot reach update_agent, where a label or a model slips past the arguments gate", async () => {
+	const script = 'tools.update_agent({ agentId: "x", labels: { "team.watch": "decisions" } })';
+	assert.match(String(mcpScriptBlockReason("lead", script)), /"update_agent" referenced in mcp_script is not in the lead MCP allowlist/);
+	assert.match(String(mcpScriptBlockReason("lead", 'tools.call("update_agent", {})')), /update_agent/);
+	assert.match(String(mcpScriptBlockReason("lead", 'tools["update_agent"]({})')), /update_agent/);
+	// The same call made directly is argument-checked, which is the point.
+	assert.match(
+		String(mcpBlockReason("lead", { tool: "update_agent", args: { agentId: LIVENESS, labels: { [TEAM_WATCH_LABEL]: "decisions" } } })),
+		/WATCH_IMMUTABLE/,
+	);
+	// What a Lead scripts that carries no label or model is left alone.
+	assert.equal(mcpScriptBlockReason("lead", "tools.list_agents({})"), null);
+	assert.equal(mcpScriptBlockReason("lead", 'tools.cancel_agent({ agentId: "x" })'), null);
+
+	// Through the Pi extension's tool_call hook, as the real call arrives.
+	const { home } = clusterHome();
+	const out = await (await piSeat("lead", LEAD, home))(
+		async (handlers) =>
+			(await handler(handlers, "tool_call")({ toolName: "mcp_script", input: { code: script } })) as
+				| { block?: boolean; reason?: string }
+				| undefined,
+	);
+	assert.equal(out?.block, true);
+	assert.match(String(out?.reason), /update_agent/);
+	});
 
 // ---------------------------------------------------------------------------
 // The doctrine is locked to the code

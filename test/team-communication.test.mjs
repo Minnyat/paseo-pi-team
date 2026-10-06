@@ -461,8 +461,48 @@ const CONSULT = {
     assert.equal(result.recipient, ids.decider, "three Supervisors, one of them decides: no SUPERVISOR_AMBIGUOUS");
     assert.equal(calls[0][1], ids.decider);
 
-    await assert.rejects(send({ supervisorAgentId: ids.liveness }), (error) => error.code === "SUPERVISOR_NOT_ELIGIBLE");
-    assert.equal(calls.length, 1, "a refused consult sends nothing");
+await assert.rejects(send({ supervisorAgentId: ids.liveness }), (error) => error.code === "SUPERVISOR_NOT_ELIGIBLE");
+assert.equal(calls.length, 1, "a refused consult sends nothing");
+
+// Paseo archives by soft delete: the record of a replaced Supervisor stays on
+// disk with archivedAt set. It is not a seat, so it is not a claimant either.
+const archived = "55555555-5555-4555-8555-555555555555";
+writeFileSync(
+  join(dir, `${archived}.json`),
+  JSON.stringify({
+    id: archived,
+    provider: "pi-supervisor/anthropic/model",
+    archivedAt: "2026-10-06T10:00:00.000Z",
+    labels: { "team.cluster": "shop", "team.watch": "decisions" },
+  }),
+);
+assert.equal((await send()).recipient, ids.decider, "an archived deciding seat does not make the consult ambiguous");
+
+// One record the scan cannot read may be the very seat being asked about, so
+// "nobody" is not an answer to give: the lookup failed, and the Lead is told so.
+const corrupt = "66666666-6666-4666-8666-666666666666";
+writeFileSync(join(dir, `${corrupt}.json`), '{"id": "66666666-6666-4666-8666-666666666666", "provider": "pi-super');
+const callsBefore = calls.length;
+await assert.rejects(send(), (error) => {
+  assert.equal(error.code, "SUPERVISOR_LOOKUP_FAILED");
+  assert.match(error.message, /AGENT_STATE_UNREADABLE/);
+  assert.ok(error.message.includes(corrupt), "it names the record");
+  return true;
+});
+assert.equal(calls.length, callsBefore, "and sends nothing");
+
+// The root itself unreadable is the same answer, not NO_SUPERVISOR_SEAT (which
+// tells a Lead it may put the question to the Human).
+const blocked = join(home, "blocked");
+mkdirSync(blocked, { recursive: true });
+writeFileSync(join(blocked, "agents"), "not a directory");
+await assert.rejects(
+  sendLeadConsult(CONSULT, {
+    env: { PASEO_AGENT_ID: ids.lead, PASEO_HOME: blocked, PASEO_TEAM_CLUSTER: "shop" },
+    runPaseo: async () => ({ ok: true, data: {} }),
+  }),
+  (error) => error.code === "SUPERVISOR_LOOKUP_FAILED",
+);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

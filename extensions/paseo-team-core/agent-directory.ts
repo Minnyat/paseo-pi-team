@@ -144,6 +144,14 @@ export interface AgentState {
 	domain: string | null;
 	/** `team.watch` as written; null when the seat carries none. See parseWatch. */
 	watch: string | null;
+	/**
+	 * Paseo archives by soft delete: the record stays on disk with `archivedAt`
+	 * set (@getpaseo/server 0.10.3, agent-archive.js, measured 2026-10-06). An
+	 * archived agent is gone for every purpose the team has — `paseo ls` hides it
+	 * and the graph never draws it — so a policy that counted its file would be
+	 * counting a seat nobody can talk to.
+	 */
+	archived: boolean;
 	parentAgentId: string | null;
 	/** The agent this one was forked from, when it was forked at all. */
 	forkOf: string | null;
@@ -212,6 +220,7 @@ export function normalizeAgentState(
 		labels,
 		domain: str(labels[AGENT_DOMAIN_LABEL]),
 		watch: str(labels[AGENT_WATCH_LABEL]),
+		archived: str(record.archivedAt) !== null,
 		parentAgentId: str(labels[AGENT_PARENT_LABEL]),
 		forkOf: str(labels[AGENT_FORK_LABEL]),
 		model,

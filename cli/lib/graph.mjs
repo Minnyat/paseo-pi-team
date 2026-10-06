@@ -217,10 +217,11 @@ export function normalizePermits(list) {
  *   - `unlabeled` — a Lead or Supervisor with no `team.domain`. Under
  *     PASEO_TEAM_TOPOLOGY=multi such a seat can neither be governed nor govern
  *     (JURISDICTION_UNVERIFIABLE / JURISDICTION_UNDECLARED).
- *   - `undecided` — Supervisors exist but none of them holds `decisions`
- *     (every one is a watch seat, `team.watch`). Nothing refuses anything here;
- *     it is the quiet case, where every consult in the cluster has
- *     nobody to land on and goes to the Human as NO_SUPERVISOR_SEAT.
+ *   - `undecided` — a watch seat (`team.watch`) with no seat that decides in
+ *     ITS cluster. Nothing refuses anything here; it is the quiet case, where
+ *     every consult in that cluster has nobody to land on and goes to the Human
+ *     as NO_SUPERVISOR_SEAT. Judged per cluster, because a deciding seat in
+ *     another project settles nothing for this one.
  *
  * Only a Supervisor that DECIDES can conflict with another: the overlap rule
  * exists to keep that authority unique, and a watch seat sharing a domain with
@@ -239,10 +240,20 @@ export function describeJurisdiction(nodes = []) {
 			role: node.role,
 			domain: normalizeDomain(node.domain),
 			rawDomain: node.domain ?? null,
+			cluster: node.cluster ?? null,
 			watch: node.role === "supervisor" ? parseWatch(node.watch) : null,
-		}));
+			}));
 	const supervisors = seats.filter((seat) => seat.role === "supervisor");
 	const deciders = supervisors.filter((seat) => seatDecides(seat.watch));
+	// A watch seat with nobody who decides in its own cluster. Where clusters are not
+	// proven separate (an unlabelled host) any deciding seat counts, as it always did.
+	const undecidedAgents = supervisors
+		.filter(
+			(seat) =>
+				!seatDecides(seat.watch) &&
+				!deciders.some((decider) => !clustersSeparate(decider.cluster, seat.cluster)),
+		)
+		.map((seat) => seat.id);
 	const conflicts = [];
 	for (let i = 0; i < deciders.length; i += 1) {
 		for (let j = i + 1; j < deciders.length; j += 1) {
@@ -269,8 +280,9 @@ export function describeJurisdiction(nodes = []) {
 			.filter((seat) => !seat.domain)
 			.map(({ id, shortId, role, rawDomain }) => ({ id, shortId, role, rawDomain })),
 		conflicts,
-		undecided: supervisors.length > 0 && deciders.length === 0,
-	};
+		undecided: undecidedAgents.length > 0,
+		undecidedAgents,
+		};
 }
 
 /**
@@ -421,6 +433,10 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// What a Supervisor seat watches (`team.watch`), as written; null when it
 			// carries none, which is a seat that watches everything and decides.
 			watch: state?.watch ?? null,
+			// The part of that label this pack cannot read ("vibes" in "liveness,vibes").
+			// A seat that carries any decides nothing, however much of the rest reads, so
+			// the board says so instead of showing a plausible-looking watch.
+			watchUnreadable: state?.watch ? (parseWatch(state.watch)?.unknown ?? []) : [],
 			// Which workspace this seat lives in (policy-core's `agentCluster`,
 			// not re-derived here — see the module comment on describeClusterMismatches
 			// for why). A node without a resolvable state file gets null, same as

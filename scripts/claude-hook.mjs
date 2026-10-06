@@ -278,7 +278,7 @@ export function leadConsultBlockNotice(core, role, block, env = process.env) {
 		attribution,
 		supervisorDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 		supervisorCluster: core.selfCluster(env),
-		supervisorWatch: core.selfWatch(env),
+		supervisorWatch: core.selfWatch?.(env),
 		topology: core.teamTopology(env),
 	});
 	return core.leadConsultTurnNotice({ block, verdict, attribution });
@@ -415,7 +415,7 @@ function selfWorkspaceForDecision({ core, claude }, role, toolName, env) {
 function watchNoticeFor(core, role, env) {
 	if (role !== "supervisor") return null;
 	try {
-		return core.watchSeatNotice?.(role, core.selfWatch(env)) ?? null;
+		return core.watchSeatNotice?.(role, core.selfWatch?.(env)) ?? null;
 	} catch {
 		return null;
 	}
@@ -426,19 +426,20 @@ function watchNoticeFor(core, role, env) {
  * resolved exactly as the Pi adapter resolves them (one shared helper in the
  * core), and read ONLY for that call: how many seats decide is the question a
  * Lead seating one is judged on, and no other tool call needs the list.
- * Undefined = not needed; null = the state directory could not be read, which
- * the core refuses rather than reading as "nobody is there yet".
+ * Undefined = not needed; otherwise { seats, fault }, where seats null means the
+ * state directory could not be read in full, which the core refuses rather than
+ * reading as "nobody is there yet", and fault says what could not be read.
  */
 function seatsForDecision({ core, claude }, role, toolName, toolInput, env) {
 	if (role !== "lead") return undefined;
 	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
 	if (classified?.kind !== "paseo-mcp") return undefined;
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
-	if (!core.seatsSupervisor(toolInput)) return undefined;
+	if (!core.seatsSupervisor?.(toolInput)) return undefined;
 	try {
-		return core.supervisorSeatsForSeating(env, { cluster: core.selfCluster(env) });
-	} catch {
-		return null;
+		return core.lookupSupervisorSeatsForSeating?.(env, { cluster: core.selfCluster(env) });
+	} catch (error) {
+		return { seats: null, fault: String(error?.message ?? error) };
 	}
 }
 
@@ -453,7 +454,7 @@ function selfWatchForDecision({ core, claude }, role, toolName, env) {
 	if (classified?.kind !== "paseo-mcp") return undefined;
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
 	try {
-		return core.selfWatch(env);
+		return core.selfWatch?.(env);
 	} catch {
 		return null;
 	}
@@ -652,6 +653,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 	if (event === "pre-tool-use") {
 		const brief = await currentBrief(payload, env, now);
 		const toolName = String(payload?.tool_name ?? "");
+		// Read only for a Lead seating a Supervisor; undefined for every other call.
+		const seatLookup = seatsForDecision({ core, claude }, role, toolName, payload?.tool_input, env);
 		const reason = claude.claudeToolBlockReason({
 			role,
 			toolName,
@@ -666,7 +669,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 			selfWatch: selfWatchForDecision({ core, claude }, role, toolName, env),
-			seats: seatsForDecision({ core, claude }, role, toolName, payload?.tool_input, env),
+			seats: seatLookup?.seats,
+			seatsFault: seatLookup?.fault,
 			cluster: core.selfCluster(env),
 			selfWorkspaceId: selfWorkspaceForDecision({ core, claude }, role, toolName, env),
 			routeTable: await routeTableForDecision({ core, claude }, role, toolName, payload?.tool_input, env),

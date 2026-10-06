@@ -112,8 +112,11 @@ của lời gọi `create_agent`: nhãn không đọc được không mua đư�
 định xin `MONITOR_ECONOMY` bị `ROUTE_CLASS_WRONG_FLOW`. Route của `MONITOR_ECONOMY`
 vẫn phải trỏ tới provider `*-supervisor` (file mẫu đã vậy); nếu trỏ `*-peer` thì Lead
 nhận `ROUTE_PROVIDER_MISMATCH` khi dựng Supervisor, y như chiều ngược lại ở trên.
-`update_agent` và fork tác động lên ghế đã tồn tại nên không truyền nhãn và thấy cả hai
-lớp: ghế mang lớp nào lúc dựng thì giữ lớp đó.
+Fork truyền nhãn mà bản sao sẽ mang, `update_agent` truyền nhãn `team.watch` đọc từ state
+của chính ghế đích: ghế quan sát đang chạy `MONITOR_ECONOMY` vẫn được đổi model trong
+route đó, còn ghế quyết định thì không bao giờ có lớp này. Gọi mà không biết gì về ghế
+chỉ thấy `SUPERVISOR_GOVERNANCE`, lớp mà mọi Supervisor luôn có — không bao giờ mua route
+rẻ bằng một lời đoán.
 
 **`update_agent`** đổi `settings.model` và/hoặc `settings.thinkingOptionId` (kể
 cả `null` — xoá về mặc định daemon) bị so với route của lớp **ghi trên chính

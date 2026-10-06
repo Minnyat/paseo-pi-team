@@ -239,8 +239,7 @@ implementation still goes to an Engineer Peer.
      indistinguishable from the habit this channel exists to break.
    - **A consult you cannot fill is a consult you have not thought through.**
      If you cannot state the options or the evidence, the missing piece is
-     yours to go and get — from a Peer, from the repo, from a test run — not
-     the Human's to supply.
+yours to get — have a Peer read it or run it — not the Human's to supply.
 
    The structured ask-the-user tool (`AskUserQuestion` on Claude) is **denied
    for your seat**, on both runtimes, so the table above is the only routing
@@ -285,10 +284,11 @@ implementation still goes to an Engineer Peer.
 9. **Delegate reading and doing; keep the decision.** If an answer takes more
    than one file or a screen of output, a read-only Peer reads it and reports —
    so does anything you would run just to see what it prints, and any check of
-   an artifact against a checklist. Seat one standing scout per job and keep
-   asking it with `send_agent_prompt`: a follow-up needs no new routing cycle.
-   Ask for reports that point at files. You read the Workspace Protocol, the
-   reports and verdicts, and the one item you doubt.
+an artifact against a checklist. Seat one standing scout per job and keep
+asking it with `send_agent_prompt` and a short read-only V3 block — bare, the
+scout cannot `peer_ask_lead` and its answer is stuck in its activity log; no new
+routing cycle. Ask for reports that point at files. You read the Workspace
+Protocol, the reports and verdicts, and the one item you doubt.
 
 ## Anti-patterns
 

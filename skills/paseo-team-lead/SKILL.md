@@ -58,10 +58,10 @@ or a screen of output, a Peer reads it and reports.
 | what a command or test prints, and whether it passes | a scout with `VERIFICATION_PROFILE: focused-test`: it runs it and reports pass/fail, the failing lines and how to reproduce |
 | whether a candidate is right | `independent-reviewer` (`REVIEW_HIGH`) |
 
-Seat ONE standing scout per job and keep using it: a follow-up is a plain
-`send_agent_prompt` and costs no routing cycle. A prompt without a V3 brief is
-read-only for that turn, which is exactly what a read wants; repeat the full
-brief only when a follow-up needs authority or the browser. Ask for reports that
+Seat ONE standing scout per job and keep using it: a follow-up is a
+`send_agent_prompt` with a short `MODE: read-only` V3 block and costs no routing
+cycle. Never send it bare: with no valid brief a Peer cannot `peer_ask_lead`, and
+you would have to read its activity log. Ask for reports that
 point at files and run about a screen; when the question needs more, ask for the
 top findings and a pointer. What you read yourself: the Workspace Protocol, the
 Peers' reports and verdicts, `git status` and a short log, and the one item of a
@@ -589,8 +589,8 @@ Failure answers from the tool itself, and what each one means:
 
 | Code | What it means | What to do |
 |---|---|---|
-| `NO_SUPERVISOR_SEAT` | this cluster has no governance seat | seat one (below); if you cannot, ask the Human **and say this is why** |
-| `SUPERVISOR_AMBIGUOUS` | two seats claim you | do not pick — a guessed answer is refused on arrival as `JURISDICTION_OVERLAP`. Raise the overlap with the Human |
+| `NO_SUPERVISOR_SEAT` | no seat that decides (watch seats alone do not count) | seat one (below); if you cannot, ask the Human **and say this is why** |
+| `SUPERVISOR_AMBIGUOUS` | two seats that decide claim you | do not pick — a guessed answer is refused on arrival as `JURISDICTION_OVERLAP`. Raise the overlap with the Human |
 | `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable | a real blocker: "I could not look" is not "there is nobody". Fix the read, do not route around it |
 | `CONSULT_FIELD_COLLISION` | pasted evidence contains a line like `SCOPE:` | reword or quote that line; it would have been read back as a field |
 
@@ -647,8 +647,8 @@ the Human already seated that way is the deciding seat here, so seat watch seats
 beside it.
 
 The policy enforces: the first seat you seat must decide; after it every seat is
-a watch seat (a second deciding seat is refused — every consult would be
-`SUPERVISOR_AMBIGUOUS`). A watch seat may route from `MONITOR_ECONOMY`, the
+a watch seat (a second deciding seat is refused once a cluster uses the label —
+every consult would be `SUPERVISOR_AMBIGUOUS`). A watch seat may route from `MONITOR_ECONOMY`, the
 deciding seat may not. `team.watch` is fixed at creation (`update_agent` refuses
 it): a different remit is a new seat. A watch seat only observes — its decision
 does not bind you (`SUPERVISOR_DECISION_NOT_DELEGATED`), it answers no consult
@@ -658,8 +658,10 @@ Brief each on its concerns and which Peers or tasks to watch, with a
 `create_heartbeat` cadence scoped to them (slow for the mechanical seats).
 Replace a heavy watch seat by seating its successor — briefed with what to keep
 watching and a pointer to the old seat's last observation — then archiving the
-old one; never fork it, a fork inherits the weight. Archive the watch seats you
-seated once the job is accepted.
+old one. The deciding seat goes the other way: ask it for a handoff note, archive
+it, then seat the successor (an archived seat is not counted). Never fork a seat;
+a fork inherits the weight. Archive the watch seats you seated once the job is
+accepted.
 
 ## Coordinating with the other seats
 

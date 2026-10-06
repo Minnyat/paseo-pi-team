@@ -155,8 +155,12 @@ seat without `decisions`, that its `SUPERVISOR_DECISION` does not bind the Lead,
 consult is not its to answer and recovering a Lead is not its act. The seat reads its
 own label off its own Paseo state (`selfWatch`); there is deliberately no env var,
 because a Lead's `create_agent` cannot set one. The same read gates the one action a
-watch seat could take that nothing could refuse afterwards: a Supervisor's lead-recovery
-`create_agent` is `RECOVERY_NOT_DELEGATED`, resolved by the hook only for that call.
+watch seat could take that nothing could refuse afterwards, and it has two doors: a
+Supervisor's lead-recovery `create_agent` is `RECOVERY_NOT_DELEGATED` (resolved by the
+hook only for that call), and so is its `team_fork` — refused inside
+`scripts/team-fork.mjs`, which both runtimes run. That script also refuses to fork INTO
+a Supervisor (`FORK_ROLE_MUST_BE_INDEPENDENT`): a Supervisor is seated by `create_agent`,
+where `team.watch`, the seat count and the route class are checked.
 
 ## What Claude roles may do
 

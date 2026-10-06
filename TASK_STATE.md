@@ -7,7 +7,8 @@
 - [x] Doctrine nói thẳng Lead giữ quyết định, không giữ dữ liệu: invariant 9 (`lead.md`), SKILL Preflight/Research/Review bước 1 không còn bảo Lead tự đọc/chạy test; có bảng "muốn biết gì → hỏi ai" và quy ước scout đứng sẵn (hỏi tiếp bằng `send_agent_prompt`, không qua lại routing cycle).
 - [x] Một cụm có thể có nhiều Supervisor mà `lead_ask_supervisor`/overlap không vỡ: nhãn `team.watch` (danh mục đóng `decisions|liveness|process|evidence|cost`), đúng một ghế giữ `decisions`.
 - [x] Mỗi loại quyền chặn ở chỗ vi phạm được: dựng ghế (Lead), đọc decision (Lead), consult, recovery (chính ghế) — trên CẢ HAI runtime.
-- [x] Không nhãn = hành vi cũ từng dòng (272 test nền vẫn xanh nguyên).
+- [x] Cụm chưa dùng nhãn giữ hành vi cũ (272 test nền xanh; ghế không nhãn cạnh ghế không nhãn vẫn dựng được như trước). Hai điều duy nhất đổi ở đó là sửa lỗi: ghế đã archive không còn bị đếm, state hỏng không còn đọc thành "chưa có ai".
+- [x] Thay ghế quyết định có đường đi: archive nó (xin ghi chú bàn giao) rồi dựng ghế mới; ghế archive không bị đếm.
 - [x] Ghế quan sát dùng được `MONITOR_ECONOMY`; ghế quyết định thì không.
 - [x] Context sạch = thay ghế (không compact, không fork); tài liệu + ví dụ (`examples/supervisor-watch.md`).
 - [x] Trong `instruction-budget` mà không nới ngân sách (gộp phần trùng thay vì append).
@@ -20,23 +21,26 @@
 - Recovery là hành động duy nhất verdict phía Lead không từ chối được sau đó → chặn ngay tại tool call của ghế.
 - `readAllAgentStates` từng nuốt `degraded` của lần quét (root không đọc được đọc thành "không có") — sửa, vì dựng ghế là quyết định dựa trên "chưa có ai".
 - Ngân sách prompt/skill giữ nguyên: gộp trùng lặp (topology/cluster trong SKILL, giải thích `modeId`, `CLUSTER_MISMATCH` trong lead.md, đoạn Cluster trong supervisor.md).
-- Không thể kiểm chứng với Paseo thật trong sandbox (không có daemon): toàn bộ là test fixture + hai adapter chạy thật (hook Claude, extension pi với stub).
+- Không có daemon Paseo trong sandbox: test là fixture + hai adapter chạy thật (hook Claude, extension pi với stub). Nhưng mã nguồn Paseo đọc được từ npm (`@getpaseo/server` 0.10.3, chỉ đọc, không chạy) nên hai giả định về dữ liệu đã được **đo**: `archive_agent` là soft delete (`buildArchivedAgentRecord` ghi `archivedAt`, file còn nguyên) và `update_agent` **gộp** nhãn (`applyLabelPatch`).
+- Quyền khôi phục Lead có HAI cửa (`create_agent`, `team_fork`); một hàm trả lời cho cả hai (`recoveryNotDelegatedReason`). Supervisor không bao giờ là sản phẩm của fork (xét theo provider, không theo `disposition` tự do).
+- Lớp route khi không biết nhãn chỉ là `SUPERVISOR_GOVERNANCE`: không bao giờ mua route rẻ bằng một lời đoán.
 
 ## Plan
 - [x] P0: đọc kiến trúc (prompts, SKILL, policy-core, hai adapter, team-communication, graph), chạy baseline 272/272 + typecheck.
 - [x] P1: lõi `team.watch` (policy-core + agent-directory) + gate dựng ghế + lớp route + verdict + consult + recovery + immutability.
 - [x] P2: nối dây pi + Claude (+ MCP description), `chooseSupervisor`, graph + WebUI.
-- [x] P3: test (`test/watch.test.mts` 49 case, + team-communication, graph, cli-contract) và mutation 32/32 bị bắt (11 con ở điểm nối dây hai adapter).
+- [x] P3: test (`test/watch.test.mts` 57 case, + team-fork, route-gate, team-communication, graph, cli-contract; cả suite 332/332) và mutation 54/54 bị bắt (20 con ở điểm nối dây của adapter).
 - [x] P4: doctrine (lead.md / supervisor.md / SKILL) + README + PR-I trong `docs/multi-supervisor-topology.md` + model-routing + claude-runtime + ví dụ.
-- [ ] P5: rà soát đối kháng bằng một agent độc lập, sửa, chạy lại toàn bộ.
+- [x] P5: rà soát đối kháng bằng agent độc lập (probe thật trên hai adapter, so với bản trước PR). Tìm ra 9 nhóm lỗi thật (fork là cửa thứ hai, route khi không biết nhãn, `mcp_script`, doctrine lệch policy về brief V3, cổng mở khi một file state hỏng, consult đọc "không đọc được" thành "không có ai", claim "cụm cũ không đổi" sai, doc drift, lỗ hổng test); đã sửa hết, mỗi cái có test. Bảng đầy đủ: `docs/multi-supervisor-topology.md` "Đã sửa sau rà soát độc lập".
+- [ ] P6: chạy lại probe của reviewer trên HEAD mới, hỏi advisor lần nữa, rồi mới nói "merge được". Chưa mở PR.
 
 ## Open questions / risks
-- Paseo có xoá state file của agent đã archive không? Chưa đo. Nếu không, ghế quyết định đã archive vẫn đếm là ghế đang có.
+- (Đã đo, đóng: Paseo archive = soft delete với `archivedAt`; policy bỏ ghế đó ra khỏi danh sách ghế.) Còn mở: hai `create_agent` quyết định trong cùng một lượt (Claude song song) cùng qua cổng; `selfWatch` đọc "không đọc được" thành "không nhãn" (cố ý, xem PR-I); ghế không nhãn có sẵn không bao giờ thu hẹp được.
 - Supervisor không có terminal nên không dùng được `pteam activity --max-chars`; `process`/`evidence` đọc báo cáo qua `get_agent_activity` thô. Công cụ đọc activity có cap cho Supervisor là bước tiếp theo hợp lý.
 - Ngưỡng "task dài" là phán đoán của Lead (không có số ép). Nếu thực tế Lead không dựng ghế quan sát, cần xem lại liệu có nên nhắc ở `LEAD_STANDING_AUTHORITY`.
 
 ## Log
-- (2026-10-06) P0–P4 xong, đang ở P5 (rà soát đối kháng). Chi tiết thiết kế và bảng "Đã giao": `docs/multi-supervisor-topology.md` §PR-I.
+- (2026-10-06) P0–P4 xong, commit 5ee7407 đã push lên `claude/lead-workload-supervisors-7lh3uf`. User hỏi "merge được chưa, hỏi advisor đi": advisor nói CHƯA (cổng dựng ghế đổi hành vi mặc định, không có đường thay ghế quyết định), reviewer độc lập xác nhận thêm hàng loạt lỗi thật. Đã đo Paseo 0.10.3 từ npm (archive = soft delete; update_agent gộp nhãn) rồi sửa hết (P5). Chi tiết thiết kế, bảng "Đã giao" và "Đã sửa sau rà soát độc lập": `docs/multi-supervisor-topology.md` §PR-I.
 
 ---
 

@@ -300,6 +300,8 @@ export interface ClaudeToolDecisionInput {
 	 *  when a Lead is seating a Supervisor (supervisorSeatsForSeating). Undefined
 	 *  skips the how-many-deciders rules; null — unreadable — refuses. */
 	seats?: SupervisorSeat[] | null;
+	/** What could not be read when `seats` is null; named in the refusal. */
+	seatsFault?: string | null;
 	/** Ownership of a send_agent_prompt target, resolved by the hook. Undefined
 	 *  means "not needed"; null means "could not be resolved" (fail-closed). */
 	promptTarget?: AgentOwnership | null;
@@ -455,6 +457,7 @@ export function claudeToolBlockReason(
 				topology: input.topology ?? "single",
 				selfDomain: input.selfDomain ?? null,
 				seats: input.seats,
+				seatsFault: input.seatsFault,
 			});
 			if (supervisorSeatBlock) return supervisorSeatBlock;
 		}

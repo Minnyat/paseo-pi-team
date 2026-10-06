@@ -77,8 +77,9 @@ What the policy says when the order or the count is wrong:
 | The Lead tries | Answer |
 |---|---|
 | a watch seat before any seat that decides | refused — *"a watch seat … reports beside a Supervisor that decides, and none covers this Lead yet"* |
-| a second seat with no `team.watch`, or one naming `decisions` | refused — *"this cluster already has a Supervisor that decides (…)"*; every consult would be `SUPERVISOR_AMBIGUOUS` |
+| a second seat with no `team.watch`, or one naming `decisions`, beside the seat above | refused — *"this cluster already has a Supervisor that decides (…)"*; every consult would be `SUPERVISOR_AMBIGUOUS`. (Beside a seat that carries no `team.watch` either, a label-free seat is allowed exactly as it always was.) |
 | `team.watch: "liveness,vibes"` | refused, naming what is not in the catalog |
+| a key spelled `Team.Watch` or `team_watch` | refused — *"Label keys are exact"*; the seat would otherwise read as one that watches everything and decides |
 | `MONITOR_ECONOMY` for the seat that decides | `ROUTE_CLASS_WRONG_FLOW` — it keeps `SUPERVISOR_GOVERNANCE` |
 | `update_agent` setting `team.watch` later | `WATCH_IMMUTABLE` — a different remit is a new seat |
 
@@ -122,16 +123,24 @@ Paseo state, not from anything the message says.
 
 The Lead holds decisions, not data. One read-only scout, seated once, answers
 everything that would otherwise be the Lead reading files or running commands. A
-follow-up is a plain `send_agent_prompt` — no routing cycle, and no V3 brief,
-because a prompt without one is read-only for that turn, which is what a read wants:
+follow-up is a `send_agent_prompt` carrying a short read-only V3 block: no new
+routing cycle, but never bare — a Peer with no valid brief cannot `peer_ask_lead`,
+so it could hand its answer back only through the activity log the Lead is trying
+not to read. The prompt to the standing scout:
 
 ```text
-send_agent_prompt {
-  agentId: "<the standing scout>",
-  prompt: "Which module recalculates order-level discounts today, and is the
-           two-pass behaviour one function or a protocol across modules? About a
-           screen, pointing at files and lines — I don't need the code pasted back."
-}
+PASEO_TEAM_TASK_V3_BEGIN
+
+TASK_ID: T-005
+PROJECT_ID: shop
+DISPOSITION: repository-scout
+MODE: read-only
+
+PASEO_TEAM_TASK_V3_END
+
+Which module recalculates order-level discounts today, and is the two-pass
+behaviour one function or a protocol across modules? About a screen, pointing at
+files and lines — I don't need the code pasted back.
 ```
 
 ## 5. Replacing a heavy watch seat
@@ -142,3 +151,13 @@ with the same `team.watch`, briefed with what to keep watching and a pointer to 
 old seat's last observation, and then archives the old one. Two seats with the same
 watch for a moment is fine: attention may overlap. When the job is accepted the Lead
 archives the watch seats it seated; the seat that decides stays.
+
+## 6. Replacing the seat that decides
+
+Two seats that decide would make every consult ambiguous, so this one goes the other
+way round: the Lead asks the deciding seat for a handoff note (what it decided, what
+is still open), archives it, then seats the successor with the same labels, briefed
+from the note. Paseo archives by soft delete — the old record stays on disk with
+`archivedAt` set — and the policy does not count an archived seat, so the successor
+is not refused as a second decider. Between the archive and the successor, a consult
+reports `NO_SUPERVISOR_SEAT`, which is the one case where asking the Human is right.

@@ -370,7 +370,9 @@ export async function sendLeadConsult(input, options = {}) {
   const leadDomain = core.normalizeDomain(env.PASEO_TEAM_DOMAIN ?? null);
   let seats;
   try {
-    seats = core.supervisorSeats(env, { cluster });
+    // `strict`: the answer on offer includes "nobody", and an agent-state file
+    // the scan could not read may be the very seat being asked about.
+    seats = core.supervisorSeats(env, { cluster, strict: true });
   } catch (error) {
     // Fail-closed, and say which half failed: "I could not look" must never be
     // reported as "there is nobody", or the Lead concludes it may ask the Human.

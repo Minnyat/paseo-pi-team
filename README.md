@@ -362,7 +362,8 @@ straight back into asking the Human:
 |---|---|
 | `NO_SUPERVISOR_SEAT` | this cluster has no seat that decides — the one case where asking the Human is correct (watch seats alone do not count). The message carries the `create_agent` call that fixes it |
 | `SUPERVISOR_AMBIGUOUS` | two seats that DECIDE claim this Lead; picking one would ratify an overlap the Lead's own runtime refuses as `JURISDICTION_OVERLAP` |
-| `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable — "could not look" is never reported as "there is nobody" |
+| `SUPERVISOR_NOT_ELIGIBLE` | the `supervisorAgentId` the Lead named does not govern it: another cluster's seat, or a watch seat (the message points at the seat that decides) |
+| `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable — even one torn record, since it may be the seat being asked about. "Could not look" is never reported as "there is nobody" |
 | `CONSULT_FIELD_COLLISION` | a body line like `SCOPE:` would be read back as a field |
 
 A Lead may also **seat the Supervisor that governs it** when the cluster has
@@ -503,20 +504,23 @@ live in it, and the rules keep them apart:
   observation is advice the Lead weighs, never something it acts on.
 - **Authority** (`decisions`) is held by exactly one seat per jurisdiction, because
   it is what the overlap rules exist to keep unique. A seat without it cannot use
-  it. No `team.watch` at all is the seat the pack has always had — it watches
-  everything and decides — so an existing cluster changes in no way.
+it. No `team.watch` at all is the seat the pack has always had — it watches
+everything and decides. A cluster that never uses the label keeps what it had: the
+seating rules below take hold once a seat carries one (a label-free seat beside
+label-free seats is allowed exactly as before), and an archived Supervisor — Paseo
+archives by soft delete and leaves the record — is no longer counted as a seat.
 
 What the policy enforces, on both runtimes:
 
 | Where | Rule |
 |---|---|
-| a Lead seating a Supervisor | the first seat decides; after it every seat is a watch seat. A second deciding seat is refused (it would make every consult `SUPERVISOR_AMBIGUOUS`); an unreadable seat list refuses (`SUPERVISOR_LOOKUP_FAILED`); a label outside the catalog is refused by name |
+| a Lead seating a Supervisor | the first seat decides; after it every seat is a watch seat. A second deciding seat is refused (it would make every consult `SUPERVISOR_AMBIGUOUS`) — to replace the deciding seat, archive it, then seat the successor; an unreadable seat list, even one torn record, refuses (`SUPERVISOR_LOOKUP_FAILED`, naming what could not be read); a label outside the catalog, or a key that is not exactly `team.watch`, is refused by name |
 | route class | a watch seat may route from `MONITOR_ECONOMY`, the class that already meant "supervisor heartbeat, structured observation"; the seat that decides keeps `SUPERVISOR_GOVERNANCE` |
-| `update_agent` | refuses `team.watch` (`WATCH_IMMUTABLE`): what a seat watches is fixed at creation, so a different remit is a new seat |
+| `update_agent` | refuses `team.watch` (`WATCH_IMMUTABLE`): what a seat watches is fixed at creation, so a different remit is a new seat. A Lead's `mcp_script` cannot call `update_agent` at all: a script hides the arguments this rule reads |
 | the Lead reading a decision | from a verified watch seat it is `SUPERVISOR_DECISION_NOT_DELEGATED` — refused, weighed as an observation. Read off the sender's own Paseo state, not off its message |
 | overlap under `multi` | only seats that decide can overlap; observers sharing a deciding seat's domain are the intended shape |
 | the consult | `lead_ask_supervisor` never picks a watch seat; one that arrives anyway is `LEAD_CONSULT_NOT_DECIDING` |
-| Lead recovery | a watch seat's `create_agent` is `RECOVERY_NOT_DELEGATED` — the one *action* the Lead's verdict cannot refuse afterwards |
+| Lead recovery | a watch seat's `create_agent` **and its `team_fork`** are `RECOVERY_NOT_DELEGATED` — the one *action* the Lead's verdict cannot refuse afterwards. A Supervisor is never seated by a fork (`FORK_ROLE_MUST_BE_INDEPENDENT`) |
 
 Each Supervisor is also told, every turn on pi and at session start on Claude, what
 its own label says and what it may not do. `pteam graph` shows each seat's watch,

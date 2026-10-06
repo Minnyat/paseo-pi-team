@@ -782,7 +782,9 @@ function renderList(graph) {
 						runtimeLabel(node) ? el("span", { class: "tag", text: runtimeLabel(node) }) : null,
 						node.seat ? el("span", { class: "tag", text: node.seat }) : null,
 						advanced && node.domain ? el("span", { class: "tag", text: node.domain }) : null,
-					advanced && node.role === "supervisor" ? el("span", { class: "tag", text: watchLabel(node.watch) }) : null,
+						advanced && node.role === "supervisor"
+							? el("span", { class: "tag", text: watchLabel(node.watch, node.watchUnreadable) })
+							: null,
 					]),
 					el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
 					el("td", { class: "col-parent", text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
@@ -806,8 +808,12 @@ function domainLabel(domain) {
  * has always had — it watches everything and decides — and says so, instead of
  * showing a blank that reads as "unknown".
  */
-function watchLabel(watch) {
-	return watch ? `giám sát: ${watch}` : "giám sát: tất cả";
+function watchLabel(watch, unreadable = []) {
+if (!watch) return "giám sát: tất cả";
+// A label with a part this pack cannot read makes a seat that decides nothing,
+// whatever the rest says — so it must not look like a plausible watch.
+const flaw = unreadable.length > 0 ? ` ⚠ không đọc được: ${unreadable.join(", ")} — ghế này không quyết định gì` : "";
+return `giám sát: ${watch}${flaw}`;
 }
 
 /**
@@ -985,7 +991,9 @@ function openDrawer(node) {
 			facts.push(["Phạm vi quản (team.domain)", domainLabel(node.domain)]);
 			facts.push(["Cluster (team.cluster)", node.cluster ?? "chưa xác định được"]);
 		}
-		if (node.role === "supervisor") facts.push(["Loại giám sát (team.watch)", watchLabel(node.watch).replace("giám sát: ", "")]);
+		if (node.role === "supervisor") {
+			facts.push(["Loại giám sát (team.watch)", watchLabel(node.watch, node.watchUnreadable).replace("giám sát: ", "")]);
+		}
 		facts.push(["Mã agent", node.id], ["Nhà cung cấp", node.provider], ["Mức suy nghĩ", node.thinking]);
 	}
 	body.appendChild(kvTable(facts));

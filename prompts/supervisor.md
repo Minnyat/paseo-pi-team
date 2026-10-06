@@ -36,7 +36,7 @@ all:
 
 - `decisions` — consults, delegated decisions, Lead recovery. Reads the consult.
 - `liveness` — stale, unknown or parked seats, host health: `team_watchdog` and
-  `get_agent_status`, never `get_agent_activity`.
+`get_agent_status`; activity only for the one seat you must confirm, tailed.
 - `process` — the Lead against the protocol and its doctrine: brainstorming kept
   open, phases a dependency requires, one writer per scope, the Lead doing
   Peers' reading or running. Reads the Lead's recent activity and briefs.
