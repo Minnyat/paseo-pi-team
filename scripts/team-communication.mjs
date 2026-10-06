@@ -266,6 +266,13 @@ export function validateConsult(input, fieldNames) {
  * Lead — a Supervisor that could not issue a binding decision here is not an
  * address, it is a detour.
  *
+ * Only a seat that DECIDES is ever a candidate. A watch seat (`team.watch`
+ * without `decisions`) observes: a consult sent to one would come back refused
+ * (LEAD_CONSULT_NOT_DECIDING), so listing it would turn "several Supervisors on
+ * a long job" into SUPERVISOR_AMBIGUOUS for every question. `seatDecides` is
+ * injected from the core, which owns the rule; without it every seat is a
+ * candidate, exactly as before the watch existed.
+ *
  * Both failure directions are named rather than guessed. Zero seats is the one
  * case that legitimises asking the Human, and it says so. More than one is a
  * governance question — which of them speaks for me? — that a sender must not
@@ -273,13 +280,25 @@ export function validateConsult(input, fieldNames) {
  * claimants in that situation (JURISDICTION_OVERLAP) and the answer would be
  * thrown away on arrival.
  */
-export function chooseSupervisor({ seats, topology, leadDomain, domainCovers, requested }) {
+export function chooseSupervisor({ seats, topology, leadDomain, domainCovers, requested, seatDecides }) {
+  const deciding = seatDecides ? seats.filter((seat) => seatDecides(seat.watch)) : seats;
   const candidates = topology === "multi"
-    ? seats.filter((seat) => seat.domain && leadDomain && domainCovers(seat.domain, leadDomain))
-    : seats;
+    ? deciding.filter((seat) => seat.domain && leadDomain && domainCovers(seat.domain, leadDomain))
+    : deciding;
   if (requested) {
     const match = candidates.find((seat) => seat.agentId === requested);
     if (match) return match;
+    const asked = seats.find((seat) => seat.agentId === requested);
+    if (seatDecides && asked && !seatDecides(asked.watch)) {
+      throw Object.assign(
+        new Error(
+          `SUPERVISOR_NOT_ELIGIBLE: ${requested} is a watch seat (team.watch: ${asked.watch?.concerns?.join(", ") || "unreadable"}); it observes and cannot decide. Consult the seat that holds "decisions"${
+            candidates.length ? ` (${candidates.map((seat) => seat.agentId).join(", ")})` : ""
+          }.`,
+        ),
+        { code: "SUPERVISOR_NOT_ELIGIBLE" },
+      );
+    }
     const known = candidates.length
       ? ` (eligible: ${candidates.map((seat) => seat.agentId).join(", ")})`
       : " (this cluster has none)";
@@ -289,9 +308,11 @@ export function chooseSupervisor({ seats, topology, leadDomain, domainCovers, re
     );
   }
   if (candidates.length === 0) {
-    const reason = topology === "multi" && seats.length > 0
-      ? `this cluster has ${seats.length} Supervisor seat(s), but none carries a team.domain covering "${leadDomain ?? "<this Lead has no team.domain>"}". Ask the Human to label the seats, or seat a Supervisor for your own domain.`
-      : 'this cluster has no Supervisor seat, so it has no delegated decision path at all. Seat one with create_agent (provider "<family>-supervisor/<...>/<model-id>", labels.purpose "governance", labels["team.cluster"] set to your own cluster, settings.thinkingOptionId routed from cluster-routing.local.json), then consult it. If seating one is not possible, this is the reason you may put the question to the Human — say so explicitly.';
+    const reason = seatDecides && seats.length > 0 && deciding.length === 0
+      ? `this cluster has ${seats.length} Supervisor seat(s), but every one is a watch seat — they observe and cannot decide, so the cluster still has no delegated decision path. Seat the governance seat with create_agent (a Supervisor with no labels["team.watch"], or one whose team.watch includes "decisions"), then consult it. If seating one is not possible, this is the reason you may put the question to the Human — say so explicitly.`
+      : topology === "multi" && deciding.length > 0
+        ? `this cluster has ${deciding.length} Supervisor seat(s) that decide, but none carries a team.domain covering "${leadDomain ?? "<this Lead has no team.domain>"}". Ask the Human to label the seats, or seat a Supervisor for your own domain.`
+        : 'this cluster has no Supervisor seat, so it has no delegated decision path at all. Seat one with create_agent (provider "<family>-supervisor/<...>/<model-id>", labels.purpose "governance", labels["team.cluster"] set to your own cluster, settings.thinkingOptionId routed from cluster-routing.local.json), then consult it. If seating one is not possible, this is the reason you may put the question to the Human — say so explicitly.';
     throw Object.assign(new Error(`NO_SUPERVISOR_SEAT: ${reason}`), { code: "NO_SUPERVISOR_SEAT" });
   }
   if (candidates.length > 1) {
@@ -365,6 +386,7 @@ export async function sendLeadConsult(input, options = {}) {
     topology,
     leadDomain,
     domainCovers: core.domainCovers,
+    seatDecides: core.seatDecides,
     requested: consult.supervisorAgentId,
   });
   const body = buildConsultBody(consult, { self, domain: leadDomain, header: core.LEAD_CONSULT_HEADER });

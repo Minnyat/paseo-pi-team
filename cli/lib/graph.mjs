@@ -29,6 +29,8 @@ import {
 	clustersSeparate,
 	domainConflicts,
 	normalizeDomain,
+	parseWatch,
+	seatDecides,
 	TEAM_CLUSTER_LABEL,
 } from "../../extensions/paseo-team-core/policy-core.js";
 
@@ -215,6 +217,14 @@ export function normalizePermits(list) {
  *   - `unlabeled` — a Lead or Supervisor with no `team.domain`. Under
  *     PASEO_TEAM_TOPOLOGY=multi such a seat can neither be governed nor govern
  *     (JURISDICTION_UNVERIFIABLE / JURISDICTION_UNDECLARED).
+ *   - `undecided` — Supervisors exist but none of them holds `decisions`
+ *     (every one is a watch seat, `team.watch`). Nothing refuses anything here;
+ *     it is the quiet case, where every consult in the cluster has
+ *     nobody to land on and goes to the Human as NO_SUPERVISOR_SEAT.
+ *
+ * Only a Supervisor that DECIDES can conflict with another: the overlap rule
+ * exists to keep that authority unique, and a watch seat sharing a domain with
+ * the deciding seat is the intended shape of a long job, not a fault.
  *
  * Reported for every topology: the graph does not read the agents' own env, so
  * it cannot know which of them run under `multi`, and showing the conflict on a
@@ -229,13 +239,15 @@ export function describeJurisdiction(nodes = []) {
 			role: node.role,
 			domain: normalizeDomain(node.domain),
 			rawDomain: node.domain ?? null,
+			watch: node.role === "supervisor" ? parseWatch(node.watch) : null,
 		}));
 	const supervisors = seats.filter((seat) => seat.role === "supervisor");
+	const deciders = supervisors.filter((seat) => seatDecides(seat.watch));
 	const conflicts = [];
-	for (let i = 0; i < supervisors.length; i += 1) {
-		for (let j = i + 1; j < supervisors.length; j += 1) {
-			const a = supervisors[i];
-			const b = supervisors[j];
+	for (let i = 0; i < deciders.length; i += 1) {
+		for (let j = i + 1; j < deciders.length; j += 1) {
+			const a = deciders[i];
+			const b = deciders[j];
 			if (!a.domain || !b.domain) continue;
 			if (!domainConflicts(a.domain, b.domain)) continue;
 			conflicts.push({
@@ -246,11 +258,18 @@ export function describeJurisdiction(nodes = []) {
 		}
 	}
 	return {
-		supervisors: supervisors.map(({ id, shortId, domain }) => ({ id, shortId, domain })),
+		supervisors: supervisors.map(({ id, shortId, domain, watch }) => ({
+			id,
+			shortId,
+			domain,
+			watch: watch ? watch.concerns : null,
+			decides: seatDecides(watch),
+		})),
 		unlabeled: seats
 			.filter((seat) => !seat.domain)
 			.map(({ id, shortId, role, rawDomain }) => ({ id, shortId, role, rawDomain })),
 		conflicts,
+		undecided: supervisors.length > 0 && deciders.length === 0,
 	};
 }
 
@@ -399,6 +418,9 @@ export function buildGraph({ agents = [], parents = {}, states = {}, permits = [
 			// From Paseo's own agent state file. A node without one still renders;
 			// these are simply null, and the read fault is in degraded[].
 			domain: state?.domain ?? null,
+			// What a Supervisor seat watches (`team.watch`), as written; null when it
+			// carries none, which is a seat that watches everything and decides.
+			watch: state?.watch ?? null,
 			// Which workspace this seat lives in (policy-core's `agentCluster`,
 			// not re-derived here — see the module comment on describeClusterMismatches
 			// for why). A node without a resolvable state file gets null, same as

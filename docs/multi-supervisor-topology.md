@@ -895,6 +895,131 @@ parity trong `claude-team-mcp.test.mjs` + đường lazy-core trong
 chỉ đọc `PEER_MESSAGE_V1` từ timeline của Lead; consult nằm trong timeline của
 Supervisor, nên cần một lượt quét nữa — thuần quan sát, không ảnh hưởng luật.
 
+### PR-I — Supervisor theo loại việc (`team.watch`), và Lead giao việc đọc/làm — ✅ ĐÃ LÀM
+
+**Triệu chứng.** Hai cái, cùng một gốc: một ghế tiêu context cho việc mà ghế khác
+làm rẻ hơn.
+
+1. **Lead làm quá nhiều.** Doctrine cho phép và còn chỉ đường: `lead.md`
+   §Authority ghi *"read the repo, protocols, docs, history, and evidence"*;
+   Preflight bảo Lead tự kiểm repo và tự đọc tài liệu; Research chỉ giao Peer khi
+   câu hỏi "không tự trả lời được từ repo"; Review bước 1 bảo Lead tự chạy
+   `git show`/`git diff`/`git archive … | tar` để chạy test. Hệ quả: context của ghế
+   đắt nhất cụm đầy bằng file, log, diff, output test mà Lead chỉ cần *câu trả lời*.
+   (README đã nói thẳng nguồn lớn nhất của việc đầy context — report nhét nguyên tài
+   liệu — nhưng chỉ chữa phía Peer.)
+2. **Task dài chỉ có một Supervisor, và không thể có hai.** Một ghế ôm consult,
+   vòng liveness, kiểm process/review, chi phí — context đầy y như Lead. Muốn tách
+   thì chặn ngay: `chooseSupervisor` trả `SUPERVISOR_AMBIGUOUS` khi cụm có hơn một
+   ghế (`single`), còn `supervisorJurisdictionVerdict` thấy hai ghế phủ cùng một Lead
+   thì Lead từ chối **cả hai** (`JURISDICTION_OVERLAP`, `multi`). Tức là doctrine
+   "dựng thêm supervisor" sẽ làm hỏng `lead_ask_supervisor`, không chỉ trái prompt.
+
+**Tiền đề.** Mỗi ghế chỉ tiêu context cho việc chỉ ghế đó làm được. Lead giữ
+*quyết định*, không giữ *dữ liệu*; việc đọc và chạy là của Peer. Việc giám sát một
+job dài là của Supervisor, **chia theo loại** để mỗi context chỉ chứa một loại và
+một ghế nặng thay được mà không mất phần còn lại.
+
+**Năm quyết định thiết kế, và lý do:**
+
+1. **Một nhãn, hai thứ khác nhau.** `team.watch` là danh sách từ một danh mục đóng
+   (`decisions`, `liveness`, `process`, `evidence`, `cost`). Bốn cái sau là *sự chú
+   ý*: chồng lấn thoải mái, vì một observation là lời khuyên Lead cân nhắc chứ không
+   bao giờ hành động theo. `decisions` là *quyền*: trả lời consult, ra
+   `SUPERVISOR_DECISION` ràng buộc, khôi phục Lead. Quyền mới là thứ các luật overlap
+   tồn tại để giữ duy nhất, nên mỗi jurisdiction đúng một ghế giữ; ghế không giữ thì
+   không dùng được. Không có nhãn = ghế mà pack vốn có (xem mọi thứ và quyết định):
+   cụm hiện tại không đổi một dòng hành vi nào.
+2. **Quyền bị chặn ở chỗ nó có thể bị vi phạm, không ở một chỗ.** Lead dựng ghế
+   (ghế đầu phải là ghế quyết định; sau đó chỉ ghế quan sát; ghế quyết định thứ hai
+   bị từ chối vì sẽ làm mọi consult thành `SUPERVISOR_AMBIGUOUS`). Lead *đọc* decision
+   (`SUPERVISOR_DECISION_NOT_DELEGATED`, đọc từ state của **người gửi**, không từ nội
+   dung message — message không có trường nào để tự nhận `decisions`). Consult
+   (`chooseSupervisor` không bao giờ chọn ghế quan sát; consult lạc vào vẫn bị
+   `LEAD_CONSULT_NOT_DECIDING` và lời từ chối vẫn gửi ngược lại để Lead không chờ).
+   Khôi phục Lead (`RECOVERY_NOT_DELEGATED`) — chặn ngay tại tool call của chính ghế
+   đó, vì đây là *hành động* duy nhất mà verdict phía Lead không từ chối được sau
+   khi đã xảy ra.
+3. **Nhãn không đọc được thì không có quyền — không phải "không nhãn".** `null` là
+   câu trả lời đầy quyền, nên một lỗi gõ (`decison`) không được là cách rẻ nhất để
+   có nó: `parseWatch` trả về nhãn có `unknown[]` chứ không trả `null`, và
+   `seatDecides` từ chối cả `"decisions, vibes"`. Cùng bản năng với
+   `PASEO_TEAM_TOPOLOGY` gõ sai: sai về phía chỉ-từ-chối.
+4. **Nhãn bất biến sau khi dựng.** `update_agent` nhận `labels`, nên không chặn thì
+   Lead dựng một observer rồi đổi nó thành ghế quyết định thứ hai ngay lời gọi sau —
+   hoặc đổi chính giám khảo của mình thành ghế không quyết định gì. Cùng lý do
+   `team.model-class` bất biến (`WATCH_IMMUTABLE`). Đổi phần việc = dựng ghế mới.
+5. **Context sạch bằng thay thế, không bằng compact hay fork.** Ghế quan sát không
+   giữ gì mà briefing của Lead không mang được, nên ghế nặng được *thay*: dựng ghế kế
+   nhiệm (briefing + con trỏ tới observation cuối của ghế cũ) rồi archive ghế cũ. Fork
+   bị loại vì thừa hưởng đúng thứ cần bỏ (§1.12). Hai ghế cùng `team.watch` trong chốc
+   lát là hợp lệ — sự chú ý được chồng lấn.
+
+Kèm theo: ghế quan sát được route từ `MONITOR_ECONOMY` — lớp vốn ghi là "supervisor
+heartbeat, structured observation" mà trước đây không luồng nào dựng được. Ghế quyết
+định giữ `SUPERVISOR_GOVERNANCE` (chất lượng suy luận của nó là load-bearing); nhãn không
+đọc được không mua được route rẻ. `update_agent`/fork không truyền nhãn nên thấy cả hai
+lớp: ghế đã dựng mang lớp nào thì giữ lớp đó.
+
+**Doctrine — phần không thể thi hành bằng code, nên viết vào chỗ Lead đọc:**
+`lead.md` invariant 9 (*Delegate reading and doing; keep the decision*: nếu một câu
+trả lời cần hơn một file hoặc một màn output thì Peer đọc; một scout đứng sẵn mỗi job,
+hỏi tiếp bằng `send_agent_prompt` không phải qua lại routing cycle) và hai anti-pattern;
+SKILL: Preflight (chỉ liếc `git status` + `git log` ngắn, đọc `WORKSPACE_PROTOCOL.md`),
+Research ("việc của Peer, không phải của bạn") kèm mục **Delegating reading and doing**
+(bảng *muốn biết gì → hỏi ai*), Review bước 1 (scout đọc diff và chạy test — Lead đọc
+`git diff --stat` và báo cáo), mục **Seating supervisors for a long job**; `supervisor.md`
+mục **Your watch** (mỗi concern đọc gì, không đọc gì) và anti-pattern "Lead tự đọc/chạy
+thay Peer" cho ghế `process` bắt được. Ba file nằm trong `instruction-budget.test.mjs`
+nên phần trùng lặp (topology/cluster trong SKILL, giải thích `modeId`, `CLUSTER_MISMATCH`)
+được gộp lại thay vì nới ngân sách: *integrate, don't append*.
+
+#### Đã giao
+
+| Thành phần | Nơi |
+|---|---|
+| `TEAM_WATCH_LABEL`, `WATCH_CONCERNS` (danh mục đóng), `parseWatch` (fail-closed), `seatDecides`, `watchIsValid`, `describeWatch`, `selfWatch` (đọc nhãn từ state của chính ghế — không có env vì `create_agent` của Lead không đặt được env) | `policy-core.ts` |
+| `AgentState.watch` (nhãn thô), `AGENT_WATCH_LABEL`; sửa `readAllAgentStates` để không nuốt `degraded` của lần quét (trước đây "không đọc được" đọc thành "không có") | `agent-directory.ts` |
+| `SupervisorSeat.watch`, `AgentOwnership.watch`, `SupervisorAttribution.watch`; `supervisorSeatsForSeating` (null = "không nhìn được", khác với `[]` = "chưa có ai") | `policy-core.ts` |
+| Overlap chỉ tính ghế quyết định; ghế quan sát gửi message không có gì để tranh chấp | `supervisorJurisdictionVerdict` |
+| `SUPERVISOR_DECISION_NOT_DELEGATED` (trên **mọi** topology, trước jurisdiction, chỉ với sender đã verified) | `supervisorTurnVerdict` |
+| `LEAD_CONSULT_NOT_DECIDING` (sau cluster, trước sender) | `leadConsultVerdict` |
+| Gate dựng ghế: ghế đầu phải quyết định; sau đó chỉ ghế quan sát; nhãn ngoài danh mục bị từ chối kèm tên; seat list không đọc được → `SUPERVISOR_LOOKUP_FAILED`; dưới `multi` chỉ ghế có jurisdiction giao nhau mới tranh chấp | `leadCreateSupervisorArgsBlockReason` + `LeadSeatingContext` |
+| `modelClassesForFlow(creator, target, labels?)` — `MONITOR_ECONOMY` cho ghế quan sát hợp lệ | `policy-core.ts` |
+| `updateAgentWatchBlockReason` (`WATCH_IMMUTABLE`) | `policy-core.ts`, nối ở `mcpBlockReason` + `claudeToolBlockReason` |
+| `RECOVERY_NOT_DELEGATED` | `supervisorCreateAgentArgsBlockReason` (`selfWatch`) |
+| `watchSeatNotice` — ghế được runtime cho biết nó theo dõi gì và không được làm gì (pi: mỗi lượt; Claude: session-start + lượt đầu) | `policy-core.ts`, `paseo-team-policy.ts`, `claude-hook.mjs` |
+| `chooseSupervisor` chỉ chọn ghế quyết định (`seatDecides` được tiêm từ core), `NO_SUPERVISOR_SEAT` nói rõ "chỉ có ghế quan sát" | `scripts/team-communication.mjs` |
+| Nối dây hai adapter: `seats` (chỉ đọc cho đúng lời gọi dựng Supervisor), `selfWatch` (chỉ cho `create_agent` của Supervisor) | `paseo-team-policy.ts` `governanceContext`; `claude-hook.mjs` `seatsForDecision`/`selfWatchForDecision`; `claude-policy.ts` |
+| `graph.jurisdiction.undecided` ("chỉ có ghế quan sát, chưa ai quyết định" — lỗi im lặng duy nhất của hình dạng này), conflicts chỉ giữa ghế quyết định, node mang `watch` | `cli/lib/graph.mjs`; WebUI `app.js` |
+
+Test: `test/watch.test.mts` (49 case: danh mục, parser, gate dựng ghế trên cả hai
+runtime, lớp route, verdict, overlap, consult, recovery, và **hai adapter chạy thật**:
+hook Claude và extension pi) + `team-communication.test.mjs` (chọn ghế quyết định,
+end-to-end với core thật) + `graph.test.mjs` + `cli-contract.test.mjs` (`pteam agents`
+in nhãn `watch`). Đo bằng mutation (`mutate`, chạy riêng các file test liên quan):
+**32/32 đột biến bị bắt**, gồm 11 đột biến ở điểm nối dây của hai adapter (`seats`,
+`selfWatch`, cổng `update_agent`, notice) — loại lỗi đã làm hỏng repo này nhiều lần
+(README, "Testing the tests").
+
+**Chưa giải quyết, nói thẳng:**
+
+- Chưa đo xem Paseo có xoá state file của agent đã archive không. Nếu không, ghế
+  quyết định đã archive vẫn đếm là ghế đang có (và Lead sẽ bị từ chối khi dựng ghế
+  quyết định mới, kèm tên ghế cần Human xử lý). Hành vi này đã có sẵn dưới `multi`
+  (overlap với ghế đã archive) — PR này không làm nó tệ hơn nhưng cũng chưa sửa.
+- Supervisor không có terminal nên không dùng được `pteam activity --max-chars`;
+  `get_agent_activity` thô vẫn là nguồn đọc log duy nhất của nó. Ghế `process` và
+  `evidence` đọc báo cáo của Peer — nên quy tắc "report trỏ tới file, dài cỡ một màn"
+  quan trọng gấp đôi. Công cụ đọc activity có cap dành riêng cho Supervisor là bước
+  tiếp theo hợp lý, chưa làm.
+- Nhãn vẫn là nhãn: Lead có bash nên chạy được Paseo CLI để đổi nhãn. Cùng ranh giới
+  tin cậy với parentage và domain (§1.10) — chặn nhầm lẫn và trôi dạt, không chặn giả
+  mạo.
+- Ngưỡng "task dài" là phán đoán của Lead (nhiều Peer qua nhiều vòng, writer song
+  song, việc sẽ dài hơn context của chính nó), không phải con số mà policy ép — cùng
+  tinh thần "Sizing the Peers is the Lead's call" của README.
+
 ## 4. Việc phải làm xuyên suốt mọi PR
 
 1. **Tương thích ngược — ✅ ĐÃ LÀM.** Cờ `PASEO_TEAM_TOPOLOGY=single|multi`

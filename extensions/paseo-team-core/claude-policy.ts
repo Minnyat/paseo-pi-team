@@ -32,6 +32,7 @@ import {
 	createAgentParamsBlockReason,
 	createAgentRouteBlockReason,
 	updateAgentRouteBlockReason,
+	updateAgentWatchBlockReason,
 	type RouteTable,
 	type RouteTarget,
 	leaseBlockReason,
@@ -40,6 +41,8 @@ import {
 	teamLeaseToolBlockReason,
 	type AgentOwnership,
 	type LeaseHolder,
+	type SeatWatch,
+	type SupervisorSeat,
 	type TeamTopology,
 	supportScriptBlockReason,
 	writerScopesFromCreateAgent,
@@ -290,6 +293,13 @@ export interface ClaudeToolDecisionInput {
 	topology?: TeamTopology;
 	/** This seat's own `team.domain`, for the lead-recovery jurisdiction gate. */
 	selfDomain?: string | null;
+	/** This seat's own `team.watch` (selfWatch), for the lead-recovery gate: a
+	 *  watch seat may not recover a Lead. Undefined leaves the gate as it was. */
+	selfWatch?: SeatWatch | null;
+	/** The Supervisor seats already in this seat's cluster, read by the hook only
+	 *  when a Lead is seating a Supervisor (supervisorSeatsForSeating). Undefined
+	 *  skips the how-many-deciders rules; null — unreadable — refuses. */
+	seats?: SupervisorSeat[] | null;
 	/** Ownership of a send_agent_prompt target, resolved by the hook. Undefined
 	 *  means "not needed"; null means "could not be resolved" (fail-closed). */
 	promptTarget?: AgentOwnership | null;
@@ -432,6 +442,7 @@ export function claudeToolBlockReason(
 			const argBlock = supervisorCreateAgentArgsBlockReason(input.toolInput, {
 				topology: input.topology ?? "single",
 				selfDomain: input.selfDomain ?? null,
+				selfWatch: input.selfWatch,
 			});
 			if (argBlock) return argBlock;
 		}
@@ -443,6 +454,7 @@ export function claudeToolBlockReason(
 			const supervisorSeatBlock = leadCreateSupervisorArgsBlockReason(input.toolInput, {
 				topology: input.topology ?? "single",
 				selfDomain: input.selfDomain ?? null,
+				seats: input.seats,
 			});
 			if (supervisorSeatBlock) return supervisorSeatBlock;
 		}
@@ -472,6 +484,11 @@ export function claudeToolBlockReason(
 				env: input.env ?? process.env,
 			});
 			if (routeBlock) return routeBlock;
+		}
+		if (matchesPaseoToolName(target, ["update_agent"]) && role === "lead") {
+			// Same watch-immutability gate, same position, as the Pi adapter.
+			const watchBlock = updateAgentWatchBlockReason({ role, args: input.toolInput });
+			if (watchBlock) return watchBlock;
 		}
 		if (matchesPaseoToolName(target, ["update_agent"]) && (role === "lead" || role === "supervisor")) {
 			// Same update gate, same position, as the Pi adapter's mcpBlockReason.

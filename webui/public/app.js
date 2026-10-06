@@ -782,6 +782,7 @@ function renderList(graph) {
 						runtimeLabel(node) ? el("span", { class: "tag", text: runtimeLabel(node) }) : null,
 						node.seat ? el("span", { class: "tag", text: node.seat }) : null,
 						advanced && node.domain ? el("span", { class: "tag", text: node.domain }) : null,
+					advanced && node.role === "supervisor" ? el("span", { class: "tag", text: watchLabel(node.watch) }) : null,
 					]),
 					el("td", { class: node.status === "error" ? "no" : "", text: statusLabel(node.status) }),
 					el("td", { class: "col-parent", text: parent ? parent.name || "(không tên)" : node.orphan ? "ngoài danh sách này" : "—" }),
@@ -798,6 +799,15 @@ let teamRenderedSig = "";
 /** Human label for a seat's jurisdiction. */
 function domainLabel(domain) {
 	return domain ? domain : "chưa đặt phạm vi";
+}
+
+/**
+ * What a Supervisor seat watches (`team.watch`). No label is the seat the pack
+ * has always had — it watches everything and decides — and says so, instead of
+ * showing a blank that reads as "unknown".
+ */
+function watchLabel(watch) {
+	return watch ? `giám sát: ${watch}` : "giám sát: tất cả";
 }
 
 /**
@@ -878,6 +888,13 @@ function renderJurisdiction(graph) {
 	if (unlabeled.length > 0 && supervisors.length > 1) {
 		lines.push(
 			`${unlabeled.length} ghế Trưởng nhóm/Giám sát chưa có nhãn team.domain. Nếu bạn chạy nhiều Giám sát (PASEO_TEAM_TOPOLOGY=multi) thì họ không quản được ai và cũng không ai quản được họ.`,
+		);
+	}
+	// Quiet failure, so it gets its own sentence: nothing refuses anything, every
+	// consult just has nobody to land on and goes to the Human.
+	if (jurisdiction.undecided) {
+		lines.push(
+			"Chỉ có ghế quan sát (team.watch), chưa ghế Giám sát nào giữ `decisions`: mọi câu hỏi của Trưởng nhóm sẽ dồn về bạn. Hãy dựng ghế quyết định trước.",
 		);
 	}
 	box.textContent = lines.join(" ");
@@ -968,6 +985,7 @@ function openDrawer(node) {
 			facts.push(["Phạm vi quản (team.domain)", domainLabel(node.domain)]);
 			facts.push(["Cluster (team.cluster)", node.cluster ?? "chưa xác định được"]);
 		}
+		if (node.role === "supervisor") facts.push(["Loại giám sát (team.watch)", watchLabel(node.watch).replace("giám sát: ", "")]);
 		facts.push(["Mã agent", node.id], ["Nhà cung cấp", node.provider], ["Mức suy nghĩ", node.thinking]);
 	}
 	body.appendChild(kvTable(facts));
