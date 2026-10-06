@@ -3,6 +3,7 @@ import { connect } from "node:net";
 import {
 	ROUTES,
 	bearerToken,
+	runCli,
 	createCache,
 	isCacheable,
 	handleApi,
@@ -358,6 +359,41 @@ assert.equal(bearerToken({ headers: {} }), null);
 	} finally {
 		await handle.close();
 	}
+}
+
+// --- nothing a request does can end the process ------------------------------
+// The handler answers its own errors; the wrapper around it is the last line of
+// defence for the ones it cannot (here the error response itself fails to
+// serialise, because `code` is a BigInt).
+{
+	const handle = await startServer({
+		port: 0,
+		quiet: true,
+		token: "t",
+		runCli: () => {
+			const error = new Error("boom");
+			error.code = 10n;
+			throw error;
+		},
+	});
+	try {
+		const base = `http://127.0.0.1:${handle.port}`;
+		const failed = await fetch(`${base}/api/status`, { headers: { authorization: "Bearer t" } });
+		assert.equal(failed.status, 500);
+		assert.equal((await failed.json()).code, "SERVER_ERROR");
+		assert.equal((await fetch(`${base}/favicon.ico`)).status, 204, "the server survives an error it cannot even report");
+	} finally {
+		await handle.close();
+	}
+}
+
+// A child that exits without reading its stdin leaves the server writing into a
+// closed pipe. For a body larger than the pipe buffer that is an EPIPE 'error'
+// event on child.stdin; unhandled, it killed the server (and the test process).
+{
+	const result = await runCli(["--version"], "x".repeat(4_000_000));
+	assert.equal(result.exitCode, 0);
+	assert.match(result.stdout, /^pteam /);
 }
 
 // --- a failing CLI is surfaced, not swallowed ------------------------------

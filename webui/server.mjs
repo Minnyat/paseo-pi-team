@@ -258,6 +258,11 @@ export function runCli(args, stdin = null, options = {}) {
 				stderr: Buffer.concat(errChunks).toString("utf8"),
 			});
 		});
+		// The child may exit without reading stdin (it rejected its arguments
+		// first). A body bigger than the pipe buffer then fails with EPIPE, and an
+		// 'error' event nobody listens for is an uncaught exception that ends the
+		// whole server. The exit code already says what happened.
+		child.stdin.on("error", () => {});
 		if (stdin !== null) child.stdin.end(stdin, "utf8");
 		else child.stdin.end();
 	});
@@ -642,7 +647,9 @@ export async function startServer(options = {}) {
 	}
 	if (options.open) {
 		const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
-		spawn(opener[0], opener[1], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+		// A missing opener (no xdg-open on a headless host) is an 'error' event; with
+		// no listener it would end the process. The URL is printed above anyway.
+		spawn(opener[0], opener[1], { detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
 	}
 	return { server, port: boundPort, token, url, close: () => new Promise((resolve) => server.close(resolve)) };
 }
