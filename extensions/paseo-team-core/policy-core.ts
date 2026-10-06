@@ -2771,9 +2771,9 @@ export function leadCreateSupervisorArgsBlockReason(
 	if (!parsed || parsed.role !== "supervisor") return null;
 
 	const segments = provider.split("/").filter((part) => part.length > 0);
-	const minimum = parsed.family === "pi" ? 3 : 2;
-	if (segments.length < minimum) {
-		return `Refusing create_agent: a Supervisor seat must be routed explicitly — "${parsed.family}-supervisor/${parsed.family === "pi" ? "<pi-provider>/" : ""}<model-id>", never a bare "${parsed.family}-supervisor" that lets the daemon pick a default. The governance seat is the one whose reasoning quality decides what the Human never gets asked.`;
+	const descriptor = runtimeDescriptor(parsed.family);
+	if (segments.length < minRouteSegmentsFor(parsed.family)) {
+		return `Refusing create_agent: a Supervisor seat must be routed explicitly — "${parsed.family}-supervisor/${descriptor?.modelHintPrefix ?? ""}<model-id>", never a bare "${parsed.family}-supervisor" that lets the daemon pick a default. The governance seat is the one whose reasoning quality decides what the Human never gets asked.`;
 	}
 	const labels =
 		typeof rec.labels === "object" && rec.labels !== null
@@ -3229,8 +3229,90 @@ export function forkModelBlockReason({
 // ---------------------------------------------------------------------------
 
 export type RuntimeFamily = "pi" | "claude";
-export const RUNTIME_FAMILIES: RuntimeFamily[] = ["pi", "claude"];
+
+/**
+ * The runtime facts THIS module owns, one entry per coding agent. It is a
+ * deliberate sibling of RUNTIME_DESCRIPTORS in scripts/model-routing.mjs, not
+ * an import: this file loads inside pi's own runtime and cannot reach the .mjs.
+ * The two are locked where they overlap by test/model-routing.test.mjs, which
+ * compares the families and the model-shape facts (minRouteSegments,
+ * hintPrefix) across the boundary.
+ *
+ * What lives here that the routing copy does not: `hasPermissionModes`, an
+ * authority fact. Only Claude declares permission modes; pi declares none
+ * (AvailableModes: []). Adding a coding agent means adding one entry — the mode
+ * gates below ask this table, not a hard-coded family name.
+ */
+export interface RuntimeDescriptor {
+	family: RuntimeFamily;
+	/**
+	 * Minimum segment count of a full route string. pi carries its own provider
+	 * segment ("pi-<role>/<pi-provider>/<model>" = 3); a bare-id family
+	 * ("claude-<role>/<model>" = 2). Rejecting a shorter string is what stops a
+	 * bare "pi-supervisor" from letting the daemon pick a default model.
+	 */
+	minRouteSegments: number;
+	/** Prefix shown in the "route it explicitly" hint for this family. */
+	modelHintPrefix: string;
+	/**
+	 * Whether a seat of this family has permission modes at all. Only a family
+	 * with modes is gated by the mode checks below; a modeless one (pi) must be
+	 * passed no mode, because the daemon answers `--mode` to it with an error.
+	 * NOTE: the mode VALUES (CLAUDE_SEAT_MODES, the default, the forbidden one)
+	 * are still Claude's alone. A second family that sets this true must bring
+	 * its own vocabulary here before the gates can speak for it.
+	 */
+	hasPermissionModes: boolean;
+}
+
+export const RUNTIME_DESCRIPTORS: Record<RuntimeFamily, RuntimeDescriptor> = {
+	pi: {
+		family: "pi",
+		minRouteSegments: 3,
+		modelHintPrefix: "<pi-provider>/",
+		hasPermissionModes: false,
+	},
+	claude: {
+		family: "claude",
+		minRouteSegments: 2,
+		modelHintPrefix: "",
+		hasPermissionModes: true,
+	},
+};
+
+export const RUNTIME_FAMILIES: RuntimeFamily[] = Object.keys(
+	RUNTIME_DESCRIPTORS,
+) as RuntimeFamily[];
 export const ROLES: TeamRole[] = ["supervisor", "lead", "peer"];
+
+/**
+ * The descriptor for a family. Every place that used to branch on
+ * `family === "claude"` asks this instead, so a new runtime reaches them all
+ * the moment its entry exists.
+ */
+export function runtimeDescriptor(
+	family: RuntimeFamily | null | undefined,
+): RuntimeDescriptor | null {
+	return family ? (RUNTIME_DESCRIPTORS[family] ?? null) : null;
+}
+
+/**
+ * Minimum route-string segments for a family; a large sentinel for an unknown
+ * one so an unrecognised provider fails the "routed explicitly" check closed
+ * rather than sneaking through a low bound.
+ */
+export function minRouteSegmentsFor(
+	family: RuntimeFamily | null | undefined,
+): number {
+	return runtimeDescriptor(family)?.minRouteSegments ?? Number.MAX_SAFE_INTEGER;
+}
+
+/** Whether a family has permission modes at all — the mode gates' entry test. */
+export function familyHasPermissionModes(
+	family: RuntimeFamily | null | undefined,
+): boolean {
+	return runtimeDescriptor(family)?.hasPermissionModes === true;
+}
 
 /** Every role provider name the pack owns, e.g. "pi-peer", "claude-lead". */
 export const ROLE_PROVIDERS: string[] = RUNTIME_FAMILIES.flatMap((family) =>
@@ -3286,7 +3368,490 @@ export function isLeadRecoveryProvider(provider: string): boolean {
 	const parsed = parseRoleProvider(provider);
 	if (!parsed || parsed.role !== "lead") return false;
 	const segments = provider.split("/").filter((part) => part.length > 0);
-	return parsed.family === "pi" ? segments.length >= 3 : segments.length >= 2;
+	return segments.length >= minRouteSegmentsFor(parsed.family);
+}
+
+// ---------------------------------------------------------------------------
+// Route gate — the model a create_agent seats must be the host's route for
+// the class it declares
+// ---------------------------------------------------------------------------
+//
+// Every other create_agent gate checks SHAPE: a model segment is present, a
+// thinking level is set, a mode is set. None of them asked WHICH model — so a
+// Lead could seat a Peer, and a Supervisor a Lead, on anything that parses. This
+// gate closes that: the creator declares a class in labels["team.model-class"],
+// and provider family+role, model id and thinking level must equal that class's
+// route on THIS host, or the call is refused naming the expected values.
+//
+// What it covers — precisely, because a wider claim would be a false one:
+//   - MCP create_agent (createAgentRouteBlockReason);
+//   - MCP update_agent that sets settings.model / thinkingOptionId or the class
+//     label (updateAgentRouteBlockReason — the class comes from the TARGET);
+//   - team_fork, fork and verify (forkRouteDecision, run by team-fork.mjs for
+//     both runtimes).
+// What it does NOT cover (docs/model-routing.md "Known gaps"): a remote seat
+// created through remote-paseo.mjs `run`, and a Lead driving the paseo CLI
+// directly from its own bash (callsPaseoCli is applied to Peers only).
+//
+// The route table is read by scripts/model-routing.mjs (`loadLocalRouteTable`,
+// the only route parser in the pack) and handed in: the Claude hook loads it
+// in-process, the Pi adapter through `model-routing.mjs gate-routes --json`.
+// This module cannot import the .mjs (it loads inside pi's runtime, from a
+// directory the support scripts do not share), so only the COMPARISON lives
+// here — which is also what keeps both runtimes deciding identically.
+
+/** Mirrors MODEL_CLASS_LABEL in scripts/model-routing.mjs (test-locked). */
+export const MODEL_CLASS_LABEL = "team.model-class";
+/** Mirrors ROUTE_ENFORCE_ENV in scripts/model-routing.mjs (test-locked). */
+export const ROUTE_ENFORCE_ENV = "PASEO_TEAM_ROUTE_ENFORCE";
+
+/**
+ * The classes a Lead seats a Peer from — MODEL_CLASSES in
+ * scripts/model-routing.mjs, required in every route file. A sibling list, not
+ * an import, for the same reason as RUNTIME_DESCRIPTORS; locked by
+ * test/model-routing.test.mjs.
+ */
+export const PEER_MODEL_CLASSES: readonly string[] = [
+	"MONITOR_ECONOMY",
+	"FAST_READ",
+	"CODING_MEDIUM",
+	"REASONING_HIGH",
+	"REVIEW_HIGH",
+];
+export const SUPERVISOR_GOVERNANCE_CLASS = "SUPERVISOR_GOVERNANCE";
+export const LEAD_RECOVERY_CLASS = "LEAD_RECOVERY";
+/** Optional in a route file; see OPTIONAL_MODEL_CLASSES in model-routing.mjs. */
+export const OPTIONAL_MODEL_CLASSES: readonly string[] = [
+	SUPERVISOR_GOVERNANCE_CLASS,
+	LEAD_RECOVERY_CLASS,
+];
+export const ALL_MODEL_CLASSES: readonly string[] = [
+	...PEER_MODEL_CLASSES,
+	...OPTIONAL_MODEL_CLASSES,
+];
+
+export interface RouteEntry {
+	paseoProvider: string;
+	model: string;
+	thinking: string;
+}
+
+/** The shape `gateRouteTable()` in scripts/model-routing.mjs returns. */
+export type RouteTable =
+	| {
+			ok: true;
+			source: "cluster" | "routing";
+			path: string;
+			hostId: string;
+			routes: Record<string, RouteEntry | undefined>;
+			shadowed?: string | null;
+	  }
+	| { ok: false; code: string; message: string; paths?: string[] };
+
+export type RouteEnforcement = "on" | "off";
+
+/**
+ * On unless the variable is EXACTLY "off". Any other value — "OFF", "0",
+ * "false", a typo — keeps the gate on: a mistyped opt-out costs one refused
+ * call with an explicit reason, a mistyped opt-in would silently disarm it.
+ */
+export function routeEnforcement(
+	env: Record<string, string | undefined> = process.env,
+): RouteEnforcement {
+	return env[ROUTE_ENFORCE_ENV] === "off" ? "off" : "on";
+}
+
+/**
+ * The loud half of the opt-out: injected into every Lead/Supervisor turn on
+ * both runtimes while it is set, so nobody forgets it was left off after an
+ * emergency. Null when enforcement is on or the role creates no agents.
+ */
+export function routeEnforcementNotice(
+	role: TeamRole | undefined,
+	env: Record<string, string | undefined> = process.env,
+): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (routeEnforcement(env) === "on") return null;
+	return [
+		"## ⚠ Paseo Team Route Enforcement: OFF",
+		"",
+		`${ROUTE_ENFORCE_ENV}=off is set for this seat. create_agent, update_agent and team_fork are NOT checked against the host's model routes: a seat created or re-routed now can run on any model, which is the silent fallback docs/model-routing.md exists to prevent. Still declare labels["${MODEL_CLASS_LABEL}"] and route from the route file exactly as if the gate were on, and tell the Human the opt-out is active — it is meant for an emergency, never as a default.`,
+	].join("\n");
+}
+
+/**
+ * The classes a seating may declare, keyed by the role of the seat being
+ * created — the same answer whoever creates it, so a Lead's successor Lead, a
+ * Supervisor's recovery Lead and a Lead's fork of a Lead all route from the one
+ * class that exists for a Lead seat:
+ *   → Peer        the five base classes
+ *   → Supervisor  SUPERVISOR_GOVERNANCE only
+ *   → Lead        LEAD_RECOVERY only
+ * A Supervisor may only ever seat a Lead (supervisorCreateAgentArgsBlockReason),
+ * so for it the answer is LEAD_RECOVERY whatever the provider claims.
+ */
+export function modelClassesForFlow(
+	creator: TeamRole,
+	target: RoleProvider,
+): readonly string[] {
+	if (creator === "supervisor" || target.role === "lead") return [LEAD_RECOVERY_CLASS];
+	if (target.role === "supervisor") return [SUPERVISOR_GOVERNANCE_CLASS];
+	return PEER_MODEL_CLASSES;
+}
+
+function routeSetHint(modelClass: string, family: RuntimeFamily, role: TeamRole): string {
+	return `pteam routing set ${modelClass} --provider ${family}-${role} --model <model-id> --thinking <level>`;
+}
+
+/**
+ * The route for a class that has already been checked against its flow, or the
+ * refusal explaining why there is none. Shared by the create, update and fork
+ * gates so "table unloadable", "class unconfigured" and "route names another
+ * role" read the same whichever call hit them.
+ */
+function routeForClass(
+	modelClass: string,
+	target: RoleProvider,
+	routeTable: RouteTable | null | undefined,
+	what: string,
+): { route: RouteEntry; where: string } | { reason: string } {
+	if (!routeTable) {
+		return {
+			reason: `BLOCKED: ROUTE_UNVERIFIABLE — the host's route table could not be loaded, so this ${what} cannot be checked against it. Run \`pteam routing check\`. Unverifiable is not a pass.`,
+		};
+	}
+	if (!routeTable.ok) {
+		return {
+			reason: `BLOCKED: ROUTE_TABLE_UNAVAILABLE (${routeTable.code}) — ${routeTable.message}. No ${what} is routed until the route file loads; it is never guessed around.`,
+		};
+	}
+	const route = routeTable.routes[modelClass];
+	if (!route) {
+		const optional = OPTIONAL_MODEL_CLASSES.includes(modelClass);
+		return {
+			reason: `BLOCKED: ROUTE_CLASS_UNCONFIGURED — ${modelClass} has no route on host "${routeTable.hostId}" (${routeTable.path})${optional ? `; it is an optional class, so this host cannot seat that flow until it is configured` : ""}. Configure it with: ${routeSetHint(modelClass, target.family, target.role)}. The gate does not fall back to another class.`,
+		};
+	}
+	const where = `on host "${routeTable.hostId}" (${routeTable.path})`;
+	const routed = parseRoleProvider(route.paseoProvider);
+	if (!routed || routed.family !== target.family || routed.role !== target.role) {
+		const roleNote =
+			routed && routed.role !== target.role
+				? ` A class routed to a *-${routed.role} provider cannot be used to seat a ${target.role}: pick a class whose route names a ${target.role} provider, or change this class's route.`
+				: "";
+		return {
+			reason: `BLOCKED: ROUTE_PROVIDER_MISMATCH — ${modelClass} routes ${where} to "${route.paseoProvider}", but the seat is ${target.family}/${target.role}. Expected provider "${route.paseoProvider}/${route.model}" with settings.thinkingOptionId "${route.thinking}".${roleNote}`,
+		};
+	}
+	return { route, where };
+}
+
+function declaredClassReason(declared: unknown, allowed: readonly string[], who: string): string | null {
+	if (typeof declared !== "string" || declared === "") {
+		return `BLOCKED: ROUTE_CLASS_MISSING — labels["${MODEL_CLASS_LABEL}"] is required on ${who}: it names the model class you routed from, and the gate checks provider, model and thinking against that class's route on this host. For this seat use one of: ${allowed.join(", ")}.`;
+	}
+	if (!ALL_MODEL_CLASSES.includes(declared)) {
+		return `BLOCKED: ROUTE_CLASS_UNKNOWN — labels["${MODEL_CLASS_LABEL}"] is "${declared}", which is not a model class (${ALL_MODEL_CLASSES.join(", ")}). Class names are exact and uppercase.`;
+	}
+	return null;
+}
+
+/**
+ * Refuse a Lead/Supervisor create_agent whose provider, model or thinking level
+ * is not the host's route for the class it declares. Null when it matches, when
+ * the creator is not a Lead/Supervisor, or when the explicit opt-out is set.
+ *
+ * `routeTable` undefined/null means the caller could not load it, and is
+ * refused like an unreadable file: an unverifiable route is not a pass.
+ *
+ * Matching is exact on purpose. The provider head must be written lowercase and
+ * unpadded (a "Claude-Peer" or " claude-peer" is refused with the canonical
+ * spelling rather than normalised — this gate must never approve a string the
+ * daemon might read differently); model and thinking must equal the route
+ * byte for byte, because Paseo silently runs an unknown thinking level at
+ * "medium" and pi treats a model id as a pattern (docs/model-routing.md).
+ * Seat variants ("claude-peer-audit") count as their base family+role.
+ *
+ * What else could carry a model, verified against @getpaseo/server 0.10.1
+ * (agent/tools/paseo-tools.js): an agent-scoped create_agent — every seat's —
+ * is parsed `.strict()`, so extra top-level keys are rejected by Paseo, and its
+ * `settings` admits only modeId / thinkingOptionId / features (no model). The
+ * top-level form still accepts a legacy `thinking` that OVERRIDES
+ * settings.thinkingOptionId; it is held to the route here too, so no shape the
+ * daemon accepts can carry a thinking level this gate did not compare.
+ */
+export function createAgentRouteBlockReason({
+	role,
+	args,
+	routeTable,
+	env = process.env,
+}: {
+	role: TeamRole;
+	args: unknown;
+	routeTable?: RouteTable | null;
+	env?: Record<string, string | undefined>;
+}): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (routeEnforcement(env) === "off") return null;
+	if (typeof args !== "object" || args === null) {
+		return "BLOCKED: ROUTE_UNVERIFIABLE — create_agent requires an args object (provider, settings, labels) to be checked against the host's model routes. Refusing fail-closed.";
+	}
+	const rec = args as Record<string, unknown>;
+	const provider = typeof rec.provider === "string" ? rec.provider : "";
+	const target = parseRoleProvider(provider);
+	if (!target) {
+		return `BLOCKED: ROUTE_PROVIDER_UNKNOWN — provider "${provider || "<missing>"}" is not a role provider this pack routes (${ROLE_PROVIDERS.join(", ")}, or a seat variant of one), so it cannot be matched to a model route. Write it as "<role-provider>/<model-id>" from the route file.`;
+	}
+	const slash = provider.indexOf("/");
+	const head = slash < 0 ? provider : provider.slice(0, slash);
+	const tail = slash < 0 ? "" : provider.slice(slash + 1);
+	const canonicalHead = head.trim().toLowerCase();
+	if (head !== canonicalHead) {
+		return `BLOCKED: ROUTE_PROVIDER_NONCANONICAL — provider "${head}" must be written exactly "${canonicalHead}" (lowercase, no padding). The route gate compares the string the daemon receives, and will not approve a spelling the daemon might resolve differently.`;
+	}
+	const labels =
+		typeof rec.labels === "object" && rec.labels !== null
+			? (rec.labels as Record<string, unknown>)
+			: {};
+	const allowed = modelClassesForFlow(role, target);
+	const declared = labels[MODEL_CLASS_LABEL];
+	const classReason = declaredClassReason(declared, allowed, `every create_agent by a ${role}`);
+	if (classReason) return classReason;
+	const modelClass = declared as string;
+	const flow =
+		role === "supervisor"
+			? "a Supervisor's Lead recovery"
+			: `a Lead seating a ${target.role}`;
+	if (!allowed.includes(modelClass)) {
+		return `BLOCKED: ROUTE_CLASS_WRONG_FLOW — ${flow} routes from ${allowed.join(" or ")}, not ${modelClass}. Each seat role has its own class so that the governance and recovery seats never borrow a Peer's route.`;
+	}
+	const resolved = routeForClass(modelClass, target, routeTable, "create_agent");
+	if ("reason" in resolved) return resolved.reason;
+	const { route, where } = resolved;
+	const expected = `${route.paseoProvider}/${route.model}`;
+	if (tail !== route.model) {
+		return `BLOCKED: ROUTE_MODEL_MISMATCH — ${modelClass} routes ${where} to model "${route.model}", but provider "${provider}" asks for "${tail || "<missing>"}". Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".`;
+	}
+	const settings =
+		typeof rec.settings === "object" && rec.settings !== null
+			? (rec.settings as Record<string, unknown>)
+			: {};
+	const thinking = settings.thinkingOptionId;
+	if (thinking !== route.thinking) {
+		return `BLOCKED: ROUTE_THINKING_MISMATCH — ${modelClass} routes ${where} at thinking "${route.thinking}", but settings.thinkingOptionId is ${typeof thinking === "string" ? `"${thinking}"` : "<missing>"}. Expected provider "${expected}" with settings.thinkingOptionId "${route.thinking}".`;
+	}
+	if (rec.thinking !== undefined && rec.thinking !== route.thinking) {
+		return `BLOCKED: ROUTE_THINKING_MISMATCH — a top-level "thinking" (legacy) overrides settings.thinkingOptionId in Paseo's top-level create_agent, and it is ${JSON.stringify(rec.thinking)}, not the route's "${route.thinking}". Drop it; settings.thinkingOptionId is the only place thinking goes.`;
+	}
+	return null;
+}
+
+/** Same gate against an `mcp` proxy payload (pi wraps args in `{ tool, args }`). */
+export function createAgentRouteBlockReasonForInput(
+	role: TeamRole,
+	input: unknown,
+	routeTable?: RouteTable | null,
+	env: Record<string, string | undefined> = process.env,
+): string | null {
+	return createAgentRouteBlockReason({ role, args: extractMcpArgs(input), routeTable, env });
+}
+
+// --- update_agent: the other door to a model ----------------------------------
+//
+// update_agent { settings: { model, thinkingOptionId } } re-routes a RUNNING
+// seat (measured on Paseo 0.10.1: agentManager.setAgentModel /
+// setAgentThinkingOption, null clears to the daemon default). Without a gate
+// here, a Lead could create_agent on a correct route and move the seat
+// anywhere one call later — and team_fork's documented flow sets the fork's
+// model through exactly this call.
+//
+// The class is NOT taken from the update call. It is read off the TARGET
+// agent's own labels["team.model-class"], which was stamped at creation — by a
+// create_agent that passed the route gate, or by team_fork after its own route
+// check — and update_agent may not change that label. Taking the class from the
+// call would let a Lead declare whichever class's route happens to name the
+// model it wants; reading it from the target means re-routing a seat to another
+// class costs a new create_agent, which is the gated path. Nothing about this
+// door is cheaper than that one.
+
+/** What the update gate needs to know about the agent being updated. */
+export interface RouteTarget {
+	agentId: string;
+	provider: string | null;
+	/** labels["team.model-class"] as recorded on the agent; null when absent. */
+	modelClass: string | null;
+}
+
+/**
+ * The target of an update_agent, read from Paseo's own agent state (the same
+ * local read agentOwnership makes). Null when the id is not an agent id or its
+ * state cannot be read — which the gate refuses, it never treats as "no class".
+ */
+export function routeTargetFor(
+	agentId: unknown,
+	env: Record<string, string | undefined> = process.env,
+): RouteTarget | null {
+	if (!isAgentId(agentId)) return null;
+	const { states } = readAgentStates([agentId], { root: paseoAgentsRoot(env) });
+	const state = states[agentId as string];
+	if (!state) return null;
+	const label = state.labels[MODEL_CLASS_LABEL];
+	return {
+		agentId: state.agentId,
+		provider: state.provider,
+		modelClass: typeof label === "string" && label !== "" ? label : null,
+	};
+}
+
+function updateArgsParts(args: unknown): {
+	agentId: string;
+	settings: Record<string, unknown>;
+	labels: Record<string, unknown>;
+} {
+	const rec = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : {};
+	const pick = (value: unknown) =>
+		typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+	return {
+		agentId: typeof rec.agentId === "string" ? rec.agentId : "",
+		settings: pick(rec.settings),
+		labels: pick(rec.labels),
+	};
+}
+
+/**
+ * Whether an update_agent touches what the route gate owns: the model, the
+ * thinking level (a present key counts — `null` CLEARS it to a daemon default),
+ * or the model-class label itself. Anything else — name, other labels, modeId,
+ * features — is not the gate's business and passes without a state read.
+ */
+export function updateAgentTouchesRoute(args: unknown): boolean {
+	const { settings, labels } = updateArgsParts(args);
+	return "model" in settings || "thinkingOptionId" in settings || MODEL_CLASS_LABEL in labels;
+}
+
+/**
+ * Refuse a Lead/Supervisor update_agent that moves a seat off the route of its
+ * own recorded class. See the section comment for why the class comes from the
+ * target, never from the call.
+ *
+ * `target` undefined/null means the adapter could not read the agent's state,
+ * and is refused: the gate cannot tell which route applies to a seat it cannot
+ * see. Only the fields the call changes are compared (a model-only update is
+ * held to route.model; the thinking level the seat already runs was itself
+ * gated when it was set).
+ */
+export function updateAgentRouteBlockReason({
+	role,
+	args,
+	target,
+	routeTable,
+	env = process.env,
+}: {
+	role: TeamRole;
+	args: unknown;
+	target?: RouteTarget | null;
+	routeTable?: RouteTable | null;
+	env?: Record<string, string | undefined>;
+}): string | null {
+	if (role !== "lead" && role !== "supervisor") return null;
+	if (routeEnforcement(env) === "off") return null;
+	if (!updateAgentTouchesRoute(args)) return null;
+	const { agentId, settings, labels } = updateArgsParts(args);
+	if (!target) {
+		return `BLOCKED: ROUTE_TARGET_UNREADABLE — update_agent changes the model, thinking level or model class of "${agentId || "<missing agentId>"}", but that agent's state could not be read on this host, so the route it must stay on is unknown. Unverifiable is not a pass.`;
+	}
+	if (MODEL_CLASS_LABEL in labels && labels[MODEL_CLASS_LABEL] !== target.modelClass) {
+		return `BLOCKED: ROUTE_CLASS_IMMUTABLE — labels["${MODEL_CLASS_LABEL}"] of ${target.agentId} is ${target.modelClass ? `"${target.modelClass}"` : "unset"} and update_agent may not change it (asked for ${JSON.stringify(labels[MODEL_CLASS_LABEL])}). A seat's class is fixed when it is created; a seat on another class is a new create_agent.`;
+	}
+	const changesModel = "model" in settings;
+	const changesThinking = "thinkingOptionId" in settings;
+	if (!changesModel && !changesThinking) return null;
+	const seat = parseRoleProvider(target.provider ?? "");
+	if (!seat) {
+		return `BLOCKED: ROUTE_PROVIDER_UNKNOWN — ${target.agentId} runs provider "${target.provider ?? "<unknown>"}", which is not a role provider this pack routes, so no class route can apply to it. Refusing to move its model.`;
+	}
+	const allowed = modelClassesForFlow(role, seat);
+	const classReason = declaredClassReason(
+		target.modelClass,
+		allowed,
+		`the agent being re-routed (${target.agentId} carries none — it was created before the route gate or outside it; seat a new agent with create_agent or team_fork instead)`,
+	);
+	if (classReason) return classReason;
+	const modelClass = target.modelClass as string;
+	if (!allowed.includes(modelClass)) {
+		return `BLOCKED: ROUTE_CLASS_WRONG_FLOW — ${target.agentId} is a ${seat.role} seat, which routes from ${allowed.join(" or ")}, but it is labelled ${modelClass}. Refusing to move its model.`;
+	}
+	const resolved = routeForClass(modelClass, seat, routeTable, "update_agent");
+	if ("reason" in resolved) return resolved.reason;
+	const { route, where } = resolved;
+	const expected = `settings { model: "${route.model}", thinkingOptionId: "${route.thinking}" }`;
+	if (changesModel && settings.model !== route.model) {
+		return `BLOCKED: ROUTE_MODEL_MISMATCH — ${target.agentId} is a ${modelClass} seat, which routes ${where} to model "${route.model}", but update_agent sets ${settings.model === null ? "null (clears it to the daemon default)" : JSON.stringify(settings.model)}. Expected ${expected}.`;
+	}
+	if (changesThinking && settings.thinkingOptionId !== route.thinking) {
+		return `BLOCKED: ROUTE_THINKING_MISMATCH — ${target.agentId} is a ${modelClass} seat, which routes ${where} at thinking "${route.thinking}", but update_agent sets ${settings.thinkingOptionId === null ? "null (clears it to the daemon default)" : JSON.stringify(settings.thinkingOptionId)}. Expected ${expected}.`;
+	}
+	return null;
+}
+
+/**
+ * team_fork's route check, run by scripts/team-fork.mjs for BOTH runtimes (the
+ * Pi tool and the Claude MCP server spawn the same script). A fork is a
+ * seating, so it is held to the same rule as create_agent: the class is
+ * checked against the fork's role, and the model and thinking it will be moved
+ * onto must be that class's route. Returns the route to apply, or the refusal.
+ */
+export function forkRouteDecision({
+	role,
+	provider,
+	modelClass,
+	model,
+	thinking,
+	routeTable,
+	env = process.env,
+}: {
+	role: TeamRole;
+	/** The fork's role provider ("pi-lead", "claude-peer-audit", ...). */
+	provider: string;
+	modelClass: unknown;
+	/** The model/thinking the caller asked for; omitted = take the route's. */
+	model?: string | null;
+	thinking?: string | null;
+	routeTable?: RouteTable | null;
+	env?: Record<string, string | undefined>;
+}): { ok: true; enforced: boolean; model: string | null; thinking: string | null } | { ok: false; reason: string } {
+	if (routeEnforcement(env) === "off") {
+		return { ok: true, enforced: false, model: model ?? null, thinking: thinking ?? null };
+	}
+	const seat = parseRoleProvider(provider);
+	if (!seat) {
+		return { ok: false, reason: `BLOCKED: ROUTE_PROVIDER_UNKNOWN — fork provider "${provider || "<missing>"}" is not a role provider this pack routes.` };
+	}
+	const allowed = modelClassesForFlow(role, seat);
+	const classReason = declaredClassReason(modelClass, allowed, "every team_fork (pass modelClass)");
+	if (classReason) return { ok: false, reason: classReason };
+	if (!allowed.includes(modelClass as string)) {
+		return {
+			ok: false,
+			reason: `BLOCKED: ROUTE_CLASS_WRONG_FLOW — a fork onto a ${seat.role} seat routes from ${allowed.join(" or ")}, not ${String(modelClass)}.`,
+		};
+	}
+	const resolved = routeForClass(modelClass as string, seat, routeTable, "team_fork");
+	if ("reason" in resolved) return { ok: false, reason: resolved.reason };
+	const { route, where } = resolved;
+	if (model != null && model !== route.model) {
+		return {
+			ok: false,
+			reason: `BLOCKED: ROUTE_MODEL_MISMATCH — ${String(modelClass)} routes ${where} to model "${route.model}", but the fork asks for "${model}". Omit model to take the route's, or pass exactly "${route.model}".`,
+		};
+	}
+	if (thinking != null && thinking !== route.thinking) {
+		return {
+			ok: false,
+			reason: `BLOCKED: ROUTE_THINKING_MISMATCH — ${String(modelClass)} routes ${where} at thinking "${route.thinking}", but the fork asks for "${thinking}". Omit thinkingOptionId to take the route's, or pass exactly "${route.thinking}".`,
+		};
+	}
+	return { ok: true, enforced: true, model: route.model, thinking: route.thinking };
 }
 
 // ---------------------------------------------------------------------------
@@ -3367,7 +3932,10 @@ export function isClaudeSeatMode(value: unknown): value is ClaudeSeatMode {
 export function defaultSeatMode(
 	family: RuntimeFamily | null | undefined,
 ): ClaudeSeatMode | null {
-	return family === "claude" ? CLAUDE_DEFAULT_SEAT_MODE : null;
+	// Only a family with permission modes gets a default; a modeless one (pi)
+	// gets null, which means "pass no mode", not "pass a default". Claude is the
+	// only moded family today, so its default is the one to hand back.
+	return familyHasPermissionModes(family) ? CLAUDE_DEFAULT_SEAT_MODE : null;
 }
 
 /**
@@ -3381,7 +3949,7 @@ export function seatModeBlockReason(
 	{ family, what }: { family: RuntimeFamily | null; what: string },
 ): string | null {
 	if (mode === undefined || mode === null || mode === "") return null;
-	if (family !== "claude") {
+	if (!familyHasPermissionModes(family)) {
 		return `Refusing ${what}: provider family "${family ?? "<unknown>"}" declares no permission modes (AvailableModes is empty), so "${String(mode)}" cannot be applied to it. Pass no mode at all.`;
 	}
 	if (!isClaudeSeatMode(mode)) {
@@ -3416,7 +3984,7 @@ export function createAgentModeArgsBlockReason(args: unknown): string | null {
 			? (rec.settings as Record<string, unknown>)
 			: {};
 	const modeId = settings.modeId;
-	if (parsed.family !== "claude") {
+	if (!familyHasPermissionModes(parsed.family)) {
 		// Nothing to demand — but a mode passed to a modeless family is still a
 		// mistake worth naming here: the daemon answers it with "Invalid mode
 		// 'auto' for provider 'pi-peer'. Available modes: (none)", which reads
@@ -3492,7 +4060,7 @@ export function forkModeBlockReason({
 	// UNREADABLE mode is left alone, because deleting a correctly moved fork
 	// over a state file that has not caught up yet is the same over-strictness
 	// the model comparison is careful to avoid.
-	if (family !== "claude" || !actualMode) return null;
+	if (!familyHasPermissionModes(family) || !actualMode) return null;
 	if (actualMode === "default") {
 		return `BLOCKED: FORK_MODE_UNROUTABLE — the fork is still on "default" (Always Ask): \`paseo import\` cannot carry a mode and Paseo applies no provider default, so nothing ever moved it. Every tool call it makes will park in the permission queue. Delete it and fork again.`;
 	}
@@ -3924,6 +4492,20 @@ export interface GovernanceContext extends SupervisorRecoveryContext {
 	 * that names the creator's own workspace and to refuse every other one.
 	 */
 	selfWorkspaceId?: string | null;
+	/**
+	 * The local route table (gateRouteTable in scripts/model-routing.mjs).
+	 * Only consulted for a create_agent, and there undefined/null is REFUSED —
+	 * unlike the cluster gate, the route gate has no "could not tell" pass.
+	 */
+	routeTable?: RouteTable | null;
+	/**
+	 * The agent an update_agent re-routes (routeTargetFor). Consulted only when
+	 * the update touches model, thinking or the class label; undefined/null is
+	 * then REFUSED, never read as "a seat with no class to check".
+	 */
+	updateTarget?: RouteTarget | null;
+	/** Where PASEO_TEAM_ROUTE_ENFORCE is read from; defaults to process.env. */
+	env?: Record<string, string | undefined>;
 }
 
 export function mcpBlockReason(
@@ -3999,6 +4581,27 @@ export function mcpBlockReason(
 			context.selfWorkspaceId,
 		);
 		if (paramsBlock) return paramsBlock;
+		// Which MODEL the seat runs. After the shape gates, so a call they refuse
+		// is told about its authority or its mode first; runs for all three
+		// flows (Lead→Peer, Lead→Supervisor, Supervisor→Lead recovery).
+		const routeBlock = createAgentRouteBlockReasonForInput(
+			role,
+			input,
+			context.routeTable,
+			context.env ?? process.env,
+		);
+		if (routeBlock) return routeBlock;
+	}
+	if (matchesPaseoToolName(target, ["update_agent"]) && (role === "lead" || role === "supervisor")) {
+		// The second door to a seat's model: see updateAgentRouteBlockReason.
+		const updateBlock = updateAgentRouteBlockReason({
+			role,
+			args: extractMcpArgs(input),
+			target: context.updateTarget,
+			routeTable: context.routeTable,
+			env: context.env ?? process.env,
+		});
+		if (updateBlock) return updateBlock;
 	}
 	if (matchesPaseoToolName(target, ["send_agent_prompt"])) {
 		const ownershipBlock = sendAgentPromptBlockReason({
@@ -4656,8 +5259,8 @@ export function teamForkToolBlockReason(
 export function teamForkToolDescription(): string {
 	return (
 		"Hand a session over WITHOUT retelling it: copy an agent's transcript into a new session file and import it as a new agent. " +
-		"`fork` validates, copies and imports, then returns the update_agent call that routes the model (the CLI cannot set it) plus a seed prompt that revokes the inherited identity; " +
-		"`verify` confirms the fork runs the requested model and DELETES it if not; `seed` returns the seed prompt alone. " +
+		"`fork` requires modelClass and is route-checked like create_agent: it validates, copies and imports (stamping team.model-class), then returns the update_agent call that moves the fork onto the route of that class (the CLI cannot set the model) plus a seed prompt that revokes the inherited identity; " +
+		"`verify` confirms the fork runs that route and DELETES it if not; `seed` returns the seed prompt alone. " +
 		"Choose a fork only when the reasoning history itself must travel (split-load, change-host, change-model, takeover). " +
 		"A role that must be independent (reviewer, challenger, supervisor) is refused — a fork inherits the framing it exists to question. " +
 		"Running out of context is NOT a fork reason: auto-compaction fires on the copy too, so use /compact instead. " +

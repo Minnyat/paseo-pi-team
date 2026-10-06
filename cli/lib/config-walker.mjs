@@ -150,14 +150,18 @@ export function atomicWriteJson(absPath, data) {
 	return parsed;
 }
 
+/** Returns the backup path it wrote, or null when there was nothing to back up. */
 export function atomicWrite(absPath, content) {
 	ensureDir(dirname(absPath));
+	let backup = null;
 	if (existsSync(absPath)) {
-		copyFileSync(absPath, `${absPath}.bak-${Date.now()}`);
+		backup = `${absPath}.bak-${Date.now()}`;
+		copyFileSync(absPath, backup);
 	}
 	const tmp = `${absPath}.tmp-${process.pid}-${Date.now()}`;
 	writeFileSync(tmp, content, "utf8");
 	renameSync(tmp, absPath);
+	return backup;
 }
 
 export function ensureDir(dir) {

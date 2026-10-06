@@ -133,8 +133,13 @@ test("no arguments object at all is refused with the contract", () => {
 	}
 });
 
-test("wired into mcpBlockReason: last of the create_agent gates, and fed the creator's workspace", () => {
-	const call = (args: unknown, ctx = {}) => mcpBlockReason("lead", { tool: "create_agent", args }, ctx);
+test("wired into mcpBlockReason: after the mode gate, and fed the creator's workspace", () => {
+	// The route gate (which follows this one and has no "could not tell" pass) is
+	// switched off here: this test is about placement, and the route gate has its
+	// own suite (route-gate.test.mts).
+	const ROUTE_GATE_OFF = { PASEO_TEAM_ROUTE_ENFORCE: "off" };
+	const call = (args: unknown, ctx = {}) =>
+		mcpBlockReason("lead", { tool: "create_agent", args }, { env: ROUTE_GATE_OFF, ...ctx });
 	assert.equal(call(good, { selfWorkspaceId: OWN }), null);
 	assert.match(call({ ...good, workspace: { kind: "create" } }, { selfWorkspaceId: OWN }) ?? "", /placement parameter/);
 	assert.match(call({ ...good, workspaceId: "ws_other" }, { selfWorkspaceId: OWN }) ?? "", /Everything in one job shares the creator's workspace/);

@@ -58,13 +58,30 @@ import {
 	validateRemoteEndpoint,
 	cmdPercentExpansionRisk,
 	MODEL_CLASSES,
+	OPTIONAL_MODEL_CLASSES,
+	CLASS_REQUIRED_ROLE,
+	ROUTE_ENFORCE_ENV,
+	loadLocalRouteTable,
 	PROVIDER_OK_STATUSES,
 	providerFamily,
+	runtimeDescriptor,
+	RUNTIME_FAMILIES,
 } from "./model-routing.mjs";
 
+/**
+ * Only the pins that are LOAD-BEARING live here.
+ *
+ * `nodeMajor` gates a real requirement (package.json engines). `adapter` names
+ * the version the install instructions tell you to install, and its absence is
+ * a hard failure because Paseo cannot inject MCP tools into pi without it.
+ *
+ * The paseo and pi CLI versions are deliberately NOT pinned. A "verified
+ * against" pin for an upstream that ships every few days decays into a
+ * permanent warning nobody reads, and a warning that is always on carries no
+ * information. Their versions are still REPORTED — a preflight that names what
+ * is installed is what a bug report actually needs.
+ */
 const PINNED = Object.freeze({
-	paseo: "0.2.5",
-	pi: "0.83.0",
 	adapter: "2.19.0",
 	nodeMajor: 22,
 });
@@ -191,23 +208,18 @@ function summarizeMessages() {
 {
 	const v = tryExec("paseo", ["--version"]);
 	if (!v.ok) fail("paseo-cli", "paseo CLI not found");
-	else {
-		const version = v.stdout.trim();
-		if (version === PINNED.paseo) pass("paseo-cli", version);
-		else
-			warn(
-				"paseo-cli",
-				`detected ${version}, role pack was verified against ${PINNED.paseo}`,
-			);
-	}
+	else pass("paseo-cli", v.stdout.trim());
 }
 const piCli = tryExec("pi", ["--version"]);
 const claudeCli = tryExec("claude", ["--version"]);
 const runtimes = (() => {
-	if (runtimeOpt === "pi" || runtimeOpt === "claude") return [runtimeOpt];
-	if (runtimeOpt === "both") return ["pi", "claude"];
+	if (RUNTIME_FAMILIES.includes(runtimeOpt)) return [runtimeOpt];
+	if (runtimeOpt === "both") return [...RUNTIME_FAMILIES];
 	if (runtimeOpt) {
-		fail("runtime", `unknown --runtime "${runtimeOpt}" (pi|claude|both)`);
+		fail(
+			"runtime",
+			`unknown --runtime "${runtimeOpt}" (${[...RUNTIME_FAMILIES, "both"].join("|")})`,
+		);
 		return ["pi"];
 	}
 	const detected = [
@@ -223,15 +235,7 @@ pass("runtime", runtimes.join(" + "));
 
 if (wantPi) {
 	if (!piCli.ok) fail("pi-cli", "pi CLI not found");
-	else {
-		const version = piCli.stdout.trim();
-		if (version === PINNED.pi) pass("pi-cli", version);
-		else
-			warn(
-				"pi-cli",
-				`detected ${version}, role pack was verified against ${PINNED.pi}`,
-			);
-	}
+	else pass("pi-cli", piCli.stdout.trim());
 }
 if (wantClaude) {
 	if (!claudeCli.ok) fail("claude-cli", "claude CLI not found");
@@ -601,10 +605,37 @@ if (!existsSync(routesPath)) {
 	try {
 		routing = loadRoutingConfig(routesPath);
 		pass("routing-config", `hostId=${routing.hostId}`);
+		warnOptionalClasses(routing.routes, "route:");
 	} catch (error) {
 		if (error instanceof RoutingError) fail("routing-config", error.message);
 		else fail("routing-config", String(error));
 	}
+}
+
+/**
+ * An absent optional class is a WARN, never a failure — every route file
+ * written before those classes existed lacks them — but the warning says what
+ * the gap costs: the create_agent gate refuses the flow that needs it rather
+ * than borrowing another class's route. Reported where the file is LOADED, so
+ * --skip-models does not hide it.
+ */
+function warnOptionalClasses(routes, checkPrefix) {
+	for (const modelClass of OPTIONAL_MODEL_CLASSES) {
+		if (routes[modelClass]) continue;
+		const role = CLASS_REQUIRED_ROLE[modelClass];
+		warn(
+			`${checkPrefix}${modelClass}`,
+			`optional class not configured — ${role === "supervisor" ? "a Lead cannot seat a Supervisor" : "a Supervisor cannot recover a Lead"} on this host until it is: pteam routing set ${modelClass} --provider <family>-${role} --model <model-id> --thinking <level>`,
+		);
+	}
+}
+
+/** The classes to resolve for one host: the required five plus each configured optional one. */
+function classesToResolve(routes) {
+	return [
+		...MODEL_CLASSES,
+		...OPTIONAL_MODEL_CLASSES.filter((modelClass) => routes[modelClass]),
+	];
 }
 
 // Per-model thinkingLevelMap from ~/.pi/agent/models.json (level null = unsupported).
@@ -625,7 +656,7 @@ function piModelLevelUnreachable(piProvider, modelId, level) {
 }
 
 if (routing && daemonUp && !skipModels) {
-	for (const modelClass of MODEL_CLASSES) {
+	for (const modelClass of classesToResolve(routing.routes)) {
 		const route = routing.routes[modelClass];
 		const models = listModels(route.paseoProvider);
 		if (models === null) {
@@ -647,11 +678,14 @@ if (routing && daemonUp && !skipModels) {
 				strict: wantStrict,
 			});
 			// Per-model thinkingLevelMap guard (Paseo's list does not reflect it).
-			// pi ONLY: the map lives in ~/.pi/agent/models.json, and a Claude model
-			// id is a single segment — splitting one at indexOf("/") === -1 yielded
-			// a truncated provider name ("claude-opus-") and looked it up anyway.
+			// Only for a family whose model ref carries its own provider segment
+			// (pi): the map lives in that provider's ~/.pi/agent/models.json. A
+			// bare-id family's model has no provider to split off — doing it at
+			// indexOf("/") === -1 yielded a truncated name ("claude-opus-") and
+			// looked it up anyway.
+			const routeFamily = providerFamily(route.paseoProvider);
 			const clamped =
-				providerFamily(route.paseoProvider) === "pi" &&
+				Boolean(runtimeDescriptor(routeFamily)?.model.carriesProvider) &&
 				piModelLevelUnreachable(
 					resolved.model.slice(0, resolved.model.indexOf("/")),
 					resolved.model.slice(resolved.model.indexOf("/") + 1),
@@ -676,6 +710,44 @@ if (routing && daemonUp && !skipModels) {
 	}
 } else if (routing && skipModels) {
 	warn("routes", "model inventory checks skipped (--skip-models)");
+}
+
+// --- the create_agent route gate ------------------------------------------------
+//
+// What the policy gate will compare every Lead/Supervisor create_agent against.
+// Read through the gate's OWN loader and the default paths (never --routes /
+// --cluster): an operator must see the file the gate reads, not the one this
+// run was pointed at.
+{
+	const table = loadLocalRouteTable();
+	const enforced = process.env[ROUTE_ENFORCE_ENV] !== "off";
+	if (table.ok) {
+		pass(
+			"route-gate",
+			`create_agent / update_agent / team_fork are checked against ${table.path} (host "${table.hostId}")${table.shadowed ? ` — ${table.shadowed} is NOT read while the cluster file has a local host` : ""}`,
+		);
+	} else if (enforced) {
+		// Not a strictCheck: with the gate on, a route table that does not load
+		// refuses EVERY Lead/Supervisor seating on this host — a broken host, not
+		// a degraded one, whether or not --strict was asked for.
+		fail(
+			"route-gate",
+			`${table.message}. Until it loads, EVERY Lead/Supervisor create_agent is refused (ROUTE_TABLE_UNAVAILABLE).`,
+		);
+	} else {
+		warn(
+			"route-gate",
+			`${table.message}. ${ROUTE_ENFORCE_ENV}=off, so nothing is refused for it — and nothing is route-checked either.`,
+		);
+	}
+	if (process.env[ROUTE_ENFORCE_ENV] === "off") {
+		strictCheck(
+			"route-enforcement",
+			`${ROUTE_ENFORCE_ENV}=off in this environment — create_agent is NOT checked against the model routes. An emergency opt-out, never a default; unset it.`,
+		);
+	} else {
+		pass("route-enforcement", "on (create_agent must match the route of the class it declares)");
+	}
 }
 
 // --- legacy hosts.local.json migration notice ------------------------------------
@@ -882,7 +954,7 @@ function runRemotePreflight(hostId, host, endpointValue) {
 	const inventoryProviders = buildProviderInventory([
 		...remoteProviders.values(),
 	]);
-	for (const modelClass of MODEL_CLASSES) {
+	for (const modelClass of classesToResolve(host.routes)) {
 		const route = host.routes[modelClass];
 		const models = listModelsRemote(hostId, endpointValue, route.paseoProvider);
 		if (models === null) {
@@ -1011,6 +1083,7 @@ if (cluster) {
 	clusterVerifyHostId = verifyHostId;
 	if (verifyHostId !== undefined) {
 		const host = cluster.hosts[verifyHostId];
+		if (host) warnOptionalClasses(host.routes, `cluster-route:${verifyHostId}:`);
 		if (!host) {
 			fail(
 				`cluster-host:${verifyHostId}`,
@@ -1023,7 +1096,7 @@ if (cluster) {
 			);
 		} else if (host.connection.type === "local" && daemonUp && !skipModels) {
 			// Local host: full route resolution against the live daemon, strict.
-			for (const modelClass of MODEL_CLASSES) {
+			for (const modelClass of classesToResolve(host.routes)) {
 				const route = host.routes[modelClass];
 				const models = listModels(route.paseoProvider);
 				if (models === null) {

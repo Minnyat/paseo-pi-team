@@ -135,7 +135,7 @@ export const TEAM_TOOLS = [
 		name: "team_fork",
 		// Mirrors policy-core's teamForkToolDescription(); the parity test pins them.
 		description:
-			"Hand a session over WITHOUT retelling it: copy an agent's transcript into a new session file and import it as a new agent. `fork` validates, copies and imports, then returns the update_agent call that routes the model (the CLI cannot set it) plus a seed prompt that revokes the inherited identity; `verify` confirms the fork runs the requested model and DELETES it if not; `seed` returns the seed prompt alone. Choose a fork only when the reasoning history itself must travel (split-load, change-host, change-model, takeover). A role that must be independent (reviewer, challenger, supervisor) is refused — a fork inherits the framing it exists to question. Running out of context is NOT a fork reason: auto-compaction fires on the copy too, so use /compact instead. A fork inherits no lease and no Peers; claim your own scope before staffing a writer.",
+			"Hand a session over WITHOUT retelling it: copy an agent's transcript into a new session file and import it as a new agent. `fork` requires modelClass and is route-checked like create_agent: it validates, copies and imports (stamping team.model-class), then returns the update_agent call that moves the fork onto the route of that class (the CLI cannot set the model) plus a seed prompt that revokes the inherited identity; `verify` confirms the fork runs that route and DELETES it if not; `seed` returns the seed prompt alone. Choose a fork only when the reasoning history itself must travel (split-load, change-host, change-model, takeover). A role that must be independent (reviewer, challenger, supervisor) is refused — a fork inherits the framing it exists to question. Running out of context is NOT a fork reason: auto-compaction fires on the copy too, so use /compact instead. A fork inherits no lease and no Peers; claim your own scope before staffing a writer.",
 		roles: ["lead", "supervisor"],
 		script: "team-fork.mjs",
 		// A fork is a file copy plus one `paseo import`; the import is the slow
@@ -158,6 +158,8 @@ export const TEAM_TOOLS = [
 				provider: { type: "string", maxLength: 256 },
 				model: { type: "string", maxLength: 128 },
 				thinkingOptionId: { type: "string", maxLength: 64 },
+				// Required by `fork`: the class whose route the fork is held to.
+				modelClass: { type: "string", maxLength: 64 },
 				// Optional: a claude-* fork is moved onto "auto" after import
 				// (paseo import carries no mode, and an imported seat otherwise
 				// comes up on "default"). Pass this only to narrow it on purpose,

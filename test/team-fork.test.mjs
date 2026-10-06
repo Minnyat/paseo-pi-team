@@ -24,6 +24,12 @@ import {
 	verifyFork,
 } from "../scripts/team-fork.mjs";
 
+// The route gate is off for this file: it pins the fork MECHANICS (copy,
+// import, mode, verify), and with the gate on every fork would read the route
+// table from the default config dir. The fork's route check is pinned with
+// enforcement ON — and an injected route table — in test/route-gate.test.mts.
+process.env.PASEO_TEAM_ROUTE_ENFORCE = "off";
+
 const SOURCE = "aaaaaaaa-1111-4111-8111-111111111111";
 const FORKED = "bbbbbbbb-2222-4222-8222-222222222222";
 
@@ -716,6 +722,136 @@ test("verify accepts a claude fork on auto", async () => {
 		assert.equal(result.ok, true);
 		assert.equal(result.mode, "auto");
 		assert.equal(result.modeSource, "runtime");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The route gate, ENFORCED. The file-wide opt-out above is overridden per call
+// with `env: {}`, and the route table is injected, so nothing here reads a real
+// config directory.
+// ---------------------------------------------------------------------------
+
+const ENFORCED = {};
+const ROUTE_TABLE = {
+	ok: true,
+	source: "routing",
+	path: "/cfg/model-routing.local.json",
+	hostId: "h",
+	routes: {
+		FAST_READ: { paseoProvider: "pi-peer", model: "Mx/cheap", thinking: "low" },
+		LEAD_RECOVERY: { paseoProvider: "pi-lead", model: "anthropic/claude-opus-5", thinking: "high" },
+	},
+};
+const leadFork = (extra = {}) => ({
+	agentId: SOURCE,
+	reason: "takeover",
+	disposition: "lead",
+	scope: "src/auth",
+	provider: "pi-lead",
+	...extra,
+});
+const routedOptions = (agentsRoot, calls, extra = {}) => ({
+	role: "lead",
+	agentsRoot,
+	env: ENFORCED,
+	routeTable: ROUTE_TABLE,
+	runPaseo: async (args) => {
+		calls.push(args);
+		return { id: FORKED };
+	},
+	...extra,
+});
+
+test("route gate: a fork declares a class, lands on its route, and carries the class label", async () => {
+	await withState(async ({ agentsRoot }) => {
+		const calls = [];
+		const result = await forkAgent(leadFork({ modelClass: "LEAD_RECOVERY" }), routedOptions(agentsRoot, calls));
+		assert.deepEqual(
+			result.nextAction.args.settings,
+			{ model: "anthropic/claude-opus-5", thinkingOptionId: "high" },
+			"the update_agent the Lead is handed carries the ROUTE's values",
+		);
+		const importArgs = calls[0];
+		assert.ok(importArgs.includes("team.model-class=LEAD_RECOVERY"), "the class is stamped on the import");
+		// Passing the route's own values explicitly is the same fork.
+		const explicit = await forkAgent(
+			leadFork({ modelClass: "LEAD_RECOVERY", model: "anthropic/claude-opus-5", thinkingOptionId: "high" }),
+			routedOptions(agentsRoot, []),
+		);
+		assert.equal(explicit.ok, true);
+	});
+});
+
+test("route gate: a fork without a class, on another model, from another flow, or with no table is refused before anything is imported", async () => {
+	await withState(async ({ agentsRoot }) => {
+		const cases = [
+			[leadFork(), /FORK_ROUTE_BLOCKED|ROUTE_CLASS_MISSING/, /ROUTE_CLASS_MISSING.*LEAD_RECOVERY/],
+			[leadFork({ modelClass: "LEAD_RECOVERY", model: "anthropic/haiku" }), null, /ROUTE_MODEL_MISMATCH.*"anthropic\/claude-opus-5"/],
+			[leadFork({ modelClass: "LEAD_RECOVERY", thinkingOptionId: "low" }), null, /ROUTE_THINKING_MISMATCH.*"high"/],
+			[leadFork({ modelClass: "FAST_READ" }), null, /ROUTE_CLASS_WRONG_FLOW.*LEAD_RECOVERY/],
+			[leadFork({ modelClass: "LEAD_RECOVERY", labels: { "team.model-class": "FAST_READ" } }), null, /disagree/],
+		];
+		for (const [input, , pattern] of cases) {
+			const calls = [];
+			await assert.rejects(forkAgent(input, routedOptions(agentsRoot, calls)), (error) => {
+				assert.equal(error.code, "FORK_ROUTE_BLOCKED");
+				assert.match(error.message, pattern);
+				return true;
+			});
+			assert.deepEqual(calls, [], "no import for a refused fork");
+		}
+		const calls = [];
+		await assert.rejects(
+			forkAgent(
+				leadFork({ modelClass: "LEAD_RECOVERY" }),
+				routedOptions(agentsRoot, calls, { routeTable: { ok: false, code: "ROUTE_FILE_MISSING", message: "no local route file" } }),
+			),
+			/ROUTE_TABLE_UNAVAILABLE/,
+		);
+		await assert.rejects(
+			forkAgent(leadFork({ modelClass: "LEAD_RECOVERY" }), routedOptions(agentsRoot, calls, { routeTable: null })),
+			/ROUTE_UNVERIFIABLE/,
+		);
+		assert.deepEqual(calls, []);
+	});
+});
+
+test("route gate: verify compares against the route of the fork's own class, not the caller's values", async () => {
+	await withState(async ({ agentsRoot, write }) => {
+		const onRoute = { sessionId: "s", model: "anthropic/claude-opus-5", thinkingOptionId: "high" };
+		write(FORKED, { provider: "pi-lead", labels: { "team.model-class": "LEAD_RECOVERY" }, runtimeInfo: onRoute });
+		const ok = await verifyFork({ agentId: FORKED }, routedOptions(agentsRoot, []));
+		assert.equal(ok.ok, true, ok.message);
+
+		// Off-route fork: refused and deleted even though the caller "expects" it.
+		write(FORKED, {
+			provider: "pi-lead",
+			labels: { "team.model-class": "LEAD_RECOVERY" },
+			runtimeInfo: { ...onRoute, model: "anthropic/haiku" },
+		});
+		const deletes = [];
+		const drift = await verifyFork(
+			{ agentId: FORKED },
+			routedOptions(agentsRoot, deletes),
+		);
+		assert.equal(drift.ok, false);
+		assert.equal(drift.code, "FORK_MODEL_UNROUTABLE");
+		assert.deepEqual(deletes, [["delete", FORKED]]);
+
+		// A caller value that disagrees with the route is refused, not obeyed.
+		write(FORKED, { provider: "pi-lead", labels: { "team.model-class": "LEAD_RECOVERY" }, runtimeInfo: onRoute });
+		const echoed = await verifyFork(
+			{ agentId: FORKED, model: "anthropic/haiku", keep: true },
+			routedOptions(agentsRoot, []),
+		);
+		assert.equal(echoed.ok, false);
+		assert.match(echoed.message, /FORK_MODEL_UNROUTABLE.*ROUTE_MODEL_MISMATCH/);
+
+		// A fork with no class on it cannot be shown to be on any route.
+		write(FORKED, { provider: "pi-lead", labels: {}, runtimeInfo: onRoute });
+		const unlabelled = await verifyFork({ agentId: FORKED, keep: true }, routedOptions(agentsRoot, []));
+		assert.equal(unlabelled.ok, false);
+		assert.match(unlabelled.message, /ROUTE_CLASS_MISSING/);
 	});
 });
 
