@@ -75,7 +75,10 @@ laid out — is pseudo-code in prose: the Peer types it out and loses the room t
 tell you the plan is wrong. A brief that leaves the seam open lets two parallel
 writers each build a correct half that does not fit the other. Put the seam
 contract, word for word the same, in both writers' briefs, and leave everything
-behind it to them.
+behind it to them. The contract holds only what crosses the seam: a fact about
+one side — its rollout flag, a helper name the Human asked for — goes outside
+it, in that side's brief, attributed to whoever asked. Inside, it reads as
+shared and frozen, and the two copies stop being identical.
 
 ## Accessing Paseo tools
 
