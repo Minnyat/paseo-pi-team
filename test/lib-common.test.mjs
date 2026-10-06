@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -520,7 +520,36 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
         /could not find the paseo CLI/,
         "no paseo on PATH must not fall back to the cwd",
       );
-      assert.ok(!reported.tried.some((entry) => entry.startsWith(hostile)), "the cwd is never even a candidate");
+      // Compare real paths too: on macOS the cwd comes back as /private/var/...
+      // while `hostile` was built from /var/...
+      const hostileReal = realpathSync(hostile);
+      assert.ok(
+        !reported.tried.some((entry) => entry.startsWith(hostile) || entry.startsWith(hostileReal)),
+        "the cwd is never even a candidate",
+      );
+      // The replacement is the pack's own install dir, derived from where
+      // lib-common.mjs lives (<pack>/scripts/lib-common.mjs), not from the cwd.
+      const packRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+      assert.deepEqual(
+        reported.tried.map((entry) => resolve(entry)),
+        [join(packRoot, "node_modules", "@getpaseo", "cli", "dist", "utils", "client.js")],
+        "the only fallback is the pack's own node_modules",
+      );
+
+      // A relative PATH entry resolves against the cwd, so a paseo reached through
+      // one must not lead the SDK lookup back into the hostile checkout.
+      {
+        mkdirSync(join(hostile, "rel", "bin"), { recursive: true });
+        mkdirSync(join(hostile, "rel", "dist", "utils"), { recursive: true });
+        writeFileSync(join(hostile, "rel", "bin", "paseo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        writeFileSync(join(hostile, "rel", "dist", "utils", "client.js"), "export function connectToDaemon() {}\n");
+        process.env.PATH = join("rel", "bin");
+        assert.throws(
+          () => resolvePaseoClientModule(),
+          /could not find the paseo CLI/,
+          "a paseo found through a relative PATH entry is not trusted to locate code",
+        );
+      }
 
       // A paseo on PATH that is not laid out like the package (a mise/asdf/volta
       // shim resolves to the manager's own binary) used to fall through to the cwd.

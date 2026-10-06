@@ -11,7 +11,7 @@
 // the dependency graph on purpose.
 
 import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -186,7 +186,11 @@ export function resolvePaseoClientModule(onMissing) {
 		return override.startsWith("file:") ? override : pathToFileURL(override).href;
 	}
 	const tried = [];
-	const bin = findOnPath(["paseo", "paseo.exe", "paseo.cmd", "paseo.bat"]);
+	const found = findOnPath(["paseo", "paseo.exe", "paseo.cmd", "paseo.bat"]);
+	// A relative PATH entry ("." or "node_modules/.bin") is resolved against the
+	// current directory, so a `paseo` found through one would put the SDK path
+	// back under the cwd. Only an absolute location is trusted for the layout walk.
+	const bin = found && isAbsolute(found) ? found : undefined;
 	if (bin) {
 		// realpath first: ~/.local/bin/paseo is usually a symlink into the
 		// package, and the relative layout only holds at the real location.
