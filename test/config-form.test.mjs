@@ -7,6 +7,7 @@ import {
 	dependentOptionProblems,
 	dependentOptions,
 	numberRangeProblems,
+	optionalEntryProblems,
 	parseLines,
 	pruneEmpty,
 	setPath,
@@ -235,6 +236,44 @@ import {
 		dependentOptionProblems(schema, { seats: { r: { base: "claude-peer", capabilities: [] } } }),
 		[],
 		"granting nothing is a valid seat",
+	);
+}
+
+// --- optional map keys (routing's SUPERVISOR_GOVERNANCE / LEAD_RECOVERY) --------
+
+{
+	const schema = {
+		groups: [
+			{
+				fields: [
+					{
+						path: "routes",
+						type: "map",
+						fixedKeys: ["FAST_READ"],
+						optionalKeys: ["LEAD_RECOVERY"],
+						item: {
+							fields: [
+								{ path: "paseoProvider", label: "Vai trò & runtime" },
+								{ path: "model", label: "Mô hình" },
+								{ path: "thinking", label: "Mức suy nghĩ" },
+							],
+						},
+					},
+				],
+			},
+		],
+	};
+	const full = { paseoProvider: "pi-lead", model: "p/m", thinking: "high" };
+	assert.deepEqual(optionalEntryProblems(schema, { routes: {} }), [], "absent is valid");
+	assert.deepEqual(optionalEntryProblems(schema, { routes: { LEAD_RECOVERY: {} } }), [], "an untouched card is pruned on save, not an error");
+	assert.deepEqual(optionalEntryProblems(schema, { routes: { LEAD_RECOVERY: full } }), [], "complete is valid");
+	const half = optionalEntryProblems(schema, { routes: { LEAD_RECOVERY: { paseoProvider: "pi-lead", thinking: "" } } });
+	assert.equal(half.length, 1, "a half-filled optional route would write a file the gate cannot load");
+	assert.match(half[0], /LEAD_RECOVERY.*Mô hình, Mức suy nghĩ/);
+	assert.deepEqual(
+		optionalEntryProblems(schema, { routes: { FAST_READ: { paseoProvider: "pi-peer" } } }),
+		[],
+		"required keys are not this check's business",
 	);
 }
 

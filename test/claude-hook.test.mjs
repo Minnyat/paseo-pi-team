@@ -26,7 +26,12 @@ import {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const hookPath = join(root, "scripts", "claude-hook.mjs");
 const home = mkdtempSync(join(tmpdir(), "paseo-claude-hook-"));
-const baseEnv = { PASEO_TEAM_HOME: home };
+// The create_agent ROUTE gate is off for this file: the cases below pin the
+// SHAPE gates (cluster label, recovery labels, mode, lease), and their passing
+// create_agent calls declare no model class. The route gate is pinned with
+// enforcement ON — for both runtimes and all three flows — in
+// test/route-gate.test.mts.
+const baseEnv = { PASEO_TEAM_HOME: home, PASEO_TEAM_ROUTE_ENFORCE: "off" };
 
 const V3_WRITE = [
 	"PASEO_TEAM_TASK_V3_BEGIN",

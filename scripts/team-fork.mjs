@@ -33,6 +33,9 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { dirname, join } from "node:path";
 
 import { importPolicyCore, isEntrypoint, resolvePaseoExec } from "./lib-common.mjs";
+// Beside this script in both layouts (scripts/ and paseo-team-scripts/), so a
+// static import is safe here — unlike policy-core, which is resolved at runtime.
+import { gateRouteTable } from "./model-routing.mjs";
 
 // Runtime resolution, for the reason spelled out in lib-common's policyCorePath:
 // checkout and installed layouts differ by one directory level, and a static
@@ -45,8 +48,11 @@ const {
 	forkRequestBlockReason,
 	forkSeedPrompt,
 	normalizeCluster,
+	forkRouteDecision,
 	parseRoleProvider,
+	routeEnforcement,
 	seatModeBlockReason,
+	MODEL_CLASS_LABEL,
 } = await importPolicyCore();
 const { paseoAgentsRoot, readAgentStates } = await importPolicyCore("agent-directory.ts");
 
@@ -160,6 +166,23 @@ function readState(agentId, options = {}) {
 	return state;
 }
 
+/**
+ * The route a fork is held to (policy-core forkRouteDecision). The fork runs in
+ * this script for BOTH runtimes, so this is the single place its route is
+ * checked. The table is read only when enforcement is on, so an opted-out host
+ * — and every test that injects its own — never touches the route files.
+ */
+function forkRoute(role, provider, modelClass, model, thinking, options) {
+	const env = options.env ?? process.env;
+	const routeTable =
+		options.routeTable !== undefined
+			? options.routeTable
+			: routeEnforcement(env) === "on"
+				? gateRouteTable({ env })
+				: null;
+	return forkRouteDecision({ role, provider, modelClass, model, thinking, routeTable, env });
+}
+
 function requireRole(options) {
 	const role = (options.role ?? process.env.PASEO_PI_ROLE ?? "").trim().toLowerCase();
 	if (!FORK_ROLES.includes(role)) {
@@ -178,7 +201,7 @@ function requireRole(options) {
  * is known would hand the Lead an agent whose model nobody chose.
  */
 export async function forkAgent(input = {}, options = {}) {
-	requireRole(options);
+	const role = requireRole(options);
 	const blocked = forkRequestBlockReason(input);
 	if (blocked) throw bad("FORK_BLOCKED", blocked);
 
@@ -218,6 +241,22 @@ export async function forkAgent(input = {}, options = {}) {
 	const modeBlocked = seatModeBlockReason(requestedMode, { family: parsed.family, what: "fork" });
 	if (modeBlocked) throw bad("FORK_MODE_INVALID", modeBlocked);
 	const mode = requestedMode ?? defaultSeatMode(parsed.family);
+	// A fork is a seating: it declares a class and lands on that class's route,
+	// exactly like create_agent. Checked before anything is copied or imported.
+	const labelClass = input.labels && typeof input.labels === "object" ? input.labels[MODEL_CLASS_LABEL] : undefined;
+	const modelClass = input.modelClass ?? labelClass;
+	if (input.modelClass !== undefined && labelClass !== undefined && input.modelClass !== labelClass) {
+		throw bad("FORK_ROUTE_BLOCKED", `modelClass "${input.modelClass}" and labels["${MODEL_CLASS_LABEL}"] "${labelClass}" disagree — pass one class`);
+	}
+	const route = forkRoute(
+		role,
+		importProvider,
+		modelClass,
+		typeof input.model === "string" ? input.model : null,
+		typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
+		options,
+	);
+	if (!route.ok) throw bad("FORK_ROUTE_BLOCKED", route.reason);
 
 	const state = readState(agentId, options);
 
@@ -242,6 +281,9 @@ export async function forkAgent(input = {}, options = {}) {
 
 	const labels = { ...(input.labels && typeof input.labels === "object" ? input.labels : {}) };
 	labels["team.fork-of"] = agentId;
+	// Stamped so the update_agent that routes the fork — and every later one —
+	// is held to this class's route (policy-core updateAgentRouteBlockReason).
+	if (typeof modelClass === "string" && modelClass !== "") labels[MODEL_CLASS_LABEL] = modelClass;
 	labels["team.fork-reason"] = String(input.reason);
 	// A fork is a continuation of the SOURCE seat's identity (§2 rule 5:
 	// "fork inherits belief, not authority" — but cluster membership is
@@ -350,9 +392,11 @@ export async function forkAgent(input = {}, options = {}) {
 			tool: "update_agent",
 			args: {
 				agentId: forkAgentId,
+				// The route's values when enforcement is on (forkRouteDecision
+				// already refused anything else); the caller's when it is off.
 				settings: {
-					...(input.model ? { model: input.model } : {}),
-					...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
+					...(route.model ? { model: route.model } : {}),
+					...(route.thinking ? { thinkingOptionId: route.thinking } : {}),
 				},
 			},
 			why: `The imported agent's model can only be set through MCP update_agent; the CLI has no --model. Run it, then \`team-fork.mjs verify\` before using the fork.${mode ? ` The permission mode is already done: the fork was moved onto "${mode}" with \`paseo agent mode\`, which import cannot carry.` : ""}`,
@@ -376,18 +420,31 @@ export async function forkAgent(input = {}, options = {}) {
  * removed rather than reported as usable.
  */
 export async function verifyFork(input = {}, options = {}) {
-	requireRole(options);
+	const role = requireRole(options);
 	const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
 	if (!agentId) throw bad("FORK_TARGET_MISSING", "agentId (the imported fork) is required");
 	const state = readState(agentId, options);
 	const family = parseRoleProvider(state.provider ?? "")?.family ?? null;
 	const requestedMode =
 		typeof input.modeId === "string" && input.modeId.trim() !== "" ? input.modeId.trim() : null;
+	// The model and thinking a fork is held to come from the ROUTE of the class
+	// stamped on it at fork time, not from whatever this call repeats: a verify
+	// that echoed the caller's values would pass a fork moved onto any model.
+	// A caller value that disagrees with the route is itself a refusal.
+	const route = forkRoute(
+		role,
+		state.provider ?? "",
+		state.labels?.[MODEL_CLASS_LABEL],
+		typeof input.model === "string" ? input.model : null,
+		typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
+		options,
+	);
 	const reason =
+		(route.ok ? null : route.reason.replace(/^BLOCKED: /, "BLOCKED: FORK_MODEL_UNROUTABLE — ")) ??
 		forkModelBlockReason({
-			expectedModel: typeof input.model === "string" ? input.model : null,
+			expectedModel: route.ok ? route.model : null,
 			actualModel: state.model,
-			expectedThinking: typeof input.thinkingOptionId === "string" ? input.thinkingOptionId : null,
+			expectedThinking: route.ok ? route.thinking : null,
 			actualThinking: state.thinking,
 		}) ??
 		forkModeBlockReason({

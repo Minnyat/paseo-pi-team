@@ -94,7 +94,10 @@ implementation still goes to an Engineer Peer.
    controller-local `cluster-routing.local.json`, verify with
    `list_providers`/`list_models` on the EXACT target daemon, create the agent
    with `title`, `initialPrompt`, the exact `<role-provider>/<model-ref>`
-   `provider` string, `settings.thinkingOptionId` and `labels` — and nothing
+   `provider` string, `settings.thinkingOptionId` and `labels` — including
+   `labels["team.model-class"]: "<MODEL_CLASS>"` (the policy refuses a
+   create_agent whose provider, model or thinking differs from that class's
+   route on this host, and names the expected values) — and nothing
    else (the policy refuses any parameter Paseo does not read, and names it) —
    plus `settings.modeId` on every `claude-*`
    route, because Paseo never inherits a permission mode across providers, a
@@ -270,9 +273,12 @@ implementation still goes to an Engineer Peer.
    - the old Lead's Peers are **not** transferred. There is no reparent API, and
      `detach` is a Human action that leaves the Peer unable to escalate. Let them
      finish under their current Lead.
-   - `team_fork fork` stops before the model is routed (the CLI cannot set it):
-     run the `update_agent` call it hands back, then `team_fork verify`. A fork
-     on the wrong model is deleted, not kept — `BLOCKED: FORK_MODEL_UNROUTABLE`.
+   - `team_fork fork` needs a `modelClass` and stops before the model is routed
+     (the CLI cannot set it): run the `update_agent` call it hands back, then
+     `team_fork verify`, which checks the fork against that class's route. A
+     fork on the wrong model is deleted, not kept — `BLOCKED: FORK_MODEL_UNROUTABLE`.
+     Any `update_agent` that changes a seat's model or thinking is held to the
+     route of that seat's own `team.model-class`.
 8. **Browser authority is the one default-allowed grant, and a narrow one**:
    omitted, a valid brief leaves the Peer Paseo Browser Control (`browser_*`,
    either runtime) and, on a Claude seat, Claude in Chrome. Browsing reads pages

@@ -23,7 +23,8 @@ Lớp 2  Paseo role profiles (commit template) — ĐÚNG 6 profile,
        cả sáu chỉ khác nhau ở env PASEO_PI_ROLE (+ disallowedTools bên claude)
               │
 Lớp 3  Logical model classes (commit, trong repo):
-         MONITOR_ECONOMY | FAST_READ | CODING_MEDIUM | REASONING_HIGH | REVIEW_HIGH
+         bắt buộc:  MONITOR_ECONOMY | FAST_READ | CODING_MEDIUM | REASONING_HIGH | REVIEW_HIGH
+         tuỳ chọn:  SUPERVISOR_GOVERNANCE (route *-supervisor) | LEAD_RECOVERY (route *-lead)
               │
 Lớp 4  Host-local route (KHÔNG commit):
          ~/.paseo-pi-team/model-routing.local.json
@@ -66,6 +67,128 @@ Cùng lắp ráp lại, **cơ chế bảo vệ là: pre-validate (list_models) +
 (observed runtimeInfo)**. Khi model không tồn tại, pi fail với status `error`
 (không rơi về model khác — đã verify live); nhưng thinking clamp và pattern
 match **không** báo lỗi, nên observed-check là bắt buộc.
+
+## Cổng route cho `create_agent` — routing được ép bằng code
+
+Trước đây routing chỉ là quy ước: policy kiểm HÌNH DẠNG của `create_agent`
+(có đoạn model, có `settings.thinkingOptionId`, có `settings.modeId`, có
+`labels.purpose`, có `team.cluster`) nhưng không so provider/model/thinking với
+route file. Một Lead có thể dựng Peer — và Supervisor dựng Lead — trên bất kỳ
+model nào parse được. Cổng route đóng lỗ hổng đó, trong `policy-core.ts`, dùng
+chung cho cả hai runtime (adapter Pi và hook Claude).
+
+Cổng phủ **đúng ba lối** (và chỉ ba — xem "Known gaps" bên dưới):
+`create_agent` qua MCP, `update_agent` qua MCP khi đổi model/thinking, và
+`team_fork`. **Mỗi `create_agent` MCP của Lead hoặc Supervisor** phải khai lớp
+model trong `labels["team.model-class"]`, và phải khớp route của lớp đó **trên
+máy này**:
+
+| So sánh | Quy tắc |
+|---|---|
+| provider head | viết đúng chữ thường, không khoảng trắng (`Claude-Peer`, ` claude-peer` bị từ chối kèm cách viết đúng); family+role phải bằng route (seat `claude-peer-audit` tính là claude/peer) |
+| model | bằng `route.model` từng byte |
+| thinking | `settings.thinkingOptionId` bằng `route.thinking` từng byte (Paseo âm thầm chạy level lạ ở `medium`) |
+
+Thông báo từ chối luôn nêu giá trị mong đợi (`Expected provider "…" with
+settings.thinkingOptionId "…"`). Provider không parse được bị từ chối, không
+bao giờ bị bỏ qua.
+
+**Lớp theo vai trò của ghế được dựng** — cùng một câu trả lời dù ai dựng, để
+ghế quản trị và ghế khôi phục không bao giờ mượn route của Peer:
+
+| Ghế được dựng (create_agent / team_fork) | Lớp được khai |
+|---|---|
+| Peer (Lead dựng) | `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`, `REASONING_HIGH`, `REVIEW_HIGH` |
+| Supervisor (Lead dựng) | `SUPERVISOR_GOVERNANCE` |
+| Lead (Supervisor recovery, Lead kế nhiệm, fork của Lead) | `LEAD_RECOVERY` |
+
+**`update_agent`** đổi `settings.model` và/hoặc `settings.thinkingOptionId` (kể
+cả `null` — xoá về mặc định daemon) bị so với route của lớp **ghi trên chính
+agent đích** (`labels["team.model-class"]` đọc từ state của Paseo trên máy),
+không phải lớp khai trên lệnh update: nếu lấy lớp từ lệnh, Lead chỉ việc khai
+lớp nào có route trùng model mình muốn. `update_agent` cũng không được đổi nhãn
+`team.model-class` (`ROUTE_CLASS_IMMUTABLE`) — đổi lớp của một ghế = một
+`create_agent` mới, tức là đi qua cổng. Agent đích không đọc được, không có lớp,
+lớp chưa cấu hình, hoặc model/thinking lệch route → từ chối, nêu giá trị mong
+đợi. `update_agent` chỉ đổi tên, nhãn khác, `modeId` hay `features` đi qua như
+cũ, không đọc state.
+
+**`team_fork`** bắt buộc `modelClass`, kiểm như `create_agent` theo vai trò của
+fork, đóng nhãn `team.model-class` lên fork khi import, và lệnh `update_agent`
+nó trả về mang đúng model/thinking của route. `verify` so với route của lớp ghi
+trên fork (không so với giá trị người gọi nhắc lại).
+
+**Một lớp route tới provider `*-supervisor` không dùng được để dựng Peer.** File
+mẫu route `MONITOR_ECONOMY` tới `pi-supervisor` (giám sát thường ngày của
+Supervisor do Human dựng), nên Lead dựng Peer với `MONITOR_ECONOMY` bị từ chối
+`ROUTE_PROVIDER_MISMATCH` — muốn dùng lớp đó cho Peer thì route phải trỏ tới một
+provider `*-peer`. Cùng lý do, lớp route tới `*-lead` không dựng được Peer.
+
+**Hai lớp tuỳ chọn.** `SUPERVISOR_GOVERNANCE` và `LEAD_RECOVERY` không bắt buộc
+trong route file — mọi file viết trước khi có chúng vẫn hợp lệ, preflight chỉ
+cảnh báo. Khi luồng cần lớp chưa cấu hình, cổng từ chối
+`ROUTE_CLASS_UNCONFIGURED` và nêu lệnh cấu hình
+(`pteam routing set <CLASS> --provider <family>-<role> --model <id> --thinking <level>`).
+Cổng **không** rơi về lớp khác: rơi âm thầm sang route khác chính là lỗi mà cả
+repo này tồn tại để ngăn (xem mục ba silent-fallback ở trên). Validator còn bắt
+`SUPERVISOR_GOVERNANCE` trỏ tới provider `*-supervisor` và `LEAD_RECOVERY` tới
+`*-lead`.
+
+**Cổng đọc file nào.** `create_agent` qua MCP luôn rơi vào daemon LOCAL, nên
+cổng cần route của đúng một máy — máy này:
+
+1. có `cluster-routing.local.json` → host DUY NHẤT có `connection.type: "local"`;
+   không có host local nào → xuống bước 2; từ hai host local trở lên → từ chối
+   (`LOCAL_HOST_AMBIGUOUS`);
+2. ngược lại `model-routing.local.json`.
+
+File không đọc được / sai schema, hoặc không có file nào → **fail-closed**: mọi
+`create_agent` (và mọi `update_agent`/`team_fork` đổi model) của Lead/Supervisor
+bị từ chối (`ROUTE_TABLE_UNAVAILABLE`) kèm đường dẫn file — nên preflight báo
+**FAIL** (không chỉ WARN, kể cả khi không có `--strict`) khi cổng đang bật; khi
+opt-out thì chỉ WARN. Cluster file sai **không** bao giờ khiến cổng quay sang đọc file
+đơn-host. `pteam routing show` cho biết cổng đang đọc file nào.
+
+**Opt-out duy nhất: `PASEO_TEAM_ROUTE_ENFORCE=off`** — đúng chuỗi `off`; mọi giá
+trị khác (`OFF`, `0`, gõ sai) vẫn là bật. Chỉ dành cho khẩn cấp, không bao giờ là
+mặc định, và được làm cho **ồn ào**: mỗi lượt của Lead/Supervisor trên cả hai
+runtime nhận một khối cảnh báo, preflight báo WARN (FAIL với `--strict`),
+`pteam routing show/check` gắn cờ.
+
+### Known gaps — những gì cổng KHÔNG phủ
+
+Cổng phủ `create_agent` MCP, `update_agent` MCP và `team_fork`. Nó **không** phủ:
+
+1. **Lệnh `run` của `remote-paseo.mjs`** — tạo agent trên host remote qua Paseo
+   CLI `--host`; không đi qua MCP của daemon local nên hook không thấy nó.
+2. **Lead gọi thẳng `paseo` CLI từ bash** (tạo hay đổi agent với `--provider`
+   tuỳ ý) — `callsPaseoCli` chỉ áp cho Peer. Có từ trước thay đổi này và nằm
+   ngoài phạm vi của nó.
+3. **Sửa tay state của Paseo trên đĩa** (`$PASEO_HOME/agents/*.json`) để đổi nhãn
+   `team.model-class` rồi `update_agent` — cổng tin nhãn đó vì Paseo là nơi ghi
+   nó; một seat có quyền ghi file ngoài repo vượt được.
+
+Ba lối này là quy ước, không phải code: route lấy từ `pteam routing show`, và
+`get_agent_status → runtimeInfo` vẫn là bằng chứng sau cùng.
+
+## Cập nhật route bằng CLI
+
+```bash
+pteam routing show [--json]      # route hiệu lực theo lớp; đánh dấu lớp tuỳ chọn chưa đặt
+pteam routing check [--json]     # phần routing của preflight: schema + resolve strict với daemon
+pteam routing set <CLASS> --provider <role-provider> --model <id> --thinking <level> [--host-id <id>]
+pteam routing unset <CLASS> [--host-id <id>]   # chỉ SUPERVISOR_GOVERNANCE / LEAD_RECOVERY
+```
+
+`set` kiểm route mới bằng `resolveRoute` ở chế độ **strict** với inventory sống
+của daemon local (như `preflight --strict`) và **không ghi gì** nếu route không
+resolve được. Mỗi lần ghi: chép file cũ sang `<file>.bak-<epoch>` rồi ghi
+nguyên tử (file tạm + rename). Không có `--host-id`: sửa đúng file và host mà
+cổng đọc. `--host-id <id>`: sửa host đó trong `cluster-routing.local.json`; host
+`remote` bị từ chối vì inventory của nó nằm ở daemon khác — chạy lệnh trên chính
+host đó, hoặc sửa file rồi `pteam preflight --strict --host-id <id>`. Thư mục
+cấu hình theo cùng biến ghi đè với các lệnh khác (`PST_TEAM_CONFIG_DIR` /
+`PASEO_TEAM_HOME`).
 
 ## Chu trình bắt buộc của Lead (13 bước)
 
@@ -127,6 +250,7 @@ tiên session + model resolution độc lập.
 
 ```bash
 node scripts/model-routing.mjs validate                 # schema của route local
+node scripts/model-routing.mjs gate-routes              # route table mà cổng create_agent đọc (JSON)
 node scripts/model-routing.mjs resolve --class CODING_MEDIUM --json
 node scripts/preflight.mjs [--json] [--skip-models]     # full host check
 ```
@@ -143,6 +267,24 @@ THINKING_OPTION_UNAVAILABLE    thinking level model không offer, HOẶC model
 STARTUP_IDENTITY_UNAVAILABLE   runtimeInfo chưa xuất hiện trong startup timeout
 MODEL_RESOLUTION_MISMATCH      observed runtime identity ≠ requested
 HOST_ROUTE_UNAVAILABLE         class không có route trên host này
+```
+
+Mã từ chối của cổng `create_agent` (tiền tố `BLOCKED:`):
+
+```text
+ROUTE_CLASS_MISSING            thiếu labels["team.model-class"]
+ROUTE_CLASS_UNKNOWN            tên lớp không tồn tại
+ROUTE_CLASS_WRONG_FLOW         lớp không thuộc vai trò ghế (vd. Lead dựng Supervisor bằng lớp của Peer)
+ROUTE_CLASS_IMMUTABLE          update_agent định đổi nhãn team.model-class của một ghế
+ROUTE_TARGET_UNREADABLE        không đọc được state của agent mà update_agent nhắm tới
+ROUTE_CLASS_UNCONFIGURED       lớp (thường là lớp tuỳ chọn) chưa có route trên host
+ROUTE_TABLE_UNAVAILABLE        route file thiếu / sai / mơ hồ — fail-closed
+ROUTE_UNVERIFIABLE             không nạp được route table
+ROUTE_PROVIDER_UNKNOWN         provider không phải role provider
+ROUTE_PROVIDER_NONCANONICAL    provider viết hoa / có khoảng trắng
+ROUTE_PROVIDER_MISMATCH        family+role khác route
+ROUTE_MODEL_MISMATCH           model khác route
+ROUTE_THINKING_MISMATCH        thinking khác route
 ```
 
 ## Ba trạng thái của extended thinking

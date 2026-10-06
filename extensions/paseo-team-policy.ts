@@ -99,7 +99,11 @@ import {
 	supervisorTurnNotice,
 	supervisorTurnVerdict,
 	teamTopology,
+	routeEnforcementNotice,
+	routeTargetFor,
+	updateAgentTouchesRoute,
 	type GovernanceContext,
+	type RouteTable,
 	type SupervisorSeat,
 	supportScriptBlockReason,
 	writerScopesFromCreateAgent,
@@ -190,6 +194,39 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 }
 
 /**
+ * The local route table for the create_agent route gate.
+ *
+ * Read by the support script rather than here: scripts/model-routing.mjs is the
+ * only route parser in the pack, and this extension cannot import it (it lives
+ * in paseo-team-scripts/, not beside the core). A spawn costs ~100ms and happens
+ * only on a Lead/Supervisor create_agent — rare, like the lease read above.
+ *
+ * Returns null when the script cannot be run or its answer cannot be parsed;
+ * the core refuses that as ROUTE_UNVERIFIABLE. A route file that fails to load
+ * comes back as the script's own `ok: false` answer, refused with its message.
+ */
+async function createAgentRouteTable(input: unknown): Promise<RouteTable | null | undefined> {
+	const classified = classifyMcpInput(input);
+	if (classified.kind !== "target") return undefined;
+	const target = classified.target ?? "";
+	// create_agent always; update_agent only when it touches model, thinking or
+	// the class label — a rename or a mode change must not pay for a spawn.
+	const needed =
+		matchesPaseoToolName(target, ["create_agent"]) ||
+		(matchesPaseoToolName(target, ["update_agent"]) && updateAgentTouchesRoute(extractCreateAgentArgs(input)));
+	if (!needed) return undefined;
+	try {
+		const result = await runSupportScript("model-routing.mjs", ["gate-routes", "--json"]);
+		const parsed = JSON.parse(result.stdout || "null");
+		return parsed && typeof parsed === "object" && typeof parsed.ok === "boolean"
+			? (parsed as RouteTable)
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * The governance facts a tool call is judged against (PR-D).
  *
  * Resolved HERE rather than inside the core so the decision itself stays pure
@@ -225,6 +262,16 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 		matchesPaseoToolName(classified.target ?? "", ["create_agent"])
 	) {
 		context.selfWorkspaceId = selfWorkspaceId();
+	}
+	// The seat an update_agent re-routes, for the update route gate — read only
+	// when the update touches model, thinking or the class label.
+	if (classified.kind === "target" && matchesPaseoToolName(classified.target ?? "", ["update_agent"])) {
+		const args = extractCreateAgentArgs(input);
+		if (updateAgentTouchesRoute(args)) {
+			const agentId = (args as Record<string, unknown> | null)?.agentId;
+			context.updateTarget = routeTargetFor(agentId);
+		}
+		return context;
 	}
 	const isPrompt =
 		classified.kind === "target" &&
@@ -434,6 +481,8 @@ function registerTeamTools(pi: ExtensionAPI, r: TeamRole): void {
 				provider: { type: "string", maxLength: 256 },
 				model: { type: "string", maxLength: 128 },
 				thinkingOptionId: { type: "string", maxLength: 64 },
+				// Required by `fork`: the class whose route the fork is held to.
+				modelClass: { type: "string", maxLength: 64 },
 				// See the same field in claude-team-mcp.mjs: a claude-* fork is
 				// moved onto "auto" after import; this only narrows it on purpose.
 				modeId: { type: "string", maxLength: 32 },
@@ -563,6 +612,11 @@ export default function (pi: ExtensionAPI) {
 	console.log(
 		`[paseo-team] role=${r} peerMode=${currentPeerMode()} policy=${describePolicy(currentPolicy(r))}`,
 	);
+	if (routeEnforcementNotice(r)) {
+		console.warn(
+			"[paseo-team] PASEO_TEAM_ROUTE_ENFORCE=off — create_agent is NOT checked against the host's model routes",
+		);
+	}
 
 	pi.on("session_start", () => {
 		currentBrief = null;
@@ -588,11 +642,14 @@ export default function (pi: ExtensionAPI) {
 				: r === "supervisor"
 					? leadConsultNotice(event.prompt)
 					: null;
-		if (!rolePrompt && !notice) return;
+		// Every turn while the opt-out is set — see routeEnforcementNotice.
+		const routeNotice = routeEnforcementNotice(r);
+		if (!rolePrompt && !notice && !routeNotice) return;
 		const sections = [
 			event.systemPrompt,
 			rolePrompt ? `## Paseo Team Role\n${rolePrompt}` : "",
 			notice ?? "",
+			routeNotice ?? "",
 		].filter(Boolean);
 		return { systemPrompt: sections.join("\n\n") };
 	});
@@ -645,11 +702,12 @@ export default function (pi: ExtensionAPI) {
 				if (blockReason) return { block: true, reason: blockReason };
 			}
 			if (r === "supervisor" || r === "lead") {
-				const blockReason = mcpBlockReason(
-					r,
-					event.input,
-					governanceContext(event.input, r),
-				);
+				const context = governanceContext(event.input, r);
+				// Fetched here, not in governanceContext: that one stays synchronous
+				// and cheap for every tool, this one spawns and only for create_agent.
+				const routeTable = await createAgentRouteTable(event.input);
+				if (routeTable !== undefined) context.routeTable = routeTable;
+				const blockReason = mcpBlockReason(r, event.input, context);
 				if (blockReason) {
 					return { block: true, reason: blockReason };
 				}

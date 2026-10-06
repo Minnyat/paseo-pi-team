@@ -24,6 +24,7 @@ import {
 	dependentOptions,
 	getPath,
 	numberRangeProblems,
+	optionalEntryProblems,
 	parseLines,
 	pruneEmpty,
 	setPath,
@@ -1301,6 +1302,78 @@ function enumControl(field, path, prefix) {
 }
 
 /**
+ * The route provider control: ROLE first, then RUNTIME, writing the single
+ * stored key both halves compose ("peer" + "claude" -> "claude-peer").
+ *
+ * Why two dropdowns instead of the flat list this replaced: the roles are a
+ * closed set of three, the runtimes are the axis that grows as the pack learns
+ * new coding agents. A flat "<runtime>-<role>" enum multiplied the two into one
+ * list that got longer every time a runtime was added; splitting them keeps the
+ * choice a human makes — the role — short and fixed, and puts the growth in a
+ * second control. The stored path is unchanged (still `paseoProvider`), so the
+ * model and thinking fields keep keying off it and nothing on disk moves.
+ *
+ * A stored value that does not split into a known role+runtime (a hand-edited
+ * or newer-version string) is left in the document untouched and shown as a
+ * note, rather than silently deleted by a control that could not represent it.
+ */
+function roleProviderControl(field, path) {
+	const roles = field.roles ?? [];
+	const runtimes = field.runtimes ?? [];
+	const roleSel = el("select", { class: "cfg-input" });
+	const runtimeSel = el("select", { class: "cfg-input" });
+	roleSel.appendChild(el("option", { value: "", text: "— vai trò —" }));
+	for (const role of roles) roleSel.appendChild(el("option", { value: role, text: roleLabel(role) }));
+	runtimeSel.appendChild(el("option", { value: "", text: "— runtime —" }));
+	for (const rt of runtimes) runtimeSel.appendChild(el("option", { value: rt.id, text: rt.label }));
+
+	const note = el("p", { class: "cfg-hint cfg-roleprovider-note hidden" });
+
+	const parse = (value) => {
+		for (const rt of runtimes) {
+			for (const role of roles) {
+				if (value === `${rt.id}-${role}`) return { runtime: rt.id, role };
+			}
+		}
+		return { runtime: "", role: "" };
+	};
+
+	const paint = () => {
+		const current = String(getPath(configState.doc, path) ?? "");
+		const { runtime, role } = parse(current);
+		roleSel.value = role;
+		runtimeSel.value = runtime;
+		const stranded = current !== "" && (runtime === "" || role === "");
+		note.classList.toggle("hidden", !stranded);
+		if (stranded) note.textContent = `Giá trị đang lưu "${current}" không khớp vai trò/runtime nào — giữ nguyên, chọn lại để thay.`;
+	};
+
+	const commit = () => {
+		const role = roleSel.value;
+		const runtime = runtimeSel.value;
+		if (role && runtime) setPath(configState.doc, path, `${runtime}-${role}`);
+		else deletePath(configState.doc, path);
+		// The delegated form listener repaints model/thinking off the new
+		// paseoProvider; this only has to keep its own note current.
+		paint();
+	};
+
+	roleSel.addEventListener("change", commit);
+	runtimeSel.addEventListener("change", commit);
+	paint();
+
+	return el("div", { class: "cfg-roleprovider" }, [
+		el("div", { class: "cfg-roleprovider-pair" }, [
+			el("span", { class: "cfg-sub", text: "Vai trò" }),
+			roleSel,
+			el("span", { class: "cfg-sub", text: "Runtime" }),
+			runtimeSel,
+		]),
+		note,
+	]);
+}
+
+/**
  * A checkbox set writing an array of ids.
  *
  * The offered list is the intersection of the schema's `enum` and whatever
@@ -1411,13 +1484,31 @@ function kvControl(field, path) {
 function mapControl(field, path) {
 	const wrap = el("div", { class: "cfg-map" });
 	const fixed = field.fixedKeys ?? null;
+	// Keys the schema names but a document may leave out (the routing forms'
+	// SUPERVISOR_GOVERNANCE / LEAD_RECOVERY). Never renamed, only configured or
+	// removed — a half-filled one is caught by optionalEntryProblems at save.
+	const optional = field.optionalKeys ?? [];
 	const existing = () => getPath(configState.doc, path) ?? {};
 
-	const cardForKey = (key, isFixed, compact = false) => {
+	const cardForKey = (key, isFixed, compact = false, isOptional = false) => {
 		const card = el("div", { class: "cfg-card" });
 		card.dataset.key = key;
 		const head = el("div", { class: "cfg-card-head" });
-		if (isFixed) {
+		if (isOptional) {
+			head.appendChild(el("span", { class: "cfg-card-title", text: `${key} (tuỳ chọn)` }));
+			head.appendChild(
+				el("button", {
+					type: "button",
+					class: "cfg-icon",
+					text: "×",
+					title: "Bỏ cấu hình lớp này (luồng dùng nó sẽ bị chặn cho tới khi cấu hình lại)",
+					onclick: () => {
+						deletePath(configState.doc, joinPath(path, key));
+						renderConfigForm();
+					},
+				}),
+			);
+		} else if (isFixed) {
 			head.appendChild(el("span", { class: "cfg-card-title", text: key }));
 		} else {
 			// A bare text box at the top of a card says nothing about what goes
@@ -1465,7 +1556,22 @@ function mapControl(field, path) {
 	const keys = fixed
 		? [...fixed, ...Object.keys(existing()).filter((key) => !fixed.includes(key))]
 		: Object.keys(existing());
-	keys.forEach((key, index) => wrap.appendChild(cardForKey(key, fixed?.includes(key) === true, index > 0)));
+	keys.forEach((key, index) =>
+		wrap.appendChild(cardForKey(key, fixed?.includes(key) === true, index > 0, optional.includes(key))),
+	);
+	for (const key of optional.filter((name) => !(name in existing()))) {
+		wrap.appendChild(
+			el("button", {
+				type: "button",
+				class: "cfg-add",
+				text: `+ Cấu hình ${key} (tuỳ chọn)`,
+				onclick: () => {
+					setPath(configState.doc, joinPath(path, key), clone(field.item?.seed ?? {}));
+					renderConfigForm();
+				},
+			}),
+		);
+	}
 	if (!fixed) {
 		wrap.appendChild(
 			el("button", {
@@ -1493,6 +1599,7 @@ function fieldControl(field, path, prefix) {
 	if (field.type === "bool") return boolControl(field, path);
 	if (field.type === "number") return numberControl(field, path);
 	if (field.type === "enum") return enumControl(field, path, prefix);
+	if (field.type === "role-provider") return roleProviderControl(field, path);
 	if (field.type === "lines") return linesControl(field, path);
 	if (field.type === "kv") return kvControl(field, path);
 	if (field.type === "flags") return flagsControl(field, path, prefix);
@@ -1528,7 +1635,7 @@ function appendFields(container, fields, prefix, { compact = false } = {}) {
 
 function fieldRow(field, prefix, { compact = false } = {}) {
 	const path = joinPath(prefix, field.path);
-	const row = el("div", { class: `cfg-field${field.type === "map" || field.type === "flags" ? " cfg-field-wide" : ""}` });
+	const row = el("div", { class: `cfg-field${field.type === "map" || field.type === "flags" || field.type === "role-provider" ? " cfg-field-wide" : ""}` });
 	// Label, its default and its hint all live in the FIRST column. They used
 	// to be three stacked rows, which made a six-field card taller than the
 	// screen and hid the control the row is actually about.
@@ -1889,6 +1996,7 @@ $("config-save").addEventListener("click", async () => {
 		const problems = [
 			...numberRangeProblems(configState.schema, configState.doc),
 			...dependentOptionProblems(configState.schema, configState.doc),
+			...optionalEntryProblems(configState.schema, configState.doc),
 		];
 		if (problems.length > 0) {
 			toast(problems.join(" · "), true);

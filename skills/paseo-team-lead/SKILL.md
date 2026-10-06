@@ -232,29 +232,24 @@ This is the exact failure mode the cluster config exists to prevent.
    slash only, so multi-slash model IDs like `openrouter/vendor/name` work).
    Thinking goes in `settings.thinkingOptionId` — never inside the model string.
 8. **Leave the workspace alone — one job, one workspace.** Every agent of the
-   job, whatever its disposition, lives in the workspace you were started in,
-   and `create_agent` puts it there when you pass no placement at all: Paseo
-   draws the new seat nested under you, the way a native subagent looks. So
-   there is no workspace to decide, create or archive — the policy refuses
-   `create_workspace` and `archive_workspace` for a Lead, and refuses a
-   `create_agent` that carries `workspaceId` (unless it is your own),
-   `workspace`, `relationship`, `cwd`, `worktreeName`, `branchName`,
-   `baseBranch`, `refName` or `githubPrNumber`. Each of those is Paseo's way of
-   minting a NEW workspace or detaching the agent, and a Lead that used them
-   left a trail of workspaces nobody could tell apart.
+   job lives in the workspace you were started in, and `create_agent` puts it
+   there when you pass no placement at all (Paseo nests the new seat under you).
+   There is no workspace to decide, create or archive: the policy refuses
+   `create_workspace`/`archive_workspace` for a Lead, and a `create_agent` that
+   carries `workspaceId` (unless your own), `workspace`, `relationship`, `cwd`,
+   `worktreeName`, `branchName`, `baseBranch`, `refName` or `githubPrNumber` —
+   each mints a NEW workspace or detaches the agent.
    - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0):
      one writer per scope, enforced before it exists. Writers committing in
      parallel each add a git worktree under `.worktrees/` ("Splitting into
      tasks").
-   - The **independent Reviewer** still reviews a detached checkout of the exact
-     candidate SHA, and still never touches the Engineer's tree — it makes that
-     checkout itself with `git worktree add --detach <path> <candidate-sha>`
-     inside your workspace (`.worktrees/review-<TASK_ID>`) and runs the wrapper
-     against it. The wrapper checks
-     the git fact (`REVIEW_WORKSPACE_NOT_WORKTREE`), not a Paseo workspace, so
-     nothing about it needs a workspace of its own. If the Reviewer cannot make
-     the worktree it reports `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — there is
-     no fallback to the primary checkout.
+   - The **independent Reviewer** reviews a detached checkout of the exact
+     candidate SHA and never touches the Engineer's tree: it makes that checkout
+     itself with `git worktree add --detach <path> <candidate-sha>` inside your
+     workspace (`.worktrees/review-<TASK_ID>`) and runs the wrapper against it.
+     The wrapper checks the git fact (`REVIEW_WORKSPACE_NOT_WORKTREE`), not a
+     Paseo workspace. If the worktree cannot be made it reports
+     `BLOCKED: REVIEW_WORKTREE_UNAVAILABLE` — no fallback to the primary checkout.
 9. Call `create_agent` with exactly the parameters Paseo reads, and nothing
    else — the policy refuses the rest, and says which parameter it dislikes:
 
@@ -265,18 +260,23 @@ This is the exact failure mode the cluster config exists to prevent.
      initialPrompt: "<the brief, step 'Task brief template'>",
      settings: { thinkingOptionId: "<routed level>",   // or "off"
                  modeId: "auto" },                     // claude-* routes only
-     labels: { "team.cluster": "<your own cluster>" }
+     labels: { "team.cluster": "<your own cluster>",
+              "team.model-class": "<MODEL_CLASS from step 1>" }
      // no workspaceId, workspace, relationship, cwd, worktree*, mode, model, thinking
    })
    ```
 
+   `team.model-class` is REQUIRED: the policy refuses the call unless provider,
+   model and `thinkingOptionId` equal that class's route on this host (the refusal
+   names the expected values — copy them). A class routed to a `*-supervisor`
+   provider (`MONITOR_ECONOMY`) cannot seat a Peer.
+
    Routing is a parameter of this call and nowhere else. The model, thinking
    level, mode and workspace are NOT repeated in the message the Peer reads:
    they have one source of truth, the daemon, and `get_agent_status` is how you
-   read them back. `modeId` is REQUIRED on every `claude-*` route and goes inside
-   `settings` — a top-level `mode` is ignored (see "Every `claude-*` agent you
-   create needs `settings.modeId`"). NEVER omit the model to inherit a daemon
-   default.
+   read them back. `settings.modeId` is REQUIRED on every `claude-*` route (see
+   "Every `claude-*` agent you create needs `settings.modeId`"). NEVER omit the
+   model to inherit a daemon default.
    The `team.cluster` label is REQUIRED and is checked against YOUR OWN
    cluster: omit it and `create_agent` is refused with
    `Refusing create_agent: labels["team.cluster"] is required and must be
@@ -320,18 +320,18 @@ local one. In the commands below, `<id>` is the HOST_ID from
    pass, but a model that reports no extended thinking is routable at
    `thinking: off`).
 6. **One workspace for the whole job, ON THE REMOTE host.** A local workspace
-   ID has no meaning there, and the CLI — unlike the local MCP — has no "my own
-   workspace" to default to: a `run` without `--workspace` would run in the
-   CONTROLLER's cwd. So the wrapper needs one workspace id, and it is the same id
-   for every agent of the job, Writer and Reviewer included:
+   ID has no meaning there, and the CLI has no "my own workspace" to default to:
+   a `run` without `--workspace` would run in the CONTROLLER's cwd. So the
+   wrapper needs one workspace id, the same for every agent of the job, Writer
+   and Reviewer included:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --title <t>`
-   `workspace-create` is "ensure": it lists what is already open and REUSES the
-   workspace on that path (`reused: true`), creating one only when there is none —
-   so calling it again can never leave a second one behind. It creates only local
-   workspaces: `--isolation worktree` is refused (`WORKSPACE_ISOLATION_REFUSED`),
-   and the old `--disposition` flag is gone. The Reviewer makes its own detached
-   `git worktree add` inside this workspace, exactly as on the local host.
+   `workspace-create` is "ensure": it lists what is open and REUSES the workspace
+   on that path (`reused: true`), creating one only when there is none, so a
+   second call never leaves a second one. It creates only local workspaces
+   (`--isolation worktree` is refused: `WORKSPACE_ISOLATION_REFUSED`; the old
+   `--disposition` flag is gone). The Reviewer makes its own detached
+   `git worktree add` inside this workspace, as on the local host.
 7. Create the agent on the remote daemon (background by default; add
    `--wait-timeout <dur>` to wait for completion). The route is flags, not
    message text — provider/model, thinking, mode, workspace and cluster all go
@@ -406,17 +406,14 @@ Hard rules for a mixed fleet:
   (provider 'claude-peer'). Pass an explicit mode.
   ```
 
-  `auto` is in `claude-peer`'s own list and was still refused. So this is not a
-  crossing-families rule — `claude-lead` → `claude-peer` is one family and fails
-  identically. pi declares NO modes (`AvailableModes=[]`), which is the only
-  reason `pi-lead` → `pi-peer` has always worked; Claude declares five, and a
-  Lead is never the same profile as a Peer. Treat it as: pi route → nothing to
-  pass, Claude route → always pass it, whichever family you are.
+  `auto` is in `claude-peer`'s own list and was still refused, so this is not a
+  crossing-families rule: `claude-lead` → `claude-peer` fails identically. pi
+  declares NO modes, which is the only reason `pi-lead` → `pi-peer` works. Rule:
+  pi route → nothing to pass, Claude route → always pass it.
 
-  The field is `settings.modeId`, NOT a top-level `mode` — Paseo's contract puts
-  every initial runtime setting under `settings` (`modeId`, `thinkingOptionId`,
-  `features`), and a top-level `mode` is ignored, leaving you with the error
-  above and no clue why:
+  The field is `settings.modeId`, NOT a top-level `mode` — Paseo reads every
+  initial runtime setting from `settings`, and a top-level `mode` is ignored,
+  leaving you with the error above and no clue why:
 
   ```jsonc
   create_agent({ provider: "claude-peer/claude-opus-5", /* ... */
@@ -427,41 +424,30 @@ Hard rules for a mixed fleet:
   `claude-*` route that has none.
 
   Use `modeId: "auto"` unless you have a reason not to. What bounds a Peer is
-  its role policy plus its V3 brief, and both are enforced in the `PreToolUse`
-  hook — before Paseo's permission queue ever sees the call. The queue only
-  decides how often a human is interrupted while the Peer does already-bounded
-  work, and on `"default"` the answer is "every call": the Peer parks in the
-  queue looking hung while you spend your turn on `list_pending_permissions` /
-  `respond_to_permission` instead of leading. Narrow it deliberately — `"plan"`
-  for a seat that should propose before acting, `"default"` for one you
-  genuinely intend to watch call by call, `"acceptEdits"` as the middle setting
-  for a write Peer whose brief already grants `EDIT_AUTHORITY`. NEVER
-  `bypassPermissions`: the role policy still applies, but Paseo's own
-  guardrails outside it are gone too.
+  its role policy plus its V3 brief, both enforced in the `PreToolUse` hook
+  before Paseo's permission queue sees the call. The queue only decides how
+  often a human is interrupted, and on `"default"` the answer is "every call":
+  the Peer parks looking hung while you spend your turn on
+  `list_pending_permissions` / `respond_to_permission`. Narrow it deliberately —
+  `"plan"` to propose before acting, `"default"` to watch call by call,
+  `"acceptEdits"` for a write Peer whose brief grants `EDIT_AUTHORITY`. NEVER
+  `bypassPermissions`: Paseo's own guardrails outside the role policy go too.
 
-  Do NOT expect the provider to supply this for you. `paseo provider ls` shows
-  `defaultMode=auto` for every `claude-*` role provider and the daemon applies
-  that value NOWHERE at create time (measured 2026-09-07: the seat is built with
-  `isPermissionMode(config.modeId) ? config.modeId : "default"`) — it is only
-  what a picker preselects. The inheritance error above fires only when the
-  create has a parent on a different provider; a create with no parent lands on
-  `"default"` in silence. Since this release the `PreToolUse` gate refuses a
-  `claude-*` `create_agent` with no `settings.modeId` and names the value to
-  pass, so you cannot ship a parked seat by forgetting — but the fix is still
-  one word from you, not from the daemon.
+  Do NOT expect the provider to supply this. `defaultMode=auto` in `paseo
+  provider ls` is only what a picker preselects: at create time the daemon uses
+  `modeId` if given, else `"default"` (measured 2026-09-07). The `PreToolUse` gate refuses a `claude-*` `create_agent`
+  with no `settings.modeId` and names the value to pass.
 
   A fork needs nothing extra: `paseo import` cannot carry a mode, so
   `team_fork` moves the fork onto `auto` right after the import and deletes it
-  if that fails. Pass `modeId` to `team_fork` to narrow it on purpose
-  (`"plan"` for a fork that should propose before acting) — and whenever `auto`
-  is unavailable for the fork: under Bedrock/Vertex, or on a model that answers
-  "auto mode unavailable for this model". Without `modeId` such a fork fails
-  with `FORK_MODE_UNSET` every time; pick another explicit mode the seat
-  supports, never `bypassPermissions`.
+  if that fails. Pass `modeId` to narrow it on purpose (`"plan"`), and whenever
+  `auto` is unavailable (Bedrock/Vertex, or "auto mode unavailable for this
+  model"): without it such a fork fails with `FORK_MODE_UNSET` — pick another
+  explicit mode the seat supports, never `bypassPermissions`.
 
-  Seats already running on the wrong mode show up in `pteam watchdog` under
-  `parked`. Every row carries the `paseo agent mode <id> auto` that fixes it
-  where `auto` exists, and a `fixNote` naming the fallback where it does not.
+  Seats already on the wrong mode show up in `pteam watchdog` under `parked`,
+  each row carrying the `paseo agent mode <id> auto` fix (or a `fixNote` naming
+  the fallback where `auto` does not exist).
 
 Model classes (decided by task risk + disposition, not by role name):
 
@@ -472,6 +458,13 @@ Model classes (decided by task risk + disposition, not by role name):
 | CODING_MEDIUM | bounded implementation, clear-ownership bugfix, tests |
 | REASONING_HIGH | architect, lifecycle/ownership/concurrency, migration, security design |
 | REVIEW_HIGH | independent reviewer, proof auditor, exact-SHA acceptance |
+| SUPERVISOR_GOVERNANCE | *optional* — ONLY for seating your Supervisor (route names a `*-supervisor` provider) |
+| LEAD_RECOVERY | *optional* — ONLY for seating a Lead: a Supervisor's recovery, a successor Lead, a fork of a Lead (route names a `*-lead` provider) |
+
+The two optional classes may be absent from a host's route file; the flow that
+needs one is then refused (`ROUTE_CLASS_UNCONFIGURED`) until the Human runs
+`pteam routing set <CLASS> ...`. Never borrow another class's route for it.
+`pteam routing show` prints what the gate reads on this host.
 
 Record every routing decision verbatim in your report:
 
@@ -599,7 +592,7 @@ Failure answers from the tool itself, and what each one means:
 
 Not a contradiction — the seat you create still judges you, and it is better
 than having no delegation path at all. Same routing cycle as any other
-`create_agent` (steps 1–4 above for `MODEL_CLASS`/`HOST_ID`), plus four things
+`create_agent` (steps 1–4 above; the class is always `SUPERVISOR_GOVERNANCE`), plus five things
 the policy enforces:
 
 ```text
@@ -607,6 +600,7 @@ create_agent {
   provider: "<family>-supervisor/<…>/<model-id>",   # never a bare "pi-supervisor"
   labels: {
     "purpose": "governance",
+    "team.model-class": "SUPERVISOR_GOVERNANCE",   # provider/model/thinking must equal its route
     "team.cluster": "<your own cluster>",
     "team.domain": "<your own domain, or one inside it>"   # required under multi
   },
@@ -862,22 +856,26 @@ The fork cycle, in order:
 2. ```text
    team_fork { action: "fork", agentId: "<source>", reason: "takeover",
                disposition: "lead", scope: "<scope>",
-               provider: "<role-provider>/<...>/<model-id>",
-               model: "<model-id>", thinkingOptionId: "<level>",
+               provider: "<role-provider>", modelClass: "<MODEL_CLASS>",
                labels: { "team.domain": "<domain>" } }
    ```
+   `modelClass` is REQUIRED and route-checked like a `create_agent`: a Lead fork
+   takes `LEAD_RECOVERY`, a Peer fork one of the five base classes, and it lands
+   on that class's route (omit `model`/`thinkingOptionId`; if passed they must
+   equal it). It is stamped on the fork as `team.model-class`.
    This copies the transcript (no LLM turn) and imports it. It returns the new
    `agentId`, a `seedPrompt`, and the `update_agent` call you must make next.
-   `team.cluster` on the fork is derived from the SOURCE agent's own cluster
-   (not from `labels` you pass) — a fork is a continuation of the source
-   seat, so its cluster travels with it the same way `team.fork-of` does.
-3. **Route the model** with the returned `update_agent` args. The CLI has no
-   `--model`; only MCP moves it.
+   `team.cluster` on the fork is derived from the SOURCE agent's cluster, not
+   from `labels` you pass — it travels with the fork like `team.fork-of`.
+3. **Route the model** with the returned `update_agent` args, unchanged (the
+   CLI has no `--model`; only MCP moves it). Every `update_agent` that sets
+   `settings.model` or `thinkingOptionId` is held to the route of the TARGET's
+   own `team.model-class`, which it may not change: the returned call passes,
+   any other model is refused naming the expected values.
 4. ```text
-   team_fork { action: "verify", agentId: "<fork>", model: "<model-id>",
-               thinkingOptionId: "<level>" }
+   team_fork { action: "verify", agentId: "<fork>" }
    ```
-   Reads `runtimeInfo` — never `persistence.metadata.model`, which is a stale
+   Compares against the route of the fork's own class. Reads `runtimeInfo` — never `persistence.metadata.model`, which is a stale
    creation-time snapshot. A mismatch is `BLOCKED: FORK_MODEL_UNROUTABLE` and
    the fork is **deleted**; fork again rather than keep an unrouted agent.
 5. **Send the seed prompt as the fork's first message, unedited.** It revokes

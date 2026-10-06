@@ -175,6 +175,45 @@ export function dependentOptionProblems(schema, doc, prefix = "") {
 	return problems;
 }
 
+/**
+ * One entry per OPTIONAL map key that is present but not filled in.
+ *
+ * A map's `optionalKeys` (the routing forms' SUPERVISOR_GOVERNANCE and
+ * LEAD_RECOVERY) may be absent — absent is a valid route file. Half-filled is
+ * not: picking a provider and saving would write a route with no model, which
+ * loadRoutingConfig rejects, and a route file that does not load makes the
+ * create_agent gate refuse EVERY seating, not just the one this class serves.
+ * So an optional entry is either complete or removed before save.
+ */
+export function optionalEntryProblems(schema, doc, prefix = "") {
+	const problems = [];
+	for (const group of schema?.groups ?? []) {
+		for (const field of group.fields ?? []) collectField(field, prefix);
+	}
+	function collectField(field, base) {
+		const path = base ? `${base}.${field.path}` : field.path;
+		if (field.type !== "map" || !field.item) return;
+		const object = getPath(doc, path) ?? {};
+		for (const key of field.optionalKeys ?? []) {
+			const entry = pruneEmpty(object[key]);
+			if (entry === undefined) continue;
+			const missing = (field.item.fields ?? [])
+				.filter((child) => {
+					const value = getPath(entry, child.path);
+					return value === undefined || value === null || value === "";
+				})
+				.map((child) => child.label ?? child.path);
+			if (missing.length > 0) {
+				problems.push(`${key}: lớp tuỳ chọn chưa điền đủ (thiếu ${missing.join(", ")}) — điền đủ hoặc bấm "Bỏ cấu hình"`);
+			}
+		}
+		for (const key of Object.keys(object)) {
+			for (const child of field.item.fields ?? []) collectField(child, `${path}.${key}`);
+		}
+	}
+	return problems;
+}
+
 /** Split a textarea into argv-style lines: trimmed, blanks dropped. */
 export function parseLines(text) {
 	return String(text ?? "")

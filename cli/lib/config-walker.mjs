@@ -143,14 +143,18 @@ export function atomicWriteJson(absPath, data) {
 	return parsed;
 }
 
+/** Returns the backup path it wrote, or null when there was nothing to back up. */
 export function atomicWrite(absPath, content) {
 	// A directory made here holds files that may carry credentials, so it is
 	// private; one that already exists keeps the mode its owner gave it.
 	mkdirSync(dirname(absPath), { recursive: true, mode: PRIVATE_DIR_MODE });
+	let backup = null;
 	if (existsSync(absPath)) {
-		copyFileSync(absPath, `${absPath}.bak-${Date.now()}`); // copyFileSync keeps the source's mode
+		backup = `${absPath}.bak-${Date.now()}`;
+		copyFileSync(absPath, backup); // copyFileSync keeps the source's mode
 	}
 	writeFileAtomic(absPath, content);
+	return backup;
 }
 
 export function ensureDir(dir) {

@@ -12,10 +12,15 @@
 // database, hold API keys, or fall back to another model/host on its own.
 // Paseo remains the only control plane; git SHA remains the artifact anchor.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isEntrypoint, teamConfigDir } from "./lib-common.mjs";
 
+/**
+ * The REQUIRED classes: every route file must carry all five. Kept under its
+ * old name because every loop that walks "the classes a host must route"
+ * (preflight, the routing form, the resolver CLI) means exactly these.
+ */
 export const MODEL_CLASSES = Object.freeze([
 	"MONITOR_ECONOMY",
 	"FAST_READ",
@@ -25,23 +30,164 @@ export const MODEL_CLASSES = Object.freeze([
 ]);
 
 /**
- * Thinking levels are per RUNTIME FAMILY, not global: `minimal` exists only on
- * pi and `ultracode` only on Claude, so a single union would silently accept a
- * level the target runtime clamps away. Verify against the real inventory with
- * `paseo provider models <role-provider> --json`.
+ * Classes a route file MAY carry. They exist so the two create_agent flows that
+ * do not seat a Peer — a Lead seating its Supervisor, a Supervisor recovering a
+ * Lead — have a route to be checked against. Optional so every route file
+ * written before them still validates; preflight warns while they are absent,
+ * and the create_agent gate refuses the flow that needs one (it never borrows
+ * another class's route — that silent substitution is what this pack exists to
+ * prevent).
  */
-export const THINKING_LEVELS_BY_FAMILY = Object.freeze({
-	pi: Object.freeze(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
-	claude: Object.freeze([
-		"off",
-		"low",
-		"medium",
-		"high",
-		"xhigh",
-		"max",
-		"ultracode",
-	]),
+export const OPTIONAL_MODEL_CLASSES = Object.freeze([
+	"SUPERVISOR_GOVERNANCE",
+	"LEAD_RECOVERY",
+]);
+
+export const ALL_MODEL_CLASSES = Object.freeze([
+	...MODEL_CLASSES,
+	...OPTIONAL_MODEL_CLASSES,
+]);
+
+/**
+ * The role an optional class must route to. A SUPERVISOR_GOVERNANCE route that
+ * named a peer provider could never satisfy the gate, so it is refused where the
+ * author made the mistake — at validation — instead of at the first seating.
+ */
+export const CLASS_REQUIRED_ROLE = Object.freeze({
+	SUPERVISOR_GOVERNANCE: "supervisor",
+	LEAD_RECOVERY: "lead",
 });
+
+/**
+ * Label a Lead or Supervisor puts on every create_agent to declare which class
+ * it routed from. Mirrored in policy-core.ts (MODEL_CLASS_LABEL), locked by
+ * test/model-routing.test.mjs.
+ */
+export const MODEL_CLASS_LABEL = "team.model-class";
+
+/** The one explicit opt-out of the create_agent route gate. */
+export const ROUTE_ENFORCE_ENV = "PASEO_TEAM_ROUTE_ENFORCE";
+
+/**
+ * RUNTIME DESCRIPTORS — the single source of every per-runtime fact this
+ * module and its consumers key off. The pack runs the SAME three roles on more
+ * than one coding agent; what differs between agents is captured here ONCE, so
+ * teaching the pack a new coding agent is adding one entry, not hunting down a
+ * dozen `family === "claude"` branches scattered across the tree.
+ *
+ * Insertion order IS the pack's canonical family order (RUNTIME_FAMILIES, and
+ * through it ROLE_PROVIDERS) — test/model-routing.test.mjs pins it, so a new
+ * entry goes at the END unless a reorder is intended.
+ *
+ * `policy-core.ts` keeps its OWN descriptor for the authority facts it owns
+ * (permission modes), deliberately not importing this file because it loads
+ * inside pi's runtime; the cross-check test locks the families and the
+ * model-shape facts the two share.
+ */
+export const RUNTIME_DESCRIPTORS = Object.freeze({
+	pi: Object.freeze({
+		family: "pi",
+		/** Human label for the UI's family badge and dropdowns. */
+		label: "Pi",
+		/** The CLI whose presence means this runtime is installed on a host. */
+		cli: "pi",
+		/**
+		 * Thinking levels for this family. `minimal` exists only on pi and
+		 * `ultracode` only on Claude, so a single union would silently accept a
+		 * level the target runtime clamps away. Verify against the real inventory
+		 * with `paseo provider models <role-provider> --json`.
+		 */
+		thinkingLevels: Object.freeze([
+			"off",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]),
+		/**
+		 * Whether a seat of this family has permission modes at all. pi declares
+		 * none (AvailableModes: []), so a --mode passed to it is an error; only a
+		 * moded family gets a default mode at create time. Mirrored — and locked
+		 * by test/model-routing.test.mjs — against policy-core's descriptor, which
+		 * owns the mode VALUES themselves.
+		 */
+		hasPermissionModes: false,
+		model: Object.freeze({
+			/**
+			 * pi model ids carry their own provider segment
+			 * ("<pi-provider>/<model-id>", and the model id may itself contain
+			 * slashes — Paseo splits at the FIRST slash only), so the rule is "must
+			 * carry a provider segment", never "exactly two segments".
+			 */
+			carriesProvider: true,
+			/** Prefix shown in "how to write it" hints and error messages. */
+			hintPrefix: "<pi-provider>/",
+			/** Shorthand for the whole reference shape, for hints. */
+			hint: "<pi-provider>/<model-id>",
+			/**
+			 * Minimum segment count of a full route string
+			 * "<family>-<role>/<pi-provider>/<model-id>". Rejecting a bare
+			 * "pi-supervisor" that lets the daemon pick a default model is an
+			 * authority check in policy-core; the count lives here so both agree.
+			 */
+			minRouteSegments: 3,
+		}),
+	}),
+	claude: Object.freeze({
+		family: "claude",
+		label: "Claude",
+		cli: "claude",
+		thinkingLevels: Object.freeze([
+			"off",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+			"ultracode",
+		]),
+		hasPermissionModes: true,
+		model: Object.freeze({
+			/** Claude model ids are a single segment ("claude-opus-5"); a slash
+			 * there means the author pasted a pi-shaped value by mistake. */
+			carriesProvider: false,
+			hintPrefix: "",
+			hint: "id trần (claude-opus-5)",
+			/** Route string is "<family>-<role>/<model-id>": two segments. */
+			minRouteSegments: 2,
+		}),
+	}),
+});
+
+export const RUNTIME_FAMILIES = Object.freeze(
+	Object.keys(RUNTIME_DESCRIPTORS),
+);
+export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
+
+/**
+ * The descriptor for a family, or null when the name is not a known runtime.
+ * Every consumer that used to branch on `family === "..."` asks this instead,
+ * so a new runtime reaches all of them the moment its descriptor exists.
+ */
+export function runtimeDescriptor(family) {
+	return RUNTIME_DESCRIPTORS[String(family ?? "")] ?? null;
+}
+
+/**
+ * Thinking levels are per RUNTIME FAMILY, derived from the descriptors so the
+ * table cannot drift from them. Kept as an exported map because it is the
+ * `optionsBy` source the routing form paints from.
+ */
+export const THINKING_LEVELS_BY_FAMILY = Object.freeze(
+	Object.fromEntries(
+		Object.entries(RUNTIME_DESCRIPTORS).map(([family, d]) => [
+			family,
+			d.thinkingLevels,
+		]),
+	),
+);
 
 /** Kept for compatibility: the pi levels, which predate the Claude family. */
 export const THINKING_LEVELS = THINKING_LEVELS_BY_FAMILY.pi;
@@ -53,9 +199,6 @@ export const THINKING_LEVELS = THINKING_LEVELS_BY_FAMILY.pi;
  * can still be routed at exactly this level and no other.
  */
 export const NO_THINKING_LEVEL = "off";
-
-export const RUNTIME_FAMILIES = Object.freeze(["pi", "claude"]);
-export const TEAM_ROLES = Object.freeze(["supervisor", "lead", "peer"]);
 
 /**
  * The durable Paseo role profiles — one per (family, role). Model-per-role
@@ -79,20 +222,32 @@ export function providerFamily(paseoProvider) {
 	return family ?? null;
 }
 
+/** "claude-peer" → "peer"; null when the name is not a role provider. */
+export function providerRole(paseoProvider) {
+	const family = providerFamily(paseoProvider);
+	if (!family) return null;
+	return String(paseoProvider).trim().slice(family.length + 1);
+}
+
 /**
- * Model reference shape per family.
+ * Model reference shape per family, resolved through the descriptor's
+ * `model.carriesProvider` rather than a hard-coded family name — the whole
+ * point of the table is that this function does not grow a branch per runtime.
  *
- * pi model ids carry their own provider segment ("<pi-provider>/<model-id>",
- * and the model id may itself contain slashes — Paseo splits at the FIRST
- * slash only). Claude model ids are a single segment ("claude-opus-5"), so a
- * slash there means the author pasted a pi-shaped value by mistake.
+ * A provider-carrying family (pi) requires "<provider>/<model-id>"; a
+ * bare-id family (claude) rejects a slash as a pi-shaped value pasted by
+ * mistake. An unknown family is a fail-closed error, never a silent pass.
  */
 export function validateModelForFamily(family, model, fail, context = {}) {
 	const trimmed = String(model).trim();
-	if (family === "claude") {
+	const descriptor = runtimeDescriptor(family);
+	if (!descriptor) {
+		throw fail(`unknown runtime family "${family}"`, { ...context, family });
+	}
+	if (!descriptor.model.carriesProvider) {
 		if (trimmed.includes("/")) {
 			throw fail(
-				`model "${trimmed}" must be a bare Claude model id (no "/"), e.g. claude-opus-5`,
+				`model "${trimmed}" must be a bare ${descriptor.label} model id (no "/"), e.g. claude-opus-5`,
 				{ ...context, model: trimmed },
 			);
 		}
@@ -105,10 +260,10 @@ export function validateModelForFamily(family, model, fail, context = {}) {
 		return trimmed;
 	}
 	if (!trimmed.includes("/")) {
-		throw fail(`model "${trimmed}" must be in <pi-provider>/<model-id> form`, {
-			...context,
-			model: trimmed,
-		});
+		throw fail(
+			`model "${trimmed}" must be in ${descriptor.model.hint} form`,
+			{ ...context, model: trimmed },
+		);
 	}
 	// Split the model value DIRECTLY (not prefixed by paseoProvider):
 	// splitProviderModel rejects an empty provider segment ("/model-id") and an
@@ -198,7 +353,7 @@ export function validateRoutingConfig(data) {
 	}
 	const validated = {};
 	for (const [modelClass, route] of Object.entries(routes)) {
-		if (!MODEL_CLASSES.includes(modelClass)) {
+		if (!ALL_MODEL_CLASSES.includes(modelClass)) {
 			throw fail(`unknown MODEL_CLASS "${modelClass}"`, { modelClass });
 		}
 		if (typeof route !== "object" || route === null) {
@@ -209,6 +364,13 @@ export function validateRoutingConfig(data) {
 			throw fail(
 				`route ${modelClass}: paseoProvider "${paseoProvider}" is not one of the durable role profiles (${ROLE_PROVIDERS.join(", ")})`,
 				{ modelClass, paseoProvider },
+			);
+		}
+		const requiredRole = CLASS_REQUIRED_ROLE[modelClass];
+		if (requiredRole && providerRole(paseoProvider) !== requiredRole) {
+			throw fail(
+				`route ${modelClass}: paseoProvider "${paseoProvider}" must be a ${requiredRole} role provider (${ROLE_PROVIDERS.filter((name) => providerRole(name) === requiredRole).join(" or ")}) — this class seats a ${requiredRole}, nothing else`,
+				{ modelClass, paseoProvider, requiredRole },
 			);
 		}
 		if (typeof model !== "string" || model.trim() === "") {
@@ -497,6 +659,120 @@ export function resolveClusterRoute(
 }
 
 // ---------------------------------------------------------------------------
+// The LOCAL daemon's route table — what the create_agent gate compares against
+// ---------------------------------------------------------------------------
+//
+// A create_agent made through MCP always lands on the local daemon (MCP is
+// local-only, see skills/paseo-team-lead/SKILL.md "The hard rule"), so the gate
+// needs exactly one host's routes: this one. Two files can hold them, and the
+// choice is made here, once, so the Claude hook (in-process) and the Pi adapter
+// (through `gate-routes --json`) cannot pick differently.
+
+/**
+ * Where the local route table comes from — the file, and inside a cluster file
+ * the host — without reading any route. Shared by the gate loader and by
+ * `pteam routing set`, which must write the file the gate will read.
+ *
+ * - cluster-routing.local.json present → it is the single source of truth. Its
+ *   one `connection.type: "local"` host is this daemon. None means the cluster
+ *   file describes remote hosts only, and the single-host file holds the local
+ *   routes; more than one is ambiguous and refused. An INVALID cluster file is
+ *   an error, never a reason to read the other file instead.
+ * - otherwise model-routing.local.json.
+ *
+ * @returns {{ok: true, source: "cluster"|"routing", path: string, hostId: string,
+ *   routes: object, config: object, shadowed: string|null}
+ *   | {ok: false, code: string, message: string, paths: string[]}}
+ */
+export function loadLocalRouteTable(options = {}) {
+	const env = options.env ?? process.env;
+	const dir = teamConfigDir(env);
+	const routingPath = options.routingPath ?? join(dir, "model-routing.local.json");
+	const clusterPath = options.clusterPath ?? join(dir, "cluster-routing.local.json");
+	const failed = (code, message, paths) => ({ ok: false, code, message, paths });
+	const routingExists = existsSync(routingPath);
+	if (existsSync(clusterPath)) {
+		let cluster;
+		try {
+			cluster = loadClusterConfig(clusterPath);
+		} catch (error) {
+			return failed(
+				"CONFIG_INVALID",
+				`${withPath(clusterPath, error)} — fix it (pteam routing check) before seating anything; the gate does not fall back to ${routingPath}`,
+				[clusterPath],
+			);
+		}
+		const locals = Object.entries(cluster.hosts).filter(
+			([, host]) => host.connection.type === "local",
+		);
+		if (locals.length > 1) {
+			return failed(
+				"LOCAL_HOST_AMBIGUOUS",
+				`${clusterPath} declares ${locals.length} hosts with connection.type "local" (${locals.map(([id]) => id).join(", ")}); exactly one of them can be this daemon — mark the others "remote"`,
+				[clusterPath],
+			);
+		}
+		if (locals.length === 1) {
+			const [hostId, host] = locals[0];
+			return {
+				ok: true,
+				source: "cluster",
+				path: clusterPath,
+				hostId,
+				routes: host.routes,
+				config: cluster,
+				shadowed: routingExists ? routingPath : null,
+			};
+		}
+		// Zero local hosts: the controller's local routes live in the single-host
+		// file, if anywhere.
+	}
+	if (!routingExists) {
+		return failed(
+			"ROUTE_FILE_MISSING",
+			`no local route file: neither ${routingPath} nor a "local" host in ${clusterPath} — copy config/model-routing.example.json there and fill it in (pteam routing check verifies it)`,
+			[routingPath, clusterPath],
+		);
+	}
+	try {
+		const config = loadRoutingConfig(routingPath);
+		return {
+			ok: true,
+			source: "routing",
+			path: routingPath,
+			hostId: config.hostId,
+			routes: config.routes,
+			config,
+			shadowed: null,
+		};
+	} catch (error) {
+		return failed(
+			"CONFIG_INVALID",
+			`${withPath(routingPath, error)} — fix it (pteam routing check) before seating anything`,
+			[routingPath],
+		);
+	}
+}
+
+/** A load error that always names the file — a schema error alone does not. */
+function withPath(path, error) {
+	const message = String(error?.message ?? error);
+	return message.includes(path) ? message : `${path}: ${message}`;
+}
+
+/**
+ * The JSON the gate is handed: the table minus the parsed config object, so
+ * the Pi adapter's subprocess and the Claude hook's in-process call produce
+ * byte-identical inputs for policy-core.
+ */
+export function gateRouteTable(options = {}) {
+	const table = loadLocalRouteTable(options);
+	if (!table.ok) return table;
+	const { config: _config, ...rest } = table;
+	return rest;
+}
+
+// ---------------------------------------------------------------------------
 // Composition — mirrors Paseo resolveRequiredProviderModel (split FIRST "/")
 // ---------------------------------------------------------------------------
 
@@ -670,7 +946,7 @@ export function buildProviderInventory(entries) {
  */
 export function resolveRoute(config, modelClass, inventory, options = {}) {
 	const strict = options.strict === true;
-	if (!MODEL_CLASSES.includes(modelClass)) {
+	if (!ALL_MODEL_CLASSES.includes(modelClass)) {
 		throw new RoutingError(
 			"HOST_ROUTE_UNAVAILABLE",
 			`unknown MODEL_CLASS "${modelClass}"`,
@@ -918,6 +1194,7 @@ export function verifyObserved(requested, runtimeInfo) {
 // JSON by hand. Usage:
 //   node scripts/model-routing.mjs validate [--routes <path>]
 //   node scripts/model-routing.mjs resolve --class <MODEL_CLASS> [--routes <path>] [--json]
+//   node scripts/model-routing.mjs gate-routes   (the local route table, JSON; used by the Pi adapter)
 // Exit code 0 ok, 1 config error, 2 route unavailable (structured stdout).
 // ---------------------------------------------------------------------------
 
@@ -956,6 +1233,12 @@ if (isMainModule()) {
 		console.error(payload.message);
 		process.exit(code);
 	};
+	if (command === "gate-routes") {
+		// The Pi adapter's half of the create_agent route gate: the same table
+		// the Claude hook loads in-process. Always exit 0 with JSON — a load
+		// failure is DATA the gate refuses on, not a crash to be retried.
+		emit(gateRouteTable(), 0);
+	}
 	try {
 		const config = loadRoutingConfig(optArg("--routes"));
 		if (command === "validate") {

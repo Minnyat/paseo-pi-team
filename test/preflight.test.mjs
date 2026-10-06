@@ -42,9 +42,12 @@ const pin = (name) => {
 	assert.ok(found, `could not read the ${name} pin out of preflight.mjs`);
 	return found;
 };
-const PINNED_PASEO = pin("paseo");
-const PINNED_PI = pin("pi");
 const PINNED_ADAPTER = pin("adapter");
+// The paseo and pi CLIs carry no pin, so the stubs just need SOME plausible
+// version to report. These are stub values, not pins: nothing compares
+// against them.
+const STUB_PASEO_VERSION = "0.8.0";
+const STUB_PI_VERSION = "0.85.1";
 
 // The stubs are executable node scripts on PATH. Windows resolves
 // executables by extension and `tryExec` routes through a shell there, so the
@@ -96,7 +99,7 @@ if (at(0) === "status" && at(1) === "--porcelain") { process.stdout.write(env.FA
 	stub(
 		"paseo",
 		`
-if (at(0) === "--version") { process.stdout.write((env.FAKE_PASEO_VERSION ?? "${PINNED_PASEO}") + "\\n"); process.exit(0); }
+if (at(0) === "--version") { process.stdout.write((env.FAKE_PASEO_VERSION ?? "${STUB_PASEO_VERSION}") + "\\n"); process.exit(0); }
 if (at(0) === "status" && at(1) === "--json") {
   if (env.FAKE_DAEMON_DOWN) { process.stderr.write("daemon unreachable\\n"); process.exit(1); }
   process.stdout.write(env.FAKE_PASEO_STATUS ?? JSON.stringify({ localDaemon: "running", listen: "127.0.0.1:6767" }));
@@ -135,7 +138,7 @@ if (hostAt >= 0) {
 		`
 if (at(0) === "--version") {
   if (env.FAKE_NO_PI) process.exit(127);
-  process.stdout.write((env.FAKE_PI_VERSION ?? "${PINNED_PI}") + "\\n"); process.exit(0);
+  process.stdout.write((env.FAKE_PI_VERSION ?? "${STUB_PI_VERSION}") + "\\n"); process.exit(0);
 }
 if (at(0) === "list") { process.stdout.write(env.FAKE_PI_LIST ?? "pi-mcp-adapter\\n"); process.exit(0); }`,
 	);
@@ -437,23 +440,35 @@ test("runtime: auto-detection reports what is installed", { skip: !POSIX }, () =
 	assert.equal(bare.of("pi-cli").status, "fail");
 });
 
-// --- version pins are warnings, never failures --------------------------------
+// --- the paseo and pi CLIs are REPORTED, never pinned -------------------------
 //
-// A pin is "the version this pack was verified against", not a requirement. A
-// pinned-version mismatch that blocked a preflight would make every upstream
-// release an outage.
+// Upstream ships every few days. A "verified against" pin would warn on every
+// release until somebody bumped it, so it would be warning permanently — and a
+// warning that is always on tells you nothing. What preflight owes a bug report
+// is the version that is actually installed, whatever it happens to be.
 
-test("a CLI version off the pin warns; the pinned one passes", { skip: !POSIX }, () => {
+test("any paseo/pi version passes, and preflight reports it verbatim", { skip: !POSIX }, () => {
 	install();
 	const healthy = preflight();
 	assert.equal(healthy.of("paseo-cli").status, "pass");
+	assert.equal(healthy.of("paseo-cli").detail, STUB_PASEO_VERSION);
 	assert.equal(healthy.of("pi-cli").status, "pass");
+	assert.equal(healthy.of("pi-cli").detail, STUB_PI_VERSION);
 
+	// A version nothing was ever verified against is still a pass, and the
+	// detail is the detected version rather than a complaint about it.
 	const drifted = preflight([], { FAKE_PASEO_VERSION: "9.9.9", FAKE_PI_VERSION: "0.1.0" });
-	assert.equal(drifted.of("paseo-cli").status, "warn");
-	assert.match(drifted.of("paseo-cli").detail, new RegExp(PINNED_PASEO));
-	assert.equal(drifted.of("pi-cli").status, "warn");
-	assert.match(drifted.of("pi-cli").detail, new RegExp(PINNED_PI));
+	assert.equal(drifted.of("paseo-cli").status, "pass");
+	assert.equal(drifted.of("paseo-cli").detail, "9.9.9");
+	assert.equal(drifted.of("pi-cli").status, "pass");
+	assert.equal(drifted.of("pi-cli").detail, "0.1.0");
+});
+
+// A missing CLI is still a hard failure — dropping the pin removed the opinion
+// about WHICH version, not the requirement that one be installed.
+test("a missing paseo/pi CLI still fails", { skip: !POSIX }, () => {
+	install();
+	assert.equal(preflight([], { FAKE_NO_PI: "1" }).of("pi-cli").status, "fail");
 });
 
 test("mcp-adapter: absent FAILS, present-but-unpinned warns", { skip: !POSIX }, () => {
@@ -1127,6 +1142,60 @@ test("cluster-remote: the remote inventory is the remote's, not the local one", 
 	// stronger thing and passed for an unrelated reason — the local and remote
 	// caches are separate maps — which is the same "claims more than it does"
 	// failure this file exists to catch, committed inside the test itself.
+});
+
+// --- the create_agent route gate ------------------------------------------------
+//
+// preflight reads the gate's own loader at the DEFAULT paths (never --routes),
+// because what an operator needs to see is the file every create_agent will be
+// compared against.
+
+test("route-gate: no local route file FAILS with enforcement on (strict or not), WARNS with it off", { skip: !POSIX }, () => {
+	const on = { PASEO_TEAM_ROUTE_ENFORCE: "" };
+	const lax = preflight([], on).of("route-gate");
+	assert.equal(lax.status, "fail", "every Lead/Supervisor seating is refused: that is a failure, not a warning");
+	assert.match(lax.detail, /EVERY Lead\/Supervisor create_agent is refused/);
+	assert.equal(preflight(["--strict"], on).of("route-gate").status, "fail");
+	const off = preflight([], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-gate");
+	assert.equal(off.status, "warn", "with the gate off nothing is refused for it");
+	// An unreadable file is the same failure as an absent one.
+	const garbage = join(home, "model-routing.local.json");
+	writeFileSync(garbage, "{ not json");
+	try {
+		assert.equal(preflight([], on).of("route-gate").status, "fail");
+	} finally {
+		rmSync(garbage, { force: true });
+	}
+});
+
+test("route-gate: names the file it reads; optional classes absent WARN even with --skip-models", { skip: !POSIX }, () => {
+	const defaultRoutes = join(home, "model-routing.local.json");
+	writeRoutes();
+	cpSync(routesFile, defaultRoutes);
+	try {
+		const run = preflight(["--routes", defaultRoutes], { PASEO_TEAM_ROUTE_ENFORCE: "" });
+		const gate = run.of("route-gate");
+		assert.equal(gate.status, "pass", gate.detail);
+		assert.match(gate.detail, /model-routing\.local\.json \(host "stub-host"\)/);
+		for (const cls of ["SUPERVISOR_GOVERNANCE", "LEAD_RECOVERY"]) {
+			const check = run.of(`route:${cls}`);
+			assert.equal(check?.status, "warn", `${cls} absent must warn`);
+			assert.match(check.detail, new RegExp(`pteam routing set ${cls}`));
+		}
+		// A warning, not a failure: every route file written before the optional
+		// classes existed must keep a clean --strict run.
+		assert.equal(preflight(["--strict", "--routes", defaultRoutes], {}).of("route:LEAD_RECOVERY").status, "warn");
+	} finally {
+		rmSync(defaultRoutes, { force: true });
+	}
+});
+
+test("route-enforcement: the opt-out is a WARN, and --strict FAILS it", { skip: !POSIX }, () => {
+	assert.equal(preflight([], { PASEO_TEAM_ROUTE_ENFORCE: "" }).of("route-enforcement").status, "pass");
+	const off = preflight([], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-enforcement");
+	assert.equal(off.status, "warn");
+	assert.match(off.detail, /never a default/);
+	assert.equal(preflight(["--strict"], { PASEO_TEAM_ROUTE_ENFORCE: "off" }).of("route-enforcement").status, "fail");
 });
 
 test.after(() => rmSync(home, { recursive: true, force: true }));
