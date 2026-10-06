@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -501,6 +501,43 @@ assert.equal(compareOcrVersions("2", "1.9.9"), 1, "missing segments count as 0")
       /could not find the paseo CLI/,
     );
     assert.ok(Array.isArray(reported.tried), "the failure names what it tried");
+
+    // The directory the user is standing in is not a place to load code from:
+    // a hostile checkout that plants node_modules/@getpaseo/cli/dist/utils/
+    // client.js must be ignored. The module is import()ed, so using it would
+    // run the checkout's JavaScript with the user's rights.
+    const hostile = join(sandbox, "hostile");
+    const planted = join(hostile, "node_modules", "@getpaseo", "cli", "dist", "utils", "client.js");
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(planted, "export function connectToDaemon() {}\n");
+    const realCwd = process.cwd();
+    try {
+      process.chdir(hostile);
+      process.env.PATH = join(sandbox, "empty");
+      reported = null;
+      assert.throws(
+        () => resolvePaseoClientModule((reason, tried) => { reported = { reason, tried }; throw new Error(reason); }),
+        /could not find the paseo CLI/,
+        "no paseo on PATH must not fall back to the cwd",
+      );
+      assert.ok(!reported.tried.some((entry) => entry.startsWith(hostile)), "the cwd is never even a candidate");
+
+      // A paseo on PATH that is not laid out like the package (a mise/asdf/volta
+      // shim resolves to the manager's own binary) used to fall through to the cwd.
+      if (process.platform !== "win32") {
+        const shimDir = join(sandbox, "shim");
+        mkdirSync(shimDir, { recursive: true });
+        writeFileSync(join(shimDir, "paseo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        process.env.PATH = shimDir;
+        assert.throws(
+          () => resolvePaseoClientModule(),
+          /found the paseo CLI but not its client SDK/,
+          "a shim that does not sit beside the SDK is a fault, not a reason to search the cwd",
+        );
+      }
+    } finally {
+      process.chdir(realCwd);
+    }
   } finally {
     process.env.PATH = realPath;
     if (realOverride === undefined) delete process.env.PASEO_TEAM_PASEO_CLIENT;

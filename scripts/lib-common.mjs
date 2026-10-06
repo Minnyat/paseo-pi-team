@@ -168,9 +168,14 @@ export const PASEO_CONVENTIONAL_ENTRIES = [
  *
  * The path is derived from wherever `paseo` actually lives (`<root>/bin/paseo`
  * -> `<root>/dist/utils/client.js`) rather than hard-coded: npm -g, mise, nvm
- * and Homebrew each put it somewhere different, and a checkout puts it under
- * node_modules. PASEO_TEAM_PASEO_CLIENT overrides everything, which is also
- * how the tests substitute a fake daemon.
+ * and Homebrew each put it somewhere different. PASEO_TEAM_PASEO_CLIENT
+ * overrides everything, which is also how the tests substitute a fake daemon.
+ *
+ * The result is `import()`ed, so it is code that runs with the user's rights.
+ * It is therefore never looked up relative to the current directory: a tool
+ * that is run inside third-party checkouts must not execute a file those
+ * checkouts planted under node_modules/. A layout this resolver does not
+ * recognise is a configuration fault, and the override is the way out.
  *
  * @param {(reason: string, tried: string[]) => never} [onMissing]
  * @returns {string} a file:// URL ready for dynamic import
@@ -204,7 +209,7 @@ export function resolvePaseoClientModule(onMissing) {
 		if (existsSync(candidate)) return pathToFileURL(candidate).href;
 	}
 	for (const segments of PASEO_CLIENT_CONVENTIONAL_ENTRIES) {
-		const candidate = join(process.cwd(), ...segments);
+		const candidate = join(PACK_ROOT, ...segments);
 		tried.push(candidate);
 		if (existsSync(candidate)) return pathToFileURL(candidate).href;
 	}
@@ -215,7 +220,11 @@ export function resolvePaseoClientModule(onMissing) {
 	throw new Error(`${reason} (tried: ${tried.join(", ") || "nothing"})`);
 }
 
-// Checkout layout, for a repo that has @getpaseo/cli as a dependency.
+// This pack's own checkout, for a developer who installed @getpaseo/cli as a
+// dependency of the pack itself. Resolved from where this file lives, never
+// from process.cwd(): the pack's install dir is as trusted as the pack's code,
+// the directory the user happens to be standing in is not.
+const PACK_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const PASEO_CLIENT_CONVENTIONAL_ENTRIES = [
 	["node_modules", "@getpaseo", "cli", "dist", "utils", "client.js"],
 ];
