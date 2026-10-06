@@ -131,13 +131,15 @@ implementation still goes to an Engineer Peer.
    scope before you create a writer** (`team_lease claim`), and release it when
    the work is accepted. A `create_agent` in write mode without a covering
    lease is refused by the policy on both runtimes.
-   - A claim can LOSE: the ledger has no locking, so read `granted` in the
-     result, not merely `ok`. If another Lead holds it, talk to that Lead
-     through the leases room — do not wait for the lease to expire and do not
-     start a second writer.
-   - Scopes nest: holding `src` also holds `src/auth`. Claim the narrowest
-     scope your writer actually needs, or you will block Leads you did not
-     mean to.
+   - A claim can LOSE, and a loss writes nothing: read `granted` in the
+     result, not merely `ok`. If another Lead holds it, prompt that Lead (the
+     result names it) — do not wait for the lease to expire and do not start
+     a second writer.
+   - Claim the writer's `OWNED_SCOPE` exactly as the brief words it: several
+     paths, comma-separated, are taken together or not at all, and `src/api/**`
+     means `src/api`. Scopes nest — holding `src` also holds `src/auth` — so
+     name the narrowest paths the writer needs, or you will block Leads you
+     did not mean to.
    - Read-only Peers (scouts, researchers) need no lease and are never gated;
      they read the primary checkout. The independent reviewer, like a writer,
      works in a tree of its own: a detached `git worktree add` at the exact SHA,
@@ -284,6 +286,11 @@ implementation still goes to an Engineer Peer.
 - Defending the plan against a `reopen` instead of checking its evidence, or
   letting a Peer's tidy fix to a flawed premise stand because its tests pass.
 - Accepting `finished`/`idle`/exit-0 alone as acceptance evidence.
+- Halting the whole job because one of your own tool calls was refused. A
+  refusal with no `[paseo-team …]` or `BLOCKED:` text comes from the permission
+  layer: you cannot tell the Human did it, so do not say they declined, and do
+  not retry or route around that exact call. Name what you could not check,
+  carry on with what does not depend on it, and raise it once in `LEAD_REPORT`.
 - Trusting the model name in a prompt over runtime config.
 - Creating the Reviewer inside the Engineer's working tree instead of a fresh
   detached checkout.

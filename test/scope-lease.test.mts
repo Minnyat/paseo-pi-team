@@ -17,10 +17,13 @@ import {
 	leaseBlockReason,
 	leaseHolderFor,
 	normalizeScope,
+	MAX_OWNED_SCOPES,
 	parseLeaseRecord,
+	parseOwnedScopes,
 	resolveLeases,
 	scopeConflicts,
-	writerScopeFromCreateAgent,
+	scopeCovers,
+	writerScopesFromCreateAgent,
 } from "../extensions/paseo-team-core/policy-core.ts";
 
 const LEAD_A = "aaaaaaaa-1111-4111-8111-111111111111";
@@ -233,42 +236,87 @@ const writeBrief = (scope: string) =>
 		"PASEO_TEAM_TASK_V3_END",
 	].join("\n");
 
-assert.equal(writerScopeFromCreateAgent({ initialPrompt: writeBrief("src/auth") }), "src/auth");
+assert.deepEqual(writerScopesFromCreateAgent({ initialPrompt: writeBrief("src/auth") }), ["src/auth"]);
 // The gate and the grant must be one question, not two readings of the same
 // fields. They diverged: the gate demanded a literal `EDIT_AUTHORITY: allowed`
 // while the grant defaults edit to true when the field is absent under
 // `MODE: write` — so this brief, which the parser accepts without complaint,
 // produced a writer that no lease ever covered.
-assert.equal(
-	writerScopeFromCreateAgent({
+assert.deepEqual(
+	writerScopesFromCreateAgent({
 		initialPrompt: writeBrief("src/auth").replace("EDIT_AUTHORITY: allowed\n", ""),
 	}),
-	"src/auth",
+	["src/auth"],
 	"a write brief with EDIT_AUTHORITY omitted still staffs a writer, so it still needs a lease",
 );
 assert.equal(
-	writerScopeFromCreateAgent({ initialPrompt: writeBrief("src/auth").replace("MODE: write", "MODE: read-only") }),
+	writerScopesFromCreateAgent({ initialPrompt: writeBrief("src/auth").replace("MODE: write", "MODE: read-only") }),
 	null,
 	"a read-only peer needs no lease",
 );
 assert.equal(
-	writerScopeFromCreateAgent({
+	writerScopesFromCreateAgent({
 		initialPrompt: writeBrief("src/auth").replace("EDIT_AUTHORITY: allowed", "EDIT_AUTHORITY: denied"),
 	}),
 	null,
 	"write mode without edit authority is not a writer",
 );
-assert.equal(writerScopeFromCreateAgent({ initialPrompt: "just a prompt" }), null);
-assert.equal(writerScopeFromCreateAgent({}), null);
-assert.equal(writerScopeFromCreateAgent(null), null);
+assert.equal(writerScopesFromCreateAgent({ initialPrompt: "just a prompt" }), null);
+assert.equal(writerScopesFromCreateAgent({}), null);
+assert.equal(writerScopesFromCreateAgent(null), null);
 // A write brief with no scope is the dangerous case: it writes *somewhere* and
 // says nothing about where. Treat it as claiming the whole repo.
-assert.equal(
-	writerScopeFromCreateAgent({
+assert.deepEqual(
+	writerScopesFromCreateAgent({
 		initialPrompt: writeBrief("src/auth").replace("OWNED_SCOPE: src/auth\n", ""),
 	}),
-	".",
+	["."],
 	"an unscoped writer is a repo-wide writer, not an exempt one",
+);
+
+// --- one parser for the claim and the guard ----------------------------------
+// The brief's own spelling must be claimable as written. The canonical example
+// is `OWNED_SCOPE: calculator.py, test_calculator.py`; before the shared parser
+// that string was not a scope at all, so the claim was refused and the guard
+// judged the writer as if it owned the whole repo.
+assert.deepEqual(parseOwnedScopes("calculator.py, test_calculator.py"), ["calculator.py", "test_calculator.py"]);
+assert.deepEqual(parseOwnedScopes("a.py\nb.py"), ["a.py", "b.py"], "newlines separate entries too");
+assert.deepEqual(parseOwnedScopes("src/upload/**, src/jobs/**, docs/notes.md"), ["src/upload", "src/jobs", "docs/notes.md"]);
+assert.deepEqual(parseOwnedScopes("src/upload/*.ts"), ["src/upload"], "a glob widens to its directory, never narrows");
+assert.deepEqual(parseOwnedScopes("src/**/handlers/*.ts"), ["src"]);
+assert.deepEqual(parseOwnedScopes("*.py"), ["."], "a wildcard at the root is the whole repo");
+assert.deepEqual(parseOwnedScopes("src, src/auth"), ["src"], "an entry another one contains is dropped");
+assert.deepEqual(parseOwnedScopes("src/auth, src"), ["src"]);
+assert.deepEqual(parseOwnedScopes("a.py, a.py"), ["a.py"]);
+assert.deepEqual(parseOwnedScopes("Src/Auth, src/auth"), ["Src/Auth"], "case-only duplicates collapse to one, not to none");
+assert.deepEqual(parseOwnedScopes("src, ."), ["."]);
+assert.equal(parseOwnedScopes("src/a.py, ../etc/passwd"), null, "one bad entry rejects the lot rather than dropping it");
+assert.equal(parseOwnedScopes("src/my file.py"), null);
+assert.equal(parseOwnedScopes("The repository (shared workspace)."), null);
+assert.equal(parseOwnedScopes(""), null);
+assert.equal(parseOwnedScopes(" , ,"), null);
+assert.equal(parseOwnedScopes(undefined), null);
+assert.equal(parseOwnedScopes(Array.from({ length: MAX_OWNED_SCOPES + 1 }, (_, i) => `f${i}.py`).join(",")), null);
+assert.equal(parseOwnedScopes(Array.from({ length: MAX_OWNED_SCOPES }, (_, i) => `f${i}.py`).join(",")).length, MAX_OWNED_SCOPES);
+
+// Authority is not symmetric: overlap is not coverage.
+assert.equal(scopeCovers("src", "src/auth"), true);
+assert.equal(scopeCovers("src/auth", "src"), false, "a child lease does not cover its parent");
+assert.equal(scopeCovers("src/auth", "src/authz"), false, "segment-wise, not prefix-wise");
+assert.equal(scopeCovers(".", "src/auth"), true);
+assert.equal(scopeCovers("src", "."), false);
+assert.equal(scopeCovers("SRC", "src/auth"), true, "case-insensitive, like scopeConflicts");
+assert.equal(scopeCovers("src", "src"), true);
+
+// A multi-path brief is staffed against EVERY path it names.
+assert.deepEqual(
+	writerScopesFromCreateAgent({ initialPrompt: writeBrief("calculator.py, test_calculator.py") }),
+	["calculator.py", "test_calculator.py"],
+);
+assert.deepEqual(
+	writerScopesFromCreateAgent({ initialPrompt: writeBrief("The repository (shared workspace).") }),
+	["."],
+	"a scope that is not a path fails closed to the whole repo",
 );
 
 // --- the guard ---------------------------------------------------------------
@@ -358,6 +406,97 @@ const ledgerWith = (...entries: any[]) => resolveLeases(entries, { now: 2000 });
 		selfAgentId: null,
 	});
 	assert.match(String(reason), /LEASE_UNVERIFIABLE/);
+}
+
+{
+	// The hole the shared parser closes: with the brief's own comma-separated
+	// OWNED_SCOPE read as "." and the check being overlap, a lease on ONE of the
+	// two files was enough to staff a writer over both.
+	const args = { initialPrompt: writeBrief("inventory.py, test_inventory.py") };
+	const partial = leaseBlockReason({
+		role: "lead",
+		args,
+		leases: ledgerWith(entry(LEAD_A, "claim", "inventory.py", 1000)),
+		selfAgentId: LEAD_A,
+	});
+	assert.match(String(partial), /SCOPE_LEASE_MISSING/);
+	assert.match(String(partial), /test_inventory\.py/, "the report names what is still uncovered");
+	assert.doesNotMatch(String(partial), /"inventory\.py"/, "and not what is already held");
+	assert.equal(
+		leaseBlockReason({
+			role: "lead",
+			args,
+			leases: ledgerWith(
+				entry(LEAD_A, "claim", "inventory.py", 1000),
+				entry(LEAD_A, "claim", "test_inventory.py", 1001),
+			),
+			selfAgentId: LEAD_A,
+		}),
+		null,
+		"holding every path is enough",
+	);
+	assert.equal(
+		leaseBlockReason({
+			role: "lead",
+			args,
+			leases: ledgerWith(entry(LEAD_A, "claim", ".", 1000)),
+			selfAgentId: LEAD_A,
+		}),
+		null,
+		"a covering ancestor is enough",
+	);
+}
+
+{
+	// Overlap is not coverage: holding the narrower scope does not license the
+	// wider writer.
+	const reason = leaseBlockReason({
+		role: "lead",
+		args: { initialPrompt: writeBrief("src/auth") },
+		leases: ledgerWith(entry(LEAD_A, "claim", "src/auth/login", 1000)),
+		selfAgentId: LEAD_A,
+	});
+	assert.match(String(reason), /SCOPE_LEASE_MISSING/);
+}
+
+{
+	// A rival on any ONE of the paths blocks the writer, and is reported ahead of
+	// a missing claim: it is the conversation the Lead has to have.
+	const reason = leaseBlockReason({
+		role: "lead",
+		args: { initialPrompt: writeBrief("src/a.py, src/b.py") },
+		leases: ledgerWith(entry(LEAD_A, "claim", "src/a.py", 1000), entry(LEAD_B, "claim", "src/b.py", 1001)),
+		selfAgentId: LEAD_A,
+	});
+	assert.match(String(reason), /SCOPE_LEASE_HELD/);
+	assert.match(String(reason), /bbbbbbbb/);
+	assert.doesNotMatch(String(reason), /leases room/, "the room is gone; the message must not send the Lead to it");
+}
+
+{
+	// A glob scope is staffed against its directory, so a lease on a sibling
+	// directory does not cover it.
+	const args = { initialPrompt: writeBrief("src/upload/**") };
+	assert.match(
+		String(
+			leaseBlockReason({
+				role: "lead",
+				args,
+				leases: ledgerWith(entry(LEAD_A, "claim", "src/jobs", 1000)),
+				selfAgentId: LEAD_A,
+			}),
+		),
+		/SCOPE_LEASE_MISSING/,
+	);
+	assert.equal(
+		leaseBlockReason({
+			role: "lead",
+			args,
+			leases: ledgerWith(entry(LEAD_A, "claim", "src/upload", 1000)),
+			selfAgentId: LEAD_A,
+		}),
+		null,
+	);
 }
 
 console.log("scope-lease tests passed");

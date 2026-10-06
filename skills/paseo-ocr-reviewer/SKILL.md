@@ -353,6 +353,11 @@ Derivation:
 HANDOFF:
 ```
 
+When the report is complete, remove the checkout you made:
+`git worktree remove --force .worktrees/review-<TASK_ID>`. It is a throwaway at
+a fixed SHA (a test run leaves untracked files behind, hence `--force`), and the
+commit stays in the repository. The Engineer's own tree is never yours to remove.
+
 Do not output `ACCEPTED`, `MERGE`, or `READY TO MERGE` as project authority.
 Include commands and evidence in `HANDOFF`. If correction is required, the
 Lead sends the finding to the original Engineer. The Engineer creates a NEW

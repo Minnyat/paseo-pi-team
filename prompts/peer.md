@@ -273,6 +273,12 @@ OPEN_QUESTIONS:
 HANDOFF:
 ```
 
+Writers, last of all, once the work is pushed and `WORKTREE_CLEAN` is recorded:
+from the workspace root run `git worktree remove .worktrees/<TASK_ID>`, never
+with `--force` (it refuses a tree with changes, which then need dealing with, not
+deleting). The branch keeps every commit, and a correction brings the tree back
+with `git worktree add .worktrees/<TASK_ID> agent/<TASK_ID>`.
+
 Routing is not yours to report: your brief carries no model, provider or
 workspace, and you do **not invent `OBSERVED_*`** — the Lead is the source of
 truth for observed routing and takes it from Paseo

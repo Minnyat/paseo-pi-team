@@ -109,7 +109,7 @@ export const TEAM_TOOLS = [
 		name: "team_lease",
 		// Mirrors policy-core's teamLeaseToolDescription(); the parity test pins them.
 		description:
-			"Take, extend, release or inspect a scope lease — the record of which Lead may put a WRITER on which files. `claim` before creating an engineer; `release` when the work is done; `renew` for long work; `status` to see the board. Scopes are repo-relative paths and nest: holding `src` also holds `src/auth`. A claim can lose — read `granted` in the result, not merely `ok`. Creating a write-mode Peer without a covering lease is refused.",
+			"Take, extend, release or inspect a scope lease — the record of which Lead may put a WRITER on which files. `claim` before creating an engineer; `release` when the work is done; `renew` for long work; `status` to see the board. `scope` is the writer's OWNED_SCOPE as written: one or more repo-relative paths, comma-separated (`src/api/**` means `src/api`); several paths are taken together or not at all. Scopes nest: holding `src` also holds `src/auth`. A claim can lose — read `granted` in the result, not merely `ok`. Creating a write-mode Peer without a covering lease is refused.",
 		// Supervisor is included so it can read the board; the per-action gate in
 		// policy-core refuses it claim/renew/release.
 		roles: ["lead", "supervisor"],

@@ -102,7 +102,7 @@ import {
 	type GovernanceContext,
 	type SupervisorSeat,
 	supportScriptBlockReason,
-	writerScopeFromCreateAgent,
+	writerScopesFromCreateAgent,
 	type ParsedTaskBrief,
 	type PeerMode,
 	type Policy,
@@ -165,7 +165,7 @@ async function leadWriterLeaseReason(input: unknown): Promise<string | null> {
 	const args = extractCreateAgentArgs(input);
 	// Nothing to gate unless this call staffs a writer; the core decides that
 	// from the same V3 brief the Peer will be held to.
-	if (!writerScopeFromCreateAgent(args)) return null;
+	if (!writerScopesFromCreateAgent(args)) return null;
 
 	let entries: unknown = null;
 	try {

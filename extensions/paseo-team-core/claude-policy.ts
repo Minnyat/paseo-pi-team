@@ -38,7 +38,7 @@ import {
 	type LeaseHolder,
 	type TeamTopology,
 	supportScriptBlockReason,
-	writerScopeFromCreateAgent,
+	writerScopesFromCreateAgent,
 	extraTools,
 	gitAuthorityBlockReason,
 	isBrowserMcpTarget,
@@ -373,7 +373,7 @@ export function claudeToolBlockReason(
 		classified.kind === "paseo-mcp" &&
 		// Both calls can deliver the brief that arms a writer.
 		matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"]) &&
-		writerScopeFromCreateAgent(input.toolInput)
+		writerScopesFromCreateAgent(input.toolInput)
 	) {
 		const leaseReason = leaseBlockReason({
 			role,

@@ -428,7 +428,7 @@ async function leasesForDecision({ core, claude }, role, toolName, toolInput, en
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent", "send_agent_prompt"])) {
 		return undefined;
 	}
-	if (!core.writerScopeFromCreateAgent(toolInput)) return undefined;
+	if (!core.writerScopesFromCreateAgent(toolInput)) return undefined;
 	try {
 		const { leaseLedger } = await import("./team-lease.mjs");
 		const result = await leaseLedger({}, { role, selfAgentId: env.PASEO_AGENT_ID, now });

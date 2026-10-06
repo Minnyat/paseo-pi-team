@@ -85,6 +85,8 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    Check `granted` in the result, never merely `ok`. A claim that collides
    with a live lease is REFUSED and writes nothing: the board is locked, read
    and appended to as one step, so asking is not the same as taking.
+   `<OWNED_SCOPE>` may name several paths, comma-separated (`src/api/**` means
+   `src/api`); they are taken together or not at all, and `claims` shows each.
 
    - `granted: true` → continue the cycle.
    - `granted: false` → another Lead owns ground that covers your scope; the
@@ -792,7 +794,11 @@ Report:
   irreversible, the Supervisor escalated it (quote the criterion), or the
   cluster has no Supervisor seat. An unexplained "needs Human input" is the
   habit this pack exists to break;
-- delegated decisions taken this cycle, each with its `ROLLBACK_PATH`.
+- delegated decisions taken this cycle, each with its `ROLLBACK_PATH`;
+- leftover trees: `git worktree list` before you close, and name any
+  `.worktrees/*` still there with its branch. Peers remove their own when
+  they finish; one that is still around is a tree somebody has not finished
+  with, or a Peer that never got to it — the Human's to prune, not yours.
 
 Never merge or deploy yourself — that decision belongs to Human.
 
