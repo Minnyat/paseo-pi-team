@@ -125,7 +125,10 @@ Keep it under the workspace root (a shell outside it restarts in the workspace o
 every call). Run git as `git -C .worktrees/<TASK_ID> …`; the push is exactly
 `git -C .worktrees/<TASK_ID> push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or
 the same without `-C` once you have `cd`'d into the worktree.
-Only touch your OWNED_SCOPE.
+Only touch your OWNED_SCOPE. When the work is committed and reported, remove the
+tree from the workspace root with `git worktree remove .worktrees/<TASK_ID>` (no
+--force): the branch keeps the commits, and review runs from the SHA in a tree of
+its own, not from yours.
 ```
 
 A relative `-C` path inside the workspace is the one `-C` the push guard accepts.

@@ -411,6 +411,15 @@ team_lease { action: "claim", scope: "src/auth", ttlMs: <work window> }
 team_lease { action: "renew" | "release" | "status", scope: "src/auth" }
 ```
 
+- `scope` is the writer's `OWNED_SCOPE` exactly as the brief words it: one or
+  more repo-relative paths, comma-separated (`inventory.py, test_inventory.py`),
+  and a glob reads as the directory in front of it (`src/api/**` is `src/api`).
+  The claim and the guard share one parser, so what you wrote in the brief is
+  what you claim. Several paths are one decision — if any is held by another
+  Lead, none is written — and the guard demands that a lease you hold **covers**
+  every one of them. A scope that is not a path inside the repo is a refused
+  claim, and a writer whose `OWNED_SCOPE` cannot be read is treated as owning the
+  whole repo (`.`) rather than nothing.
 - The ledger is an append-only file this pack owns (`scripts/lease-ledger.mjs`).
   A claim is **compare-and-swap**: the board is locked, read and appended to as
   one step, so a claim that collides with a live lease is refused and writes

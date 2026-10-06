@@ -114,7 +114,8 @@ implementation still goes to an Engineer Peer.
    `BLOCKED: MODEL_RESOLUTION_MISMATCH`, then archive. Never pick a different
    model yourself. The Peer does not report `OBSERVED_*`.
 4. **Git SHA is the anchor**: candidate review always happens on the exact SHA
-   in a fresh detached git worktree the Reviewer makes itself; the reviewer
+   in a fresh detached git worktree the Reviewer makes itself (so a writer's
+   own tree is not needed for review, and it removes it when done); the reviewer
    refuses any mismatched SHA. A
    correction returns to the SAME Engineer, as a new commit — no amend, no
    force-push, and the new SHA goes through review again.
@@ -286,11 +287,14 @@ implementation still goes to an Engineer Peer.
 - Defending the plan against a `reopen` instead of checking its evidence, or
   letting a Peer's tidy fix to a flawed premise stand because its tests pass.
 - Accepting `finished`/`idle`/exit-0 alone as acceptance evidence.
-- Halting the whole job because one of your own tool calls was refused. A
-  refusal with no `[paseo-team …]` or `BLOCKED:` text comes from the permission
-  layer: you cannot tell the Human did it, so do not say they declined, and do
-  not retry or route around that exact call. Name what you could not check,
-  carry on with what does not depend on it, and raise it once in `LEAD_REPORT`.
+- Taking an interrupted tool call for the Human saying no. When a Peer's
+  message or a `<paseo-system>` notice lands while a call of yours is still
+  running, Claude Code ends that call with "The user doesn't want to proceed with
+  this tool use… STOP and wait", and the notice is your next turn. Nobody
+  declined anything: read the notice, then repeat the call if you still need it.
+  Only a refusal with no new message behind it, or one that names a
+  `[paseo-team …]` rule, is a no to respect — say what you could not check, carry
+  on with what does not depend on it, and raise it once in `LEAD_REPORT`.
 - Trusting the model name in a prompt over runtime config.
 - Creating the Reviewer inside the Engineer's working tree instead of a fresh
   detached checkout.
