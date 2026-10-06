@@ -345,6 +345,201 @@ const CONSULT = {
   );
 }
 
+// --- a long job has watch seats, and only a seat that decides is ever asked ---
+{
+  const decides = core.seatDecides;
+  const seat = (agentId, domain = null, watch = null) => ({
+    agentId,
+    domain,
+    cluster: "shop",
+    watch: core.parseWatch(watch),
+  });
+  const choose = (extra) =>
+    chooseSupervisor({ topology: "single", leadDomain: null, domainCovers: core.domainCovers, seatDecides: decides, ...extra });
+
+  // The point of the feature: observers beside the deciding seat are NOT the
+  // ambiguity that two Supervisors used to be.
+  const crowd = [seat("watch-1", null, "liveness,cost"), seat("decider", null, "decisions,process"), seat("watch-2", null, "evidence")];
+  assert.equal(choose({ seats: crowd }).agentId, "decider");
+  // A seat with no label is the seat the pack has always had, and it decides.
+  assert.equal(choose({ seats: [seat("watch-1", null, "liveness"), seat("solo")] }).agentId, "solo");
+
+  // Two that DECIDE are still the ambiguity, and only they are named.
+  assert.throws(
+    () => choose({ seats: [...crowd, seat("second")] }),
+    (error) => {
+      assert.equal(error.code, "SUPERVISOR_AMBIGUOUS");
+      assert.match(error.message, /decider/);
+      assert.match(error.message, /second/);
+      assert.ok(!/watch-1/.test(error.message), "an observer is not a claimant");
+      return true;
+    },
+  );
+
+  // Only observers: the cluster has no delegated decision path, and says so
+  // in words that name the fix rather than "no Supervisor".
+  assert.throws(
+    () => choose({ seats: [seat("watch-1", null, "liveness"), seat("watch-2", null, "cost")] }),
+    (error) => {
+      assert.equal(error.code, "NO_SUPERVISOR_SEAT");
+      assert.match(error.message, /every one is a watch seat/);
+      assert.match(error.message, /decisions/);
+      return true;
+    },
+  );
+
+  // Naming an observer is not a way around it.
+  assert.throws(
+    () => choose({ seats: crowd, requested: "watch-1" }),
+    (error) => {
+      assert.equal(error.code, "SUPERVISOR_NOT_ELIGIBLE");
+      assert.match(error.message, /watch seat \(team\.watch: liveness, cost\)/);
+      assert.match(error.message, /decider/, "and points at the seat that can answer");
+      return true;
+    },
+  );
+  assert.equal(choose({ seats: crowd, requested: "decider" }).agentId, "decider");
+
+  // An unreadable label decides nothing, so it is not an address either.
+  assert.throws(
+    () => choose({ seats: [seat("broken", null, "liveness,vibes")] }),
+    (error) => error.code === "NO_SUPERVISOR_SEAT",
+  );
+
+  // Under multi the jurisdiction narrows the DECIDING seats only.
+  const multi = [seat("w", "backend", "liveness"), seat("d-backend", "backend", "decisions"), seat("d-front", "frontend")];
+  assert.equal(choose({ seats: multi, topology: "multi", leadDomain: "backend.auth" }).agentId, "d-backend");
+  assert.throws(
+    () => choose({ seats: [seat("w", "payments", "liveness"), seat("d", "frontend")], topology: "multi", leadDomain: "payments" }),
+    (error) => {
+      assert.equal(error.code, "NO_SUPERVISOR_SEAT");
+      assert.match(error.message, /1 Supervisor seat\(s\) that decide, but none carries a team\.domain/);
+      return true;
+    },
+  );
+
+  // Without the injected rule every seat is a candidate, exactly as before
+  // the watch existed — the old call sites in this file rely on it.
+  assert.throws(
+    () =>
+      chooseSupervisor({ seats: crowd, topology: "single", leadDomain: null, domainCovers: core.domainCovers }),
+    (error) => error.code === "SUPERVISOR_AMBIGUOUS",
+  );
+}
+
+// --- end to end: the consult goes to the deciding seat, with the REAL core ----
+{
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "pteam-consult-watch-"));
+  try {
+    const dir = join(home, "agents", "D--Code-shop");
+    mkdirSync(dir, { recursive: true });
+    const ids = {
+      lead: "11111111-1111-4111-8111-111111111111",
+      decider: "22222222-2222-4222-8222-222222222222",
+      liveness: "33333333-3333-4333-8333-333333333333",
+      process: "44444444-4444-4444-8444-444444444444",
+    };
+    const write = (id, provider, labels) =>
+      writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, provider, labels: { "team.cluster": "shop", ...labels } }));
+    write(ids.lead, "pi-lead/anthropic/model", {});
+    write(ids.liveness, "pi-supervisor/Mx/cheap", { "team.watch": "liveness,cost" });
+    write(ids.decider, "pi-supervisor/anthropic/model", { "team.watch": "decisions" });
+    write(ids.process, "pi-supervisor/anthropic/model", { "team.watch": "process,evidence" });
+
+    const env = { PASEO_AGENT_ID: ids.lead, PASEO_HOME: home, PASEO_TEAM_CLUSTER: "shop" };
+    const calls = [];
+    const send = (extra = {}) =>
+      sendLeadConsult(
+        { ...CONSULT, ...extra },
+        { env, runPaseo: async (args) => (calls.push(args), { ok: true, data: { queued: true } }) },
+      );
+
+    const result = await send();
+    assert.equal(result.recipient, ids.decider, "three Supervisors, one of them decides: no SUPERVISOR_AMBIGUOUS");
+    assert.equal(calls[0][1], ids.decider);
+
+await assert.rejects(send({ supervisorAgentId: ids.liveness }), (error) => error.code === "SUPERVISOR_NOT_ELIGIBLE");
+assert.equal(calls.length, 1, "a refused consult sends nothing");
+
+// Paseo archives by soft delete: the record of a replaced Supervisor stays on
+// disk with archivedAt set. It is not a seat, so it is not a claimant either.
+const archived = "55555555-5555-4555-8555-555555555555";
+writeFileSync(
+  join(dir, `${archived}.json`),
+  JSON.stringify({
+    id: archived,
+    provider: "pi-supervisor/anthropic/model",
+    archivedAt: "2026-10-06T10:00:00.000Z",
+    labels: { "team.cluster": "shop", "team.watch": "decisions" },
+  }),
+);
+assert.equal((await send()).recipient, ids.decider, "an archived deciding seat does not make the consult ambiguous");
+
+// One torn record elsewhere does not stop a consult whose seat WAS found: it is
+// routed to as it always was, so a broken file in another project cannot take
+// consulting away from every Lead on the host.
+const corrupt = "66666666-6666-4666-8666-666666666666";
+writeFileSync(join(dir, `${corrupt}.json`), '{"id": "66666666-6666-4666-8666-666666666666", "provider": "pi-super');
+assert.equal((await send()).recipient, ids.decider, "a seat that was found is routed to despite an unrelated torn record");
+
+// Naming a seat the list does not hold is "not eligible" only when the list was
+// complete: the record the scan could not read may be the very seat that was
+// named. A seat that WAS found and is not eligible keeps the precise answer.
+await assert.rejects(send({ supervisorAgentId: corrupt }), (error) => {
+  assert.equal(error.code, "SUPERVISOR_LOOKUP_FAILED");
+  assert.ok(error.message.includes(corrupt), "it names the record");
+  return true;
+});
+await assert.rejects(send({ supervisorAgentId: ids.liveness }), (error) => error.code === "SUPERVISOR_NOT_ELIGIBLE");
+
+// "Nobody" is the one answer a scan that could not read everything cannot give:
+// the record it missed may be the seat being asked about. Without a seat to
+// route to, a torn record is LOOKUP_FAILED — and with a clean scan the same
+// consult is the honest NO_SUPERVISOR_SEAT.
+const lonely = (withTornRecord) => {
+  const alone = join(home, withTornRecord ? "alone-torn" : "alone-clean");
+  const aloneDir = join(alone, "agents", "D--Code-shop");
+  mkdirSync(aloneDir, { recursive: true });
+  writeFileSync(
+    join(aloneDir, `${ids.lead}.json`),
+    JSON.stringify({ id: ids.lead, provider: "pi-lead/anthropic/model", labels: { "team.cluster": "shop" } }),
+  );
+  if (withTornRecord) writeFileSync(join(aloneDir, `${corrupt}.json`), '{"id": "66666666-6666');
+  return sendLeadConsult(CONSULT, {
+    env: { PASEO_AGENT_ID: ids.lead, PASEO_HOME: alone, PASEO_TEAM_CLUSTER: "shop" },
+    runPaseo: async (args) => (calls.push(args), { ok: true, data: {} }),
+  });
+};
+const callsBefore = calls.length;
+await assert.rejects(lonely(false), (error) => error.code === "NO_SUPERVISOR_SEAT");
+await assert.rejects(lonely(true), (error) => {
+  assert.equal(error.code, "SUPERVISOR_LOOKUP_FAILED");
+  assert.match(error.message, /AGENT_STATE_UNREADABLE/);
+  assert.ok(error.message.includes(corrupt), "it names the record");
+  return true;
+});
+assert.equal(calls.length, callsBefore, "and neither sends anything");
+
+// The root itself unreadable is the same answer, not NO_SUPERVISOR_SEAT (which
+// tells a Lead it may put the question to the Human).
+const blocked = join(home, "blocked");
+mkdirSync(blocked, { recursive: true });
+writeFileSync(join(blocked, "agents"), "not a directory");
+await assert.rejects(
+  sendLeadConsult(CONSULT, {
+    env: { PASEO_AGENT_ID: ids.lead, PASEO_HOME: blocked, PASEO_TEAM_CLUSTER: "shop" },
+    runPaseo: async () => ({ ok: true, data: {} }),
+  }),
+  (error) => error.code === "SUPERVISOR_LOOKUP_FAILED",
+);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 // --- end to end, with the core stubbed ----------------------------------------
 {
   const stub = {

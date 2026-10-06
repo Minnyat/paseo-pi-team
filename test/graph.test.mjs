@@ -504,6 +504,88 @@ function fakeRunner(overrides = {}) {
 	assert.equal(unlabelled.jurisdiction.unlabeled[0].role, "lead");
 }
 
+// --- watch seats: a long job's Supervisors are not a conflict --------------
+// `team.watch` splits one Supervisor's job by kind. Only a seat that DECIDES
+// can contend with another over a domain, so the board must not paint the
+// intended shape of a long job as the fault the overlap rule exists to catch —
+// and it must say out loud the quiet failure that shape can have: observers
+// with nobody deciding, where every consult has nowhere to land.
+{
+	const seats = [
+		{ id: "decider", shortId: "decider", name: "decides", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+		{ id: "watch-a", shortId: "watch-a", name: "liveness", provider: "pi-supervisor/o/cheap", status: "idle", cwd: "/w" },
+		{ id: "watch-b", shortId: "watch-b", name: "process", provider: "claude-supervisor/m", status: "idle", cwd: "/w" },
+		{ id: "second", shortId: "second", name: "also decides", provider: "pi-supervisor/o/m", status: "idle", cwd: "/w" },
+		{ id: "lead-1", shortId: "lead-1", name: "lead", provider: "pi-lead/o/m", status: "running", cwd: "/w" },
+	];
+	const states = {
+		decider: { agentId: "decider", domain: "backend", watch: "decisions" },
+		"watch-a": { agentId: "watch-a", domain: "backend", watch: "liveness,cost" },
+		"watch-b": { agentId: "watch-b", domain: "backend.auth", watch: "process" },
+		second: { agentId: "second", domain: "backend.auth", watch: null },
+		"lead-1": { agentId: "lead-1", domain: "backend.auth", watch: null },
+	};
+	const pick = (...ids) => seats.filter((seat) => ids.includes(seat.id));
+
+	const healthy = buildGraph({ agents: pick("decider", "watch-a", "watch-b", "lead-1"), states, now: 0 });
+	assert.equal(healthy.jurisdiction.conflicts.length, 0, "observers sharing a decider's domain are the design, not a conflict");
+	assert.equal(healthy.jurisdiction.undecided, false);
+	const bySeat = Object.fromEntries(healthy.jurisdiction.supervisors.map((s) => [s.id, s]));
+	assert.deepEqual(bySeat["watch-a"].watch, ["liveness", "cost"]);
+	assert.equal(bySeat["watch-a"].decides, false);
+	assert.equal(bySeat.decider.decides, true);
+	assert.equal(healthy.nodes.find((n) => n.id === "watch-a").watch, "liveness,cost", "the node carries the label as written");
+
+	// Two seats that DECIDE over one domain are still the conflict, observers or not.
+	const contested = buildGraph({ agents: pick("decider", "watch-a", "second", "lead-1"), states, now: 0 });
+	assert.equal(contested.jurisdiction.conflicts.length, 1);
+	assert.deepEqual(contested.jurisdiction.conflicts[0].agents.sort(), ["decider", "second"]);
+
+	// A seat with no label is the seat the pack has always had.
+	const solo = buildGraph({ agents: pick("second"), states, now: 0 });
+	assert.equal(solo.jurisdiction.undecided, false);
+	assert.equal(solo.jurisdiction.supervisors[0].decides, true);
+	assert.equal(solo.jurisdiction.supervisors[0].watch, null);
+
+	// Observers and nobody deciding: nothing refuses anything, so say it.
+	const headless = buildGraph({ agents: pick("watch-a", "watch-b", "lead-1"), states, now: 0 });
+	assert.equal(headless.jurisdiction.undecided, true);
+	assert.equal(headless.jurisdiction.conflicts.length, 0);
+	// No Supervisors at all is a different board, and not this warning.
+	assert.equal(buildGraph({ agents: pick("lead-1"), states, now: 0 }).jurisdiction.undecided, false);
+	// An unreadable label decides nothing.
+	const broken = buildGraph({
+		agents: pick("decider"),
+		states: { decider: { agentId: "decider", domain: "backend", watch: "decisions,vibes" } },
+		now: 0,
+	});
+	assert.equal(broken.jurisdiction.undecided, true);
+	// ...and the board says which part it could not read, so a seat with a typo does
+	// not look like a plausible watch.
+	assert.deepEqual(broken.nodes.find((n) => n.id === "decider").watchUnreadable, ["vibes"]);
+	assert.deepEqual(healthy.nodes.find((n) => n.id === "watch-a").watchUnreadable, []);
+	assert.deepEqual(solo.nodes.find((n) => n.id === "second").watchUnreadable, []);
+
+	// Judged per cluster: a deciding seat in another project settles nothing here.
+	const inCluster = (id, cluster) => ({ ...states[id], labels: { "team.cluster": cluster } });
+	const apart = buildGraph({
+		agents: pick("decider", "watch-a"),
+		states: { decider: inCluster("decider", "pod-a"), "watch-a": inCluster("watch-a", "pod-b") },
+		now: 0,
+	});
+	assert.equal(apart.jurisdiction.undecided, true);
+	assert.deepEqual(apart.jurisdiction.undecidedAgents, ["watch-a"]);
+	const together = buildGraph({
+		agents: pick("decider", "watch-a"),
+		states: { decider: inCluster("decider", "pod-a"), "watch-a": inCluster("watch-a", "pod-a") },
+		now: 0,
+	});
+	assert.equal(together.jurisdiction.undecided, false);
+	assert.deepEqual(together.jurisdiction.undecidedAgents, []);
+	// A cluster that cannot be told apart is not proven separate: any decider counts.
+	assert.equal(healthy.jurisdiction.undecided, false);
+	}
+
 // --- cluster diagnostic: the workspace axis, surfaced before it bites ------
 // `supervisorTurnVerdict` (policy-core.ts) already refuses every
 // SUPERVISOR_DECISION between a cluster-separate Supervisor/Lead pair with

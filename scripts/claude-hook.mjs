@@ -278,6 +278,7 @@ export function leadConsultBlockNotice(core, role, block, env = process.env) {
 		attribution,
 		supervisorDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
 		supervisorCluster: core.selfCluster(env),
+		supervisorWatch: core.selfWatch?.(env),
 		topology: core.teamTopology(env),
 	});
 	return core.leadConsultTurnNotice({ block, verdict, attribution });
@@ -313,6 +314,10 @@ const LEAD_STANDING_AUTHORITY = [
 	"itself irreversible, when the Supervisor answered HUMAN_DECISION_REQUIRED: yes,",
 	"or when lead_ask_supervisor reports NO_SUPERVISOR_SEAT — and when you do, say",
 	"which of those three it was.",
+	"",
+	"Your context is for decisions, not data. When an answer means reading more than",
+	"one file or a screen of output, or running something to see what it prints, ask",
+	"a read-only Peer (keep one standing scout per job) and read its report instead.",
 ].join("\n");
 
 /**
@@ -397,6 +402,59 @@ function selfWorkspaceForDecision({ core, claude }, role, toolName, env) {
 	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
 	try {
 		return core.selfWorkspaceId(env);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * What a Supervisor is told about its own watch (policy-core's watchSeatNotice),
+ * resolved from its own state. Null for every other role, for a seat with no
+ * label, and when the core in use predates the notice.
+ */
+function watchNoticeFor(core, role, env) {
+	if (role !== "supervisor") return null;
+	try {
+		return core.watchSeatNotice?.(role, core.selfWatch?.(env)) ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The cluster's Supervisor seats, for the Lead's create-a-Supervisor gate —
+ * resolved exactly as the Pi adapter resolves them (one shared helper in the
+ * core), and read ONLY for that call: how many seats decide is the question a
+ * Lead seating one is judged on, and no other tool call needs the list.
+ * Undefined = not needed; otherwise { seats, fault }, where seats null means the
+ * state directory could not be read in full, which the core refuses rather than
+ * reading as "nobody is there yet", and fault says what could not be read.
+ */
+function seatsForDecision({ core, claude }, role, toolName, toolInput, env) {
+	if (role !== "lead") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
+	if (!core.seatsSupervisor?.(toolInput)) return undefined;
+	try {
+		return core.lookupSupervisorSeatsForSeating?.(env, { cluster: core.selfCluster(env) });
+	} catch (error) {
+		return { seats: null, fault: String(error?.message ?? error) };
+	}
+}
+
+/**
+ * This Supervisor's own watch, for its lead-recovery gate. Read only when the
+ * call IS a create_agent from a Supervisor; undefined otherwise, so every other
+ * tool call stays free of a state read and the gate stays what it was.
+ */
+function selfWatchForDecision({ core, claude }, role, toolName, env) {
+	if (role !== "supervisor") return undefined;
+	const classified = claude.classifyClaudeTool?.(toolName) ?? null;
+	if (classified?.kind !== "paseo-mcp") return undefined;
+	if (!core.matchesPaseoToolName(classified.target ?? "", ["create_agent"])) return undefined;
+	try {
+		return core.selfWatch?.(env);
 	} catch {
 		return null;
 	}
@@ -504,11 +562,16 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		);
 		const rolePrompt = core.loadRolePrompt(role);
 		const routeNotice = core.routeEnforcementNotice?.(role, env) ?? null;
-		if (!rolePrompt && !routeNotice) return null;
+		const watchNotice = watchNoticeFor(core, role, env);
+		if (!rolePrompt && !routeNotice && !watchNotice) return null;
 		return {
 			hookSpecificOutput: {
 				hookEventName: "SessionStart",
-				additionalContext: [rolePrompt ? roleContextBlock(rolePrompt, role) : "", routeNotice ?? ""]
+				additionalContext: [
+					rolePrompt ? roleContextBlock(rolePrompt, role) : "",
+					watchNotice ?? "",
+					routeNotice ?? "",
+				]
 					.filter(Boolean)
 					.join("\n\n"),
 			},
@@ -551,6 +614,11 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 		if (!injected || supervisorTurn || consultTurn) {
 			const rolePrompt = core.loadRolePrompt(role);
 			if (rolePrompt) blocks.push(roleContextBlock(rolePrompt, role));
+			// A Supervisor is told what it watches wherever the role prompt is
+			// injected — the generic contract it is read beside says "decide
+			// small reversible matters", which a watch seat must not do.
+			const watchNotice = watchNoticeFor(core, role, env);
+			if (watchNotice) blocks.push(watchNotice);
 		} else if (role === "lead") {
 			blocks.push(LEAD_STANDING_AUTHORITY);
 		} else if (role === "peer") {
@@ -585,6 +653,8 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 	if (event === "pre-tool-use") {
 		const brief = await currentBrief(payload, env, now);
 		const toolName = String(payload?.tool_name ?? "");
+		// Read only for a Lead seating a Supervisor; undefined for every other call.
+		const seatLookup = seatsForDecision({ core, claude }, role, toolName, payload?.tool_input, env);
 		const reason = claude.claudeToolBlockReason({
 			role,
 			toolName,
@@ -598,6 +668,9 @@ export async function handleEvent(event, payload, env = process.env, now = Date.
 			selfAgentId: env.PASEO_AGENT_ID?.trim() || null,
 			topology: core.teamTopology(env),
 			selfDomain: env.PASEO_TEAM_DOMAIN?.trim() || null,
+			selfWatch: selfWatchForDecision({ core, claude }, role, toolName, env),
+			seats: seatLookup?.seats,
+			seatsFault: seatLookup?.fault,
 			cluster: core.selfCluster(env),
 			selfWorkspaceId: selfWorkspaceForDecision({ core, claude }, role, toolName, env),
 			routeTable: await routeTableForDecision({ core, claude }, role, toolName, payload?.tool_input, env),

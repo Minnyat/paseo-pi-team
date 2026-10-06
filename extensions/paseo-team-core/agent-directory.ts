@@ -7,6 +7,7 @@
  *
  *   labels["paseo.parent-agent-id"]  -> the spawn edge / ownership
  *   labels["team.domain"]            -> which supervisor/lead owns this seat
+ *   labels["team.watch"]             -> what a supervisor seat watches
  *   provider                         -> "<family>-<role>/..." → the role
  *   runtimeInfo.model / thinking     -> what the agent ACTUALLY runs
  *   runtimeInfo.sessionId            -> the provider session id
@@ -39,6 +40,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const AGENT_DOMAIN_LABEL = "team.domain";
+/**
+ * What a Supervisor seat watches (policy-core.ts, "Watch"). Kept raw here, like
+ * the domain: parsing it is a policy question, reading it is not.
+ */
+export const AGENT_WATCH_LABEL = "team.watch";
 export const AGENT_PARENT_LABEL = "paseo.parent-agent-id";
 /** Set by team-fork.mjs so a fork's lineage survives in `paseo ls` and the graph. */
 export const AGENT_FORK_LABEL = "team.fork-of";
@@ -136,6 +142,16 @@ export interface AgentState {
 	title: string | null;
 	labels: Record<string, unknown>;
 	domain: string | null;
+	/** `team.watch` as written; null when the seat carries none. See parseWatch. */
+	watch: string | null;
+	/**
+	 * Paseo archives by soft delete: the record stays on disk with `archivedAt`
+	 * set (@getpaseo/server 0.10.3, agent-archive.js, measured 2026-10-06). An
+	 * archived agent is gone for every purpose the team has — `paseo ls` hides it
+	 * and the graph never draws it — so a policy that counted its file would be
+	 * counting a seat nobody can talk to.
+	 */
+	archived: boolean;
 	parentAgentId: string | null;
 	/** The agent this one was forked from, when it was forked at all. */
 	forkOf: string | null;
@@ -203,6 +219,8 @@ export function normalizeAgentState(
 		title: str(record.title),
 		labels,
 		domain: str(labels[AGENT_DOMAIN_LABEL]),
+		watch: str(labels[AGENT_WATCH_LABEL]),
+		archived: str(record.archivedAt) !== null,
 		parentAgentId: str(labels[AGENT_PARENT_LABEL]),
 		forkOf: str(labels[AGENT_FORK_LABEL]),
 		model,
@@ -289,10 +307,15 @@ export function readAllAgentStates(
 	root: string = paseoAgentsRoot(env),
 ): ReadStatesResult {
 	const built = buildStateIndex(root);
-	return readAgentStates(Object.keys(built.index), {
+	const read = readAgentStates(Object.keys(built.index), {
 		root,
 		index: built.index,
 	});
+	// readAgentStates is handed a ready-made index, so it has no faults of the
+	// scan to report — the ones buildStateIndex just collected (an unreadable
+	// root, an unreadable cwd-slug directory) would be dropped here, and "the
+	// data exists and I could not read it" would read as "there is none".
+	return { ...read, degraded: [...built.degraded, ...read.degraded] };
 }
 
 /** Present only so callers can report the root they actually read. */

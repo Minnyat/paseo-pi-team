@@ -788,6 +788,9 @@ async function cmdAgents(argv) {
 			role: inferRole(agent?.provider),
 			seat: inferSeat(agent?.provider),
 			domain: state?.domain ?? null,
+			// What a Supervisor seat watches (team.watch), as written; null is the seat
+			// that watches everything and decides.
+			watch: state?.watch ?? null,
 			parentId: state?.parentAgentId ?? null,
 			resolvedModel: state?.model ?? null,
 			modelDrift: state?.modelDrift ?? false,

@@ -216,6 +216,30 @@ try {
 		assert.notEqual(run(["cost", "--with-everything"]).status, 0);
 	}
 
+	// --- agents: what a Supervisor watches is on the row --------------------
+	// A long job has several Supervisors, and the operator needs to see which
+	// one decides and what the others carry without opening each agent's state.
+	{
+		const stateDir = join(sandbox, "paseo", "agents", "w");
+		mkdirSync(stateDir, { recursive: true });
+		const sup = "11111111-1111-1111-1111-111111111111";
+		writeFileSync(
+			join(stateDir, `${sup}.json`),
+			JSON.stringify({ id: sup, cwd: "/w", labels: { "team.cluster": "wks_alpha", "team.watch": "liveness,cost" } }),
+		);
+		const agents = run(["agents"]);
+		assert.equal(agents.status, 0, agents.stderr);
+		const byId = Object.fromEntries(agents.json.agents.map((agent) => [agent.id, agent]));
+		assert.equal(byId[sup].watch, "liveness,cost", "the label is shown as written");
+		assert.equal(byId["22222222-2222-2222-2222-222222222222"].watch, null, "a seat with no label shows none");
+		// The graph carries it too, with the quiet failure of this shape named:
+		// watch seats and nobody that decides.
+		const graph = run(["graph"]);
+		assert.equal(graph.status, 0, graph.stderr);
+		assert.equal(graph.json.nodes.find((node) => node.id === sup).watch, "liveness,cost");
+		assert.equal(graph.json.jurisdiction.undecided, true);
+	}
+
 	// --- activity: the cap is PER ENTRY, not per call -----------------------
 	// A `limit` bounds how many entries come back and says nothing about how big
 	// one is — and one entry can be a Peer's whole report, whose full text the

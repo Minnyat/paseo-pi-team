@@ -99,8 +99,24 @@ ghế quản trị và ghế khôi phục không bao giờ mượn route của P
 | Ghế được dựng (create_agent / team_fork) | Lớp được khai |
 |---|---|
 | Peer (Lead dựng) | `MONITOR_ECONOMY`, `FAST_READ`, `CODING_MEDIUM`, `REASONING_HIGH`, `REVIEW_HIGH` |
-| Supervisor (Lead dựng) | `SUPERVISOR_GOVERNANCE` |
+| Supervisor (Lead dựng) | `SUPERVISOR_GOVERNANCE`; ghế **quan sát** (`team.watch` hợp lệ, không có `decisions`) còn được `MONITOR_ECONOMY` |
 | Lead (Supervisor recovery, Lead kế nhiệm, fork của Lead) | `LEAD_RECOVERY` |
+
+**Ghế quan sát và lớp `MONITOR_ECONOMY`.** Một job dài có nhiều Supervisor, mỗi cái
+một loại việc (`team.watch`, README "Several Supervisors on a long job"). Ghế quyết
+định (không nhãn, hoặc nhãn có `decisions`) là ghế mà chất lượng suy luận quyết định
+điều Human không bị hỏi, nên giữ `SUPERVISOR_GOVERNANCE`. Ghế chỉ quan sát — nhất là
+loại cơ học như `liveness`, `cost` — được route từ `MONITOR_ECONOMY`, lớp vốn ghi là
+"supervisor heartbeat, structured observation". Cổng nhìn vào `labels["team.watch"]`
+của lời gọi `create_agent`: nhãn không đọc được không mua được route rẻ, và ghế quyết
+định xin `MONITOR_ECONOMY` bị `ROUTE_CLASS_WRONG_FLOW`. Route của `MONITOR_ECONOMY`
+vẫn phải trỏ tới provider `*-supervisor` (file mẫu đã vậy); nếu trỏ `*-peer` thì Lead
+nhận `ROUTE_PROVIDER_MISMATCH` khi dựng Supervisor, y như chiều ngược lại ở trên.
+Fork truyền nhãn mà bản sao sẽ mang, `update_agent` truyền nhãn `team.watch` đọc từ state
+của chính ghế đích: ghế quan sát đang chạy `MONITOR_ECONOMY` vẫn được đổi model trong
+route đó, còn ghế quyết định thì không bao giờ có lớp này. Gọi mà không biết gì về ghế
+chỉ thấy `SUPERVISOR_GOVERNANCE`, lớp mà mọi Supervisor luôn có — không bao giờ mua route
+rẻ bằng một lời đoán.
 
 **`update_agent`** đổi `settings.model` và/hoặc `settings.thinkingOptionId` (kể
 cả `null` — xoá về mặc định daemon) bị so với route của lớp **ghi trên chính

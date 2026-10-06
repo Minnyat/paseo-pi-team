@@ -57,7 +57,7 @@ export const TEAM_TOOLS = [
 		// plain .mjs and cannot import the TypeScript core, so the text is
 		// duplicated and claude-team-mcp.test.mjs asserts the two never drift.
 		description:
-			"Ask this cluster's Supervisor to DECIDE a matter, instead of asking the Human. " +
+			"Ask this cluster's deciding Supervisor (the seat that holds `decisions`; a watch seat only observes) to DECIDE a matter, instead of asking the Human. " +
 			"Delivers a LEAD_CONSULT_V1 prompt that wakes the Supervisor, which answers with either a binding SUPERVISOR_DECISION or an escalation naming which delegation criterion failed. " +
 			"Use it whenever you would otherwise stop and ask the Human: a choice between approaches you have evidence for, a retry after a transient failure, a scope or ordering call, an ambiguous protocol reading. " +
 			"Requires the four things the Supervisor is obliged to check — question, options, evidence, scope and reversibility — so a decision can come back in one round trip. " +

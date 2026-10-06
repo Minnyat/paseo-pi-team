@@ -14,6 +14,7 @@ import { statSync } from "node:fs";
 import {
 	AGENT_DOMAIN_LABEL,
 	AGENT_PARENT_LABEL,
+	AGENT_WATCH_LABEL,
 	buildStateIndex as buildStateIndexAt,
 	isAgentId,
 	normalizeAgentState,
@@ -24,6 +25,7 @@ import { paseoAgentsDir } from "./config-walker.mjs";
 export {
 	AGENT_DOMAIN_LABEL,
 	AGENT_PARENT_LABEL,
+	AGENT_WATCH_LABEL,
 	isAgentId,
 	normalizeAgentState,
 };

@@ -7,28 +7,35 @@ description: Coordinate research, implementation, correction, and independent re
 
 ## Preflight
 
-1. Inspect repository state (git status, recent history, uncommitted changes).
-2. Read relevant project instructions (`AGENTS.md`, `WORKSPACE_PROTOCOL.md` if present).
+1. Glance at repository state: `git status` and a few lines of `git log
+   --oneline`, nothing bigger. Reconstructing the repo is a Scout's job (see
+   Research), not yours.
+2. Read `WORKSPACE_PROTOCOL.md` in full — it governs you — and `AGENTS.md` when it
+   is short; when it is long, have the Scout extract what binds the work.
 3. Identify the outcome — what has to be true afterwards, and for whom —
    separately from any solution the request names, then the success boundary
    and risks. A named solution is evidence about the outcome, not the spec.
-4. **Check that this cluster has a Supervisor.** `lead_ask_supervisor` reports
-   `NO_SUPERVISOR_SEAT` when it does not, and a cluster without one has no
-   delegated decision path — every question in it lands on the Human. Seating
-   one is a Lead act (see "Asking instead of interrupting" below); do it now,
-   at intake, not the first time you are stuck.
+4. **Check that this cluster has a Supervisor that decides, and size the watch to
+   the job.** `lead_ask_supervisor` reports `NO_SUPERVISOR_SEAT` when it does
+   not, and a cluster without one has no delegated decision path — every
+   question in it lands on the Human. Seating one is a Lead act (see "Asking
+   instead of interrupting" below). A short job needs just that seat. A long one
+   — many Peers over several rounds, parallel writers, anything that will
+   outlast your own context — also gets watch seats ("Seating supervisors for a
+   long job"). Do it now, at intake, not the first time you are stuck.
 5. Do not begin implementation yet.
 
 ## Research
 
 Research is for understanding the domain — what the code does today, who owns
-it, what the outcome actually needs — not for starting the build. Staff it by
-open question, not by habit: one read-only Peer per question you cannot answer
-from the repo yourself (a Repository Scout, Documentation Researcher or
-Solution Challenger is the usual shape). If you can already state the outcome,
-the owners and the seams, go straight to Decision. Scaling ceremony to the task
-never scales the invariants: the V3 brief, the lease and the exact-SHA
-independent review apply to a one-line change too.
+it, what the outcome actually needs — not for starting the build, and it is a
+Peer's work, not yours. You state the questions; a read-only Peer (a Repository
+Scout, Documentation Researcher or Solution Challenger) reads and answers; you
+read the answer, not the files behind it. Staff it by open question, not by
+habit; if you can already state the outcome, the owners and the seams from
+reports you hold, go straight to Decision. Scaling ceremony to the task never
+scales the invariants: the V3 brief, the lease and the exact-SHA independent
+review apply to a one-line change too.
 
 Every Peer works in YOUR workspace (see step 8 of the routing cycle). Send them a
 **V3 read-only brief** (`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`
@@ -36,6 +43,28 @@ with `MODE: read-only` — see "Task brief template" below). Legacy
 `PASEO_TEAM_TASK_V1|V2` headers are parseable for diagnostics only: the
 extension ALWAYS resolves them read-only and ignores their MODE and
 `*_AUTHORITY` fields, so never use them for new work.
+
+### Delegating reading and doing
+
+Your context is the scarcest in the cluster: you hold decisions, not data. If an
+answer needs more than one file or a screen of output, a Peer reads it and reports.
+
+| You want to know… | Ask |
+|---|---|
+| where X lives, what Y does, how it got that way | `repository-scout` (`FAST_READ`) |
+| what a spec, API or doc says; anything outside the repo | `documentation-researcher` (`FAST_READ`) |
+| whether an artifact matches a checklist | `acceptance-verifier` (`FAST_READ`; see Review) |
+| what a command or test prints, and whether it passes | a scout with `VERIFICATION_PROFILE: focused-test`: it runs it and reports pass/fail, the failing lines and how to reproduce |
+| whether a candidate is right | `independent-reviewer` (`REVIEW_HIGH`) |
+
+Seat ONE standing scout per job and keep using it: a follow-up is a
+`send_agent_prompt` with a short `MODE: read-only` V3 block and costs no routing
+cycle. Never send it bare: with no valid brief a Peer cannot `peer_ask_lead`, and
+you would have to read its activity log. Ask for reports that
+point at files and run about a screen; when the question needs more, ask for the
+top findings and a pointer. What you read yourself: the Workspace Protocol, the
+Peers' reports and verdicts, `git status` and a short log, and the one item of a
+verdict you doubt.
 
 ## Decision
 
@@ -277,14 +306,13 @@ This is the exact failure mode the cluster config exists to prevent.
    read them back. `settings.modeId` is REQUIRED on every `claude-*` route (see
    "Every `claude-*` agent you create needs `settings.modeId`"). NEVER omit the
    model to inherit a daemon default.
-   The `team.cluster` label is REQUIRED and is checked against YOUR OWN
-   cluster: omit it and `create_agent` is refused with
-   `Refusing create_agent: labels["team.cluster"] is required and must be
-   "<value>"` — the message names the exact value to pass. Get your own value
-   from the `cluster` field of any `team_lease` result (`status` changes nothing)
-   or off any Peer you already created; never guess it from the project name. A label naming a DIFFERENT cluster than your own is refused
-   too — that would be stamping a new seat into another project's authority,
-   not a typo to silently correct.
+   The `team.cluster` label is REQUIRED and checked against YOUR OWN cluster:
+   omit it and `create_agent` is refused, the message naming the exact value to
+   pass (`labels["team.cluster"] is required and must be "<value>"`). Your own
+   value is the `cluster` field of any `team_lease` result (`status` changes
+   nothing) or of any Peer you already created; never guess it from the project
+   name. A DIFFERENT cluster is refused too — that would stamp a new seat into
+   another project's authority, not a typo to correct.
 10. Call `get_agent_status` and bounded-poll `snapshot.runtimeInfo.model` and
     `runtimeInfo.thinkingOptionId` until startup identity is populated. Missing
     identity during the bounded startup window is
@@ -320,10 +348,9 @@ local one. In the commands below, `<id>` is the HOST_ID from
    pass, but a model that reports no extended thinking is routable at
    `thinking: off`).
 6. **One workspace for the whole job, ON THE REMOTE host.** A local workspace
-   ID has no meaning there, and the CLI has no "my own workspace" to default to:
-   a `run` without `--workspace` would run in the CONTROLLER's cwd. So the
-   wrapper needs one workspace id, the same for every agent of the job, Writer
-   and Reviewer included:
+   ID means nothing there, and a `run` without `--workspace` would run in the
+   CONTROLLER's cwd, so the wrapper needs one workspace id, the same for every
+   agent of the job, Writer and Reviewer included:
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspaces --host-id <id>`
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs workspace-create --host-id <id> --path <path-on-remote> --title <t>`
    `workspace-create` is "ensure": it lists what is open and REUSES the workspace
@@ -339,13 +366,10 @@ local one. In the commands below, `<id>` is the HOST_ID from
    `node <PASEO_TEAM_SCRIPTS_DIR>/remote-paseo.mjs run --host-id <id> --provider <role-provider>/<pi-provider>/<model-id> --thinking <level> --workspace <wks> --title <t> --brief <brief-file>`
    The envelope returns `agentRef: <host-id>/<agent-id>` — record it.
    `run` requires a `team.cluster` label the same way the local `create_agent`
-   does. You do not need to pass `--label team.cluster=<value>` yourself in the
-   common case — the wrapper fills it in automatically from your own cluster
-   (`selfCluster()`) when `--label` does not already set one. Pass it
-   explicitly only when you want the remote seat in a DIFFERENT cluster than
-   your own (rare, and worth a `ROUTING_DECISION` note about why); a run that
-   still has no value after the auto-fill (your own cluster is itself
-   undetermined) is refused with a message naming `--label team.cluster=`.
+   does, and the wrapper fills it in from your own cluster (`selfCluster()`) when
+   `--label` does not set one. Pass it explicitly only for a remote seat in a
+   DIFFERENT cluster (rare; note why in the `ROUTING_DECISION`); a run with no
+   value even after the auto-fill is refused, naming `--label team.cluster=`.
 8. Verify the OBSERVED runtime identity on the remote daemon. The wrapper's
    `run` command performs a bounded startup poll; use `--startup-timeout <dur>`
    when the host needs a longer (still bounded) initialization window:
@@ -397,57 +421,36 @@ Hard rules for a mixed fleet:
 - Claude Peers cannot spawn Claude subagents (the `Task` tool is denied for
   every role). Fan-out is always yours, through Paseo.
 - **Every `claude-*` agent you create needs `settings.modeId`.** A permission
-  mode is never inherited across providers. The check fires when the TARGET
-  provider declares modes and its id differs from the caller's, and a value that
-  is legal for the target does NOT save it:
+  mode is never inherited across providers — not even `claude-lead` →
+  `claude-peer`, where a value legal for the target is still refused: `cannot
+  inherit mode 'auto' from caller … Pass an explicit mode.` pi declares NO modes,
+  which is the only reason `pi-lead` → `pi-peer` works. Rule: pi route → nothing
+  to pass, Claude route → always pass it. The field is `settings.modeId`, NOT a
+  top-level `mode` (Paseo ignores that one, leaving the error above and no clue):
+  `create_agent({ provider: "claude-peer/claude-opus-5", …, settings: { modeId:
+  "auto", thinkingOptionId: "high" } })`. The CLI and `remote-paseo.mjs run` spell
+  it `--mode`; the wrapper refuses a `claude-*` route without one. The provider
+  supplies nothing: `defaultMode=auto` in `paseo provider ls` only preselects a
+  picker, and at create time the daemon uses `modeId` if given, else `"default"`
+  (measured 2026-09-07) — the `PreToolUse` gate refuses a `claude-*` create with
+  no `settings.modeId` and names the value to pass.
 
-  ```text
-  cannot inherit mode 'auto' from caller (provider 'claude-lead') for new agent
-  (provider 'claude-peer'). Pass an explicit mode.
-  ```
+  Use `"auto"` unless you have a reason not to. A Peer is bounded by its role
+  policy plus its V3 brief, both enforced in the `PreToolUse` hook before Paseo's
+  permission queue sees the call; on `"default"` every call parks in that queue
+  and the Peer looks hung while you triage. Narrow it deliberately — `"plan"` to
+  propose before acting, `"default"` to watch call by call, `"acceptEdits"` for a
+  write Peer whose brief grants `EDIT_AUTHORITY` — and NEVER `bypassPermissions`:
+  Paseo's own guardrails outside the role policy go too.
 
-  `auto` is in `claude-peer`'s own list and was still refused, so this is not a
-  crossing-families rule: `claude-lead` → `claude-peer` fails identically. pi
-  declares NO modes, which is the only reason `pi-lead` → `pi-peer` works. Rule:
-  pi route → nothing to pass, Claude route → always pass it.
-
-  The field is `settings.modeId`, NOT a top-level `mode` — Paseo reads every
-  initial runtime setting from `settings`, and a top-level `mode` is ignored,
-  leaving you with the error above and no clue why:
-
-  ```jsonc
-  create_agent({ provider: "claude-peer/claude-opus-5", /* ... */
-                 settings: { modeId: "auto", thinkingOptionId: "high" } })
-  ```
-
-  The CLI and `remote-paseo.mjs run` spell it `--mode`; the wrapper refuses a
-  `claude-*` route that has none.
-
-  Use `modeId: "auto"` unless you have a reason not to. What bounds a Peer is
-  its role policy plus its V3 brief, both enforced in the `PreToolUse` hook
-  before Paseo's permission queue sees the call. The queue only decides how
-  often a human is interrupted, and on `"default"` the answer is "every call":
-  the Peer parks looking hung while you spend your turn on
-  `list_pending_permissions` / `respond_to_permission`. Narrow it deliberately —
-  `"plan"` to propose before acting, `"default"` to watch call by call,
-  `"acceptEdits"` for a write Peer whose brief grants `EDIT_AUTHORITY`. NEVER
-  `bypassPermissions`: Paseo's own guardrails outside the role policy go too.
-
-  Do NOT expect the provider to supply this. `defaultMode=auto` in `paseo
-  provider ls` is only what a picker preselects: at create time the daemon uses
-  `modeId` if given, else `"default"` (measured 2026-09-07). The `PreToolUse` gate refuses a `claude-*` `create_agent`
-  with no `settings.modeId` and names the value to pass.
-
-  A fork needs nothing extra: `paseo import` cannot carry a mode, so
-  `team_fork` moves the fork onto `auto` right after the import and deletes it
-  if that fails. Pass `modeId` to narrow it on purpose (`"plan"`), and whenever
-  `auto` is unavailable (Bedrock/Vertex, or "auto mode unavailable for this
-  model"): without it such a fork fails with `FORK_MODE_UNSET` — pick another
-  explicit mode the seat supports, never `bypassPermissions`.
-
-  Seats already on the wrong mode show up in `pteam watchdog` under `parked`,
-  each row carrying the `paseo agent mode <id> auto` fix (or a `fixNote` naming
-  the fallback where `auto` does not exist).
+  A fork needs nothing extra: `paseo import` carries no mode, so `team_fork`
+  moves the fork onto `auto` after the import and deletes it if that fails. Pass
+  `modeId` to narrow it (`"plan"`), and whenever `auto` is unavailable
+  (Bedrock/Vertex, "auto mode unavailable for this model") — otherwise
+  `FORK_MODE_UNSET`: pick another explicit mode the seat supports, never
+  `bypassPermissions`. Seats already on the wrong mode show in `pteam watchdog`
+  under `parked`, each row carrying the `paseo agent mode <id> auto` fix (or a
+  `fixNote` where `auto` does not exist).
 
 Model classes (decided by task risk + disposition, not by role name):
 
@@ -489,6 +492,8 @@ ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime ide
 ```
 
 ## Monitoring
+
+Watching is not your job either. On a job with `liveness` / `cost` watch seats they do it and you read their observations; poll nothing. Without them it is yours:
 
 Use `team_watchdog` for a bounded observation pass over running agents. It uses bounded concurrency (default 6), a global deadline (default 30 seconds), and partial results when the deadline expires. It retries only transient Paseo transport errors. Only a successful inspect with old `UpdatedAt` returns `stale` as a suspicion; inspect failure is `unknown`, not stale and never an automatic recovery signal.
 
@@ -583,8 +588,8 @@ Failure answers from the tool itself, and what each one means:
 
 | Code | What it means | What to do |
 |---|---|---|
-| `NO_SUPERVISOR_SEAT` | this cluster has no governance seat | seat one (below); if you cannot, ask the Human **and say this is why** |
-| `SUPERVISOR_AMBIGUOUS` | two seats claim you | do not pick — a guessed answer is refused on arrival as `JURISDICTION_OVERLAP`. Raise the overlap with the Human |
+| `NO_SUPERVISOR_SEAT` | no seat that decides (watch seats alone do not count) | seat one (below); if you cannot, ask the Human **and say this is why** |
+| `SUPERVISOR_AMBIGUOUS` | two seats that decide claim you | do not pick — a guessed answer is refused on arrival as `JURISDICTION_OVERLAP`. Raise the overlap with the Human |
 | `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable | a real blocker: "I could not look" is not "there is nobody". Fix the read, do not route around it |
 | `CONSULT_FIELD_COLLISION` | pasted evidence contains a line like `SCOPE:` | reword or quote that line; it would have been read back as a field |
 
@@ -592,7 +597,7 @@ Failure answers from the tool itself, and what each one means:
 
 Not a contradiction — the seat you create still judges you, and it is better
 than having no delegation path at all. Same routing cycle as any other
-`create_agent` (steps 1–4 above; the class is always `SUPERVISOR_GOVERNANCE`), plus five things
+`create_agent` (steps 1–4 above; the class is `SUPERVISOR_GOVERNANCE`), plus five things
 the policy enforces:
 
 ```text
@@ -602,7 +607,8 @@ create_agent {
     "purpose": "governance",
     "team.model-class": "SUPERVISOR_GOVERNANCE",   # provider/model/thinking must equal its route
     "team.cluster": "<your own cluster>",
-    "team.domain": "<your own domain, or one inside it>"   # required under multi
+    "team.domain": "<your own domain, or one inside it>",  # required under multi
+    "team.watch": "decisions"    # long job: this seat only decides. Omit it and the seat watches everything too
   },
   settings: { thinkingOptionId: "<routed level>" },
   initialPrompt: "<brief it on the project, the Workspace Protocol, and what it governs>"
@@ -618,110 +624,86 @@ Give the new Supervisor a `create_heartbeat` cadence in its briefing so it
 observes as well as answers; a Supervisor that only ever replies to consults is
 half a seat.
 
+### Seating supervisors for a long job
+
+One Supervisor carrying every concern fills its context the way yours would. For
+a long job, seat the one that decides (above), then **watch seats** beside it —
+the same routing cycle, each carrying one kind of thing in `labels["team.watch"]`:
+
+| `team.watch` | Carries | Model class |
+|---|---|---|
+| `decisions` | your consults, delegated decisions, Lead recovery | `SUPERVISOR_GOVERNANCE`; exactly one seat |
+| `liveness` | stale, unknown or parked seats, host health | `MONITOR_ECONOMY` |
+| `cost` | spend, reports that inline documents, your own context filling | `MONITOR_ECONOMY` |
+| `process` | you against the protocol and this doctrine, one writer per scope | `SUPERVISOR_GOVERNANCE` |
+| `evidence` | acceptance and review: SHAs, independence, claims backed by evidence | `SUPERVISOR_GOVERNANCE` |
+
+Group what needs the same data and the same model. A typical long job is the
+deciding seat, one cheap mechanical seat (`liveness,cost`) and one judgement seat
+(`process,evidence`); a large job splits further. A seat with no `team.watch`
+watches everything and decides — right for a short job, wrong for a long one; one
+the Human already seated that way is the deciding seat here, so seat watch seats
+beside it.
+
+The policy enforces: the first seat you seat must decide; after it every seat is
+a watch seat (a second deciding seat is refused once a cluster uses the label —
+every consult would be `SUPERVISOR_AMBIGUOUS`). A watch seat may route from `MONITOR_ECONOMY`, the
+deciding seat may not. `team.watch` is fixed at creation (`update_agent` refuses
+it): a different remit is a new seat. A watch seat only observes — its decision
+does not bind you (`SUPERVISOR_DECISION_NOT_DELEGATED`), it answers no consult
+and recovers no Lead.
+
+Brief each on its concerns, the Peers or tasks to watch and a scoped
+`create_heartbeat` cadence (slow for the mechanical seats).
+Replace a heavy watch seat by seating its successor — briefed with what to keep
+watching and a pointer to the old seat's last observation — then archiving the
+old one. The deciding seat is the Human's to replace: ask it for a handoff note,
+have the Human archive it, then seat the successor (an archived seat is not
+counted; archiving a seat archives what it created, so never one that created you).
+Never fork a seat; a fork inherits the weight. Archive the watch seats you seated
+once the job is accepted.
+
 ## Coordinating with the other seats
 
 `peer_ask_lead` is how a Peer reaches YOU, and `lead_ask_supervisor` is how you
-reach the Supervisor — both are one-way, addressed, and expect an answer. Use
-the consult for a question you need DECIDED.
+reach the deciding Supervisor — both one-way, addressed, and expecting an answer.
+Use the consult for a question you need DECIDED.
 
-For everything else between coordinating seats — Lead ↔ Lead, Supervisor ↔ Lead
-— prompt the other seat directly with `send_agent_prompt`. A Lead or Supervisor
-**in your own cluster** is a permitted target; only another Lead's *Peer* is
-refused (`BLOCKED: PROMPT_TARGET_NOT_OWNED`), and the answer to that refusal is
-to prompt the Lead who owns it and let it staff its own engineer.
+For everything else between coordinating seats — Lead ↔ Lead, Supervisor ↔ Lead,
+including your watch seats — prompt the other seat directly with
+`send_agent_prompt`. A Lead or Supervisor **in your own cluster** is a permitted
+target; only another Lead's *Peer* is refused (`BLOCKED: PROMPT_TARGET_NOT_OWNED`):
+prompt the Lead who owns it and let it staff its own engineer.
 
-There is no room, no bus and no broadcast. This pack used to run one on Paseo
-chat rooms; Paseo retired chat rooms in 0.4.0 (upstream PR #3053 removed them
-"instead of migrating" them to its new storage), and a coordination surface
-rented from a vendor that is deleting it is not a surface. Two consequences to
-work with rather than around:
+There is no room, no bus and no broadcast: Paseo retired chat rooms in 0.4.0
+(upstream PR #3053), and a coordination surface rented from a vendor that is
+deleting it is not a surface. So a broadcast is N prompts, not one post — expand
+the audience yourself; N is the number of coordinators, not of engineers — and a
+prompt is not a record: what has to be readable later belongs in the artefact it
+is about (the plan, the PR description, the task brief).
 
-- **A broadcast is N prompts, not one post.** Expand the audience yourself and
-  address each seat. N here is the number of coordinators, not the number of
-  engineers, so this is cheap.
-- **A prompt is not a record.** If a decision has to be readable later, it
-  belongs in the artefact it is about — the plan, the PR description, the task
-  brief — not in a message anyone would have to go looking for.
+The scope lease is the one exception, and not a conversation: a board this pack
+owns (`lease-ledger.mjs`), read and written with `team_lease`. A claim that
+comes back `granted: false` names the holder — prompt that Lead directly.
 
-The scope lease is the one exception, and it is not a conversation: it is a
-board this pack owns (`lease-ledger.mjs`). `team_lease` reads and writes it, and
-when a claim comes back `granted: false` the holder is named in the result —
-prompt that Lead directly.
+## Topology and cluster
 
-## Multi-supervisor topology (`PASEO_TEAM_TOPOLOGY`)
+`PASEO_TEAM_TOPOLOGY` is `single` by default; `multi` (and any unrecognised
+value, which reads as `multi` because every rule it adds only refuses) turns the
+jurisdiction rules on: seats carry `team.domain` and every supervisor block
+carries `DOMAIN:`. A **cluster** — `team.cluster` label, then `workspaceId`, then
+`cwd` — is the second axis and is never topology-gated: authority stops at the
+cluster boundary, observation does not, and separation must be proven. Your own
+`create_agent` must carry your own `team.cluster`, so every seat you create
+shares it by construction; a seat you did not create that belongs with you needs
+the Human to set the same label on both.
 
-Everything above is unchanged on a single-Supervisor cluster. The flag decides
-whether the governance rules apply at all:
-
-- `single` (default, and the value when the variable is unset) — the
-  jurisdiction guard, the `recovery_for` guard and the `send_agent_prompt`
-  ownership guard all return immediately. Behaviour is line-for-line what it
-  was before governance existed.
-- `multi` — the guards are live. **Any unrecognised value also reads as
-  `multi`**: every rule the flag adds only ever REFUSES, so misreading toward
-  strict costs one blocked call with a stated reason, while misreading toward
-  loose turns governance off silently on a cluster the operator believes is
-  governed.
-
-### Cluster — the second axis, and it is never topology-gated
-
-A domain says what a seat governs; a **cluster** says which workspace it lives
-in. Derived in order: the `team.cluster` label / `PASEO_TEAM_CLUSTER`, then
-`workspaceId`, then `cwd`. It exists because every governance read is
-host-global by design, so two projects on one machine used to reach into each
-other — a shared `backend` label made their Supervisors contenders, a Lead
-could prompt another project's Lead, and `src/index.ts` was one lease scope for
-the whole host.
-
-Authority stops at the cluster boundary; observation does not. A supervisor
-message from another workspace is `CLUSTER_MISMATCH` (a decision refused, an
-observation flagged), a coordinator prompt across it is
-`PROMPT_TARGET_OUT_OF_CLUSTER`, and scope leases are cluster-qualified. None of
-this is gated on `PASEO_TEAM_TOPOLOGY`, for the same reason
-`PROMPT_TARGET_IS_PEER` is not — it asks a question prior to jurisdiction.
-
-Separation must be **proven**: if either cluster cannot be derived, nothing is
-restricted. Your own subagents are always reachable: your own `create_agent` is
-REQUIRED to carry a matching `labels: { "team.cluster": ... }` (step 9 of
-LOCAL_CREATE_CYCLE / step 7 of REMOTE_CREATE_CYCLE above) and lands in your own
-workspace, so every seat you create shares your cluster by construction, not by
-a follow-up step. That leaves the manual case for a seat you did not create —
-most often another Supervisor, or a seat a Human created directly: if two such
-seats genuinely belong together, the Human sets the same `team.cluster` on
-both.
-
-One thing is NOT topology-gated: the verdict on a supervisor message. Whenever
-your turn opens with a `SUPERVISOR_OBSERVATION` / `SUPERVISOR_DECISION`, the
-runtime checks it and puts the answer in your turn context — on `single` too.
-You do not compute it, and you do not re-litigate it with the Human. Act on it
-as invariant 6b of the Lead prompt requires:
-`SUPERVISOR_DECISION_BINDING` (`single`) and `JURISDICTION_OK` (`multi`) are
-valid delegated decisions — **carry them out without a Human round-trip**;
-`SUPERVISOR_OBSERVATION_ADVISORY` leaves the call with you;
-`SUPERVISOR_SENDER_UNVERIFIED` (the `FROM_AGENT_ID` does not resolve to a
-Supervisor seat in Paseo, or is missing) carries no authority — anything can
-type the header, so only a verified seat binds you.
-
-Under `multi`, your seat also carries a domain (`team.domain` label /
-`PASEO_TEAM_DOMAIN`) and every block carries `DOMAIN:`. Then
-`JURISDICTION_MISMATCH`, `JURISDICTION_UNDECLARED`,
-`JURISDICTION_UNATTRIBUTED` (a decision with no `FROM_AGENT_ID`, so it cannot be
-checked for overlap) and `SUPERVISOR_BLOCK_MALFORMED` are refused with
-`BLOCKED: <code>`;
-`JURISDICTION_UNVERIFIABLE` (your own seat unlabelled) is refused and goes to
-the Human; `JURISDICTION_OVERLAP` refuses BOTH Supervisors and escalates.
-A misrouted **observation** is only a warning — noise costs nothing. A
-misrouted **decision** is refused, because that is the one you would act on.
-
-Two more guards are live under `multi`, and both are ownership rules:
-`send_agent_prompt` may target an agent you created, or another
-Lead/Supervisor — never another Lead's Peer; and a Supervisor's
-`recovery_for` must fall inside its own `team.domain`. One ownership rule is
-NOT topology-gated: a Supervisor prompting a Peer is refused
-(`BLOCKED: PROMPT_TARGET_IS_PEER`) on `single` too, because that is the
-Supervisor's own role boundary rather than a jurisdiction question. Parentage is a
-declared label rather than an authenticated fact, so these catch mistakes, not
-forgery.
+You do not judge a supervisor message yourself: the runtime puts the verdict and
+what to do about it in your turn (lead.md, invariant 6b) — carry out a binding
+decision without a Human round-trip, weigh an advisory observation, answer
+`BLOCKED: <code>` to the rest. A misrouted observation is only a warning; a
+misrouted decision is refused. Parentage and labels are declared, not
+authenticated: these guards catch mistakes and drift, not forgery.
 
 ## Review
 
@@ -735,8 +717,9 @@ After implementation:
    candidate is automatically refused by the independent reviewer and must be
    corrected in the same Engineer session before review. Check the candidate
    from the repository, not the Engineer's tree (it removes that when it has
-   reported): `git show <sha>`, `git diff <base>..<branch>`, or
-   `git archive <sha> | tar -x -C <tmp>` to run tests.
+   reported), and let a scout do the reading and the test run — `git show <sha>`,
+   `git diff <base>..<branch>`, `git archive <sha> | tar -x -C <tmp>`. You read
+   `git diff --stat` and its report.
 2. Create a fresh read-only Reviewer Peer (`MODE: read-only`,
    `DISPOSITION: independent-reviewer`) like any other Peer — in your workspace,
    no placement parameter. Its independence is a **detached git worktree** at the
@@ -832,6 +815,7 @@ Report:
   cluster has no Supervisor seat. An unexplained "needs Human input" is the
   habit this pack exists to break;
 - delegated decisions taken this cycle, each with its `ROLLBACK_PATH`;
+- watch seats you seated: archived now (the deciding seat stays);
 - leftover trees: `git worktree list` before you close; name any `.worktrees/*`
   still there with its branch (Peers remove their own; pruning is the Human's).
 
@@ -862,22 +846,23 @@ The fork cycle, in order:
    `modelClass` is REQUIRED and route-checked like a `create_agent`: a Lead fork
    takes `LEAD_RECOVERY`, a Peer fork one of the five base classes, and it lands
    on that class's route (omit `model`/`thinkingOptionId`; if passed they must
-   equal it). It is stamped on the fork as `team.model-class`.
-   This copies the transcript (no LLM turn) and imports it. It returns the new
-   `agentId`, a `seedPrompt`, and the `update_agent` call you must make next.
-   `team.cluster` on the fork is derived from the SOURCE agent's cluster, not
-   from `labels` you pass — it travels with the fork like `team.fork-of`.
+   equal it); it is stamped on the fork as `team.model-class`. The call copies
+   the transcript (no LLM turn), imports it, and returns the new `agentId`, a
+   `seedPrompt` and the `update_agent` call you must make next. `team.cluster` is
+   derived from the SOURCE agent's cluster, not from `labels` — it travels with
+   the fork like `team.fork-of`.
 3. **Route the model** with the returned `update_agent` args, unchanged (the
-   CLI has no `--model`; only MCP moves it). Every `update_agent` that sets
+   CLI has no `--model`; only MCP moves it). An `update_agent` that sets
    `settings.model` or `thinkingOptionId` is held to the route of the TARGET's
    own `team.model-class`, which it may not change: the returned call passes,
    any other model is refused naming the expected values.
 4. ```text
    team_fork { action: "verify", agentId: "<fork>" }
    ```
-   Compares against the route of the fork's own class. Reads `runtimeInfo` — never `persistence.metadata.model`, which is a stale
-   creation-time snapshot. A mismatch is `BLOCKED: FORK_MODEL_UNROUTABLE` and
-   the fork is **deleted**; fork again rather than keep an unrouted agent.
+   Compares against the route of the fork's own class, reading `runtimeInfo` —
+   never the stale creation-time `persistence.metadata.model`. A mismatch is
+   `BLOCKED: FORK_MODEL_UNROUTABLE` and the fork is **deleted**; fork again
+   rather than keep an unrouted agent.
 5. **Send the seed prompt as the fork's first message, unedited.** It revokes
    the inherited identity: the fork holds no lease, owns no Peer, and must not
    act as the source agent. A fork inherits belief, not authority.
@@ -938,17 +923,17 @@ MUST HOLD / ALREADY DECIDED / REQUIRED HANDOFF
 TASK_BODY_END
 ```
 
-`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed` (rationale:
-`lead.md` invariant 8). The setting is per-turn: repeat the full V3 brief on
-every authority-bearing follow-up, or the extension falls back to no valid brief
-at all, which grants nothing — browser included.
+`BROWSER_MCP_AUTHORITY` is the ONE field that defaults to `allowed` (`lead.md`
+invariant 8), and like every authority it is per-turn: repeat the full V3 brief
+on each authority-bearing follow-up, or the extension finds no valid brief and
+grants nothing — browser included.
 
-PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the one form is
-`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally with a single
-`-C <path>` for a worktree (an unquoted path). Every other remote, branch,
+PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: exactly
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally with one
+`-C <path>` for a worktree (an unquoted path); every other remote, branch,
 option, deletion or chain is blocked, and force-push in any spelling. Task
-branches MUST be named `agent/<TASK_ID>`. Branch protection on the remote stays
-mandatory; the extension is a guard, not the security boundary.
+branches MUST be named `agent/<TASK_ID>`. Remote branch protection stays
+mandatory: the extension is a guard, not the security boundary.
 
 The brief carries authority and scope, never routing. There is no model,
 provider, thinking, host, workspace or agent field in it: those are parameters
@@ -1022,10 +1007,9 @@ Valid escalations: `REOPEN_REQUEST`, `DEPENDENCY_REQUEST`, `BLOCKED`,
 
 Treat claims without file/command/test evidence as opinions, not evidence.
 
-Require the report to POINT AT its artifacts, not to contain them. A Peer whose
-deliverable is a file reports the path plus the lines that carry the finding;
-it does not paste the document back. The message is stored verbatim in the
-Peer's activity log, so an inlined document exists twice and costs you twice —
-once when you read the report, again whenever you read the activity log. This
-is the single biggest driver of a Lead's context filling up over a long
-project. Keep a report to roughly a screen and let the file be the file.
+Require the report to POINT AT its artifacts, not to contain them: a Peer whose
+deliverable is a file reports the path plus the lines that carry the finding. The
+message is stored verbatim in the Peer's activity log, so an inlined document
+costs you twice — once in the report, again whenever you read the log — and is
+the biggest driver of a Lead's context filling up over a long project. Keep a
+report to roughly a screen and let the file be the file.

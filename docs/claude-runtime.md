@@ -121,7 +121,8 @@ matters, so the hook splits it:
 
 - **every** Lead turn carries a short standing-authority block (routing,
   delegation, correction and acceptance are the Lead's calls; only irreversible
-  steps go to the Human);
+  steps go to the Human; and a Lead's context is for decisions, not data — reading
+  and running go to a read-only Peer, `lead.md` invariant 9);
 - a turn that **opens with a supervisor message** re-injects the full role
   prompt, because that is the turn where the contract decides the answer.
 
@@ -145,6 +146,21 @@ adapters run it through `policy-core.ts` and put one shared notice in the turn:
    BLOCKED: <code>` on the refusing one.
 
 The notice is context, not a deny: nothing here blocks a tool.
+
+A Supervisor is also told what **it** watches. A seat labelled `team.watch` (see
+README, "Several Supervisors on a long job") gets a short block from
+`watchSeatNotice` wherever the role prompt is injected — session start, and the
+first prompt in case SessionStart did not run — saying what it carries and, for a
+seat without `decisions`, that its `SUPERVISOR_DECISION` does not bind the Lead, a
+consult is not its to answer and recovering a Lead is not its act. The seat reads its
+own label off its own Paseo state (`selfWatch`); there is deliberately no env var,
+because a Lead's `create_agent` cannot set one. The same read gates the one action a
+watch seat could take that nothing could refuse afterwards, and it has two doors: a
+Supervisor's lead-recovery `create_agent` is `RECOVERY_NOT_DELEGATED` (resolved by the
+hook only for that call), and so is its `team_fork` — refused inside
+`scripts/team-fork.mjs`, which both runtimes run. That script also refuses to fork INTO
+a Supervisor (`FORK_ROLE_MUST_BE_INDEPENDENT`): a Supervisor is seated by `create_agent`,
+where `team.watch`, the seat count and the route class are checked.
 
 ## What Claude roles may do
 

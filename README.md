@@ -79,7 +79,8 @@ paseo-team-orchestration/
 │   ├── reviewer-task.md            # independent reviewer brief (read-only)
 │   ├── architect-task.md           # solution-architect brief (read-only)
 │   ├── scout-task.md               # repository-scout brief (read-only)
-│   └── supervisor-observation.md   # observation template
+│   ├── supervisor-observation.md   # observation template
+│   └── supervisor-watch.md         # a long job's Supervisors: the deciding seat + watch seats
 ├── cli/
 │   ├── paseo-team.mjs              # the CLI: every config read/write and every daemon query
 │   └── lib/
@@ -111,6 +112,7 @@ paseo-team-orchestration/
 │   └── preflight.mjs               # host readiness check (--json, --strict, --host-id)
 ├── test/                           # `npm test` runs every test/*.test.{mjs,mts}
 │   ├── policy.test.mts             # policy + lifecycle regression
+│   ├── watch.test.mts              # team.watch: one deciding seat, watch seats, both adapters
 │   ├── model-routing.test.mjs      # resolver regression
 │   ├── remote-paseo.test.mjs       # remote executor regression (+ fixtures/fake-paseo.mjs)
 │   ├── lib-common.test.mjs         # shared helpers (quoted paths, PATH order, shim fallback)
@@ -160,7 +162,9 @@ work, skip the design round, and one review is enough. For **design-sensitive**
 work where one person's judgment is the product (game feel, UI polish), a
 single agent from start to finish may beat any split. Sizing the Peers is the
 Lead's call and is yours to override; the Supervisor seat and the Human-only
-merge/deploy rule are not part of that sizing.
+merge/deploy rule are not part of that sizing. Watch seats are sized the same way:
+a short job needs only the Supervisor that decides, a long one adds seats that each
+watch one kind of thing.
 
 Adding a role, a message layer or a review step is not the same as improving the
 orchestration; removing one that changes no decision usually is. When you
@@ -184,14 +188,23 @@ receives those consults and never sends one.
 Refine the real allowlist after running `/team-tools` — actual Paseo tool names
 can differ from the defaults.
 
+Each seat's **context** is spent on what only that seat can do. The Lead holds
+decisions, not data: reading code, docs, logs, diffs or test output, and running
+anything, is a Peer's work, and what comes back is a short report that points at
+files (`lead.md` invariant 9; skill "Delegating reading and doing"). Watching a
+long job is the Supervisors' work, split by kind so no single Supervisor context
+carries it all ([several Supervisors on a long job](#several-supervisors-on-a-long-job--teamwatch)).
+
 Per-role exceptions:
 
 - **Supervisor** is observation-only. No `write`/`edit` ever. `create_agent` is
-  available for Lead recovery alone, behind an argument guard.
+  available for Lead recovery alone, behind an argument guard — and only to the
+  seat that holds `decisions`.
 - **Lead** gets `write`/`edit` only when `PASEO_TEAM_LEAD_WRITE=1`. Its
-  `create_agent` may also seat a **Supervisor** for its own cluster, behind its
-  own argument guard (explicit model, `labels.purpose: governance`, and under
-  `multi` a domain no wider than the Lead's own).
+  `create_agent` may also seat **Supervisors** for its own cluster, behind its
+  own argument guard (explicit model, `labels.purpose: governance`, one seat that
+  decides and watch seats beside it, and under `multi` a domain no wider than the
+  Lead's own).
 - **Peer** gets no Paseo MCP or orchestration tools at all. Browser MCP is
   granted only by the current V3 brief.
 
@@ -313,9 +326,10 @@ Supervisor decides to look. A Lead holding a question of its own had exactly one
 addressable party — the Human — so it asked, constantly, including about matters
 its own contract had already delegated to it.
 
-`lead_ask_supervisor` closes that. It resolves the Supervisor seat of the Lead's
-own **cluster** from Paseo's agent state (narrowed by `team.domain` under
-`multi`), and delivers a `LEAD_CONSULT_V1` **prompt**, because
+`lead_ask_supervisor` closes that. It resolves the **deciding** Supervisor seat of
+the Lead's own **cluster** from Paseo's agent state (narrowed by `team.domain`
+under `multi`; watch seats, which only observe, are never candidates), and
+delivers a `LEAD_CONSULT_V1` **prompt**, because
 a prompt wakes an idle Supervisor and opens a turn, which is what makes the
 receiving runtime inject its verdict.
 
@@ -346,9 +360,10 @@ straight back into asking the Human:
 
 | Code | Meaning |
 |---|---|
-| `NO_SUPERVISOR_SEAT` | this cluster has no governance seat — the one case where asking the Human is correct. The message carries the `create_agent` call that fixes it |
-| `SUPERVISOR_AMBIGUOUS` | two seats claim this Lead; picking one would ratify an overlap the Lead's own runtime refuses as `JURISDICTION_OVERLAP` |
-| `SUPERVISOR_LOOKUP_FAILED` | agent state unreadable — "could not look" is never reported as "there is nobody" |
+| `NO_SUPERVISOR_SEAT` | this cluster has no seat that decides — the one case where asking the Human is correct (watch seats alone do not count). The message carries the `create_agent` call that fixes it |
+| `SUPERVISOR_AMBIGUOUS` | two seats that DECIDE claim this Lead; picking one would ratify an overlap the Lead's own runtime refuses as `JURISDICTION_OVERLAP` |
+| `SUPERVISOR_NOT_ELIGIBLE` | the `supervisorAgentId` the Lead named does not govern it: another cluster's seat, or a watch seat (the message points at the seat that decides) |
+| `SUPERVISOR_LOOKUP_FAILED` | no seat was found AND the agent state could not be read in full (a torn record may be the seat being asked about). "Could not look" is never reported as "there is nobody"; a seat that was found is used as ever |
 | `CONSULT_FIELD_COLLISION` | a body line like `SCOPE:` would be read back as a field |
 
 A Lead may also **seat the Supervisor that governs it** when the cluster has
@@ -356,11 +371,14 @@ none. The guard requires an explicitly routed provider (never a bare
 `pi-supervisor`), `labels.purpose: governance`, a `team.cluster` matching the
 Lead's own, `settings.thinkingOptionId`, and under `multi` a `team.domain` equal
 to or inside the Lead's — a Supervisor wider than its creator would be authority
-manufactured out of nothing.
+manufactured out of nothing. For a long job it seats more than one — the next
+section.
 
 ### Lead/Supervisor check for hung agents
 
-`team_watchdog` inspects `running` agents via `paseo ls -g` + `paseo inspect`:
+`team_watchdog` inspects `running` agents via `paseo ls -g` + `paseo inspect`. On
+a long job a `liveness` watch seat (see below) runs it on a heartbeat, so the Lead
+does not spend its own context polling:
 
 | Bound | Default |
 |---|---|
@@ -452,6 +470,71 @@ ahead of a storage change — so the bus went with them. Two consequences: a
 broadcast is N prompts rather than one post (N is the number of coordinators,
 not of engineers), and a prompt is not a record, so anything that must be
 readable later belongs in the plan, the PR or the task brief.
+
+### Several Supervisors on a long job — `team.watch`
+
+One Supervisor carrying every concern — consults, liveness rounds, process and
+review checks, cost — fills its context on a long job the way a Lead's fills when
+the Lead does the reading itself. A cluster used to hold exactly one, because a
+second made `lead_ask_supervisor` ambiguous and, under `multi`, made the Lead
+refuse both. `team.watch` is the third label, beside `team.domain` (what a seat
+governs) and `team.cluster` (where it lives): it says **what a Supervisor watches**,
+so each seat's context holds one kind of thing and a heavy one is replaced without
+losing the rest.
+
+```jsonc
+create_agent({ provider: "pi-supervisor/<pi-provider>/<model-id>", /* … */
+               labels: { "purpose": "governance", "team.cluster": "<yours>",
+                         "team.model-class": "MONITOR_ECONOMY",
+                         "team.watch": "liveness,cost" } })
+```
+
+| `team.watch` | Carries | Fits |
+|---|---|---|
+| `decisions` | the Lead's consults, delegated decisions, Lead recovery | `SUPERVISOR_GOVERNANCE`; **one seat** |
+| `liveness` | stale, unknown or parked seats, host health | `MONITOR_ECONOMY` |
+| `process` | the Lead against the protocol and its own doctrine: brainstorming kept open, phases a dependency requires, one writer per scope, the Lead not doing a Peer's reading or running | `SUPERVISOR_GOVERNANCE` |
+| `evidence` | acceptance and review: exact SHA, independent reviewer, claims backed by a file or command, observed route = requested route | `SUPERVISOR_GOVERNANCE` |
+| `cost` | spend and context: costliest seats, reports that inline a document, the Lead's context filling | `MONITOR_ECONOMY` |
+
+The label is a comma-separated list from that closed catalog. Two different things
+live in it, and the rules keep them apart:
+
+- **Attention** (`liveness`, `process`, `evidence`, `cost`) may overlap freely: an
+  observation is advice the Lead weighs, never something it acts on.
+- **Authority** (`decisions`) is held by exactly one seat per jurisdiction, because
+  it is what the overlap rules exist to keep unique. A seat without it cannot use
+  it. No `team.watch` at all is the seat the pack has always had — it watches
+  everything and decides. A cluster that never uses the label keeps what it had: the
+  seating rules below take hold once a seat carries one (a label-free seat in a
+  cluster where no Supervisor carries one is allowed exactly as before), and an
+  archived Supervisor — Paseo archives by soft delete and leaves the record — is no
+  longer counted as a seat.
+
+What the policy enforces, on both runtimes:
+
+| Where | Rule |
+|---|---|
+| a Lead seating a Supervisor | the first seat decides; after it every seat is a watch seat. A second deciding seat is refused (it would make every consult `SUPERVISOR_AMBIGUOUS`) — replacing the deciding seat is the Human's call (it archives the old one, then the Lead seats the successor — never archive a seat that created you: Paseo cascades an archive to what it created); an unreadable seat list, even one torn record, refuses (`SUPERVISOR_LOOKUP_FAILED`, naming what could not be read); a label outside the catalog, or a key that is not exactly `team.watch`, is refused by name |
+| route class | a watch seat may route from `MONITOR_ECONOMY`, the class that already meant "supervisor heartbeat, structured observation"; the seat that decides keeps `SUPERVISOR_GOVERNANCE` |
+| `update_agent` | refuses `team.watch` (`WATCH_IMMUTABLE`): what a seat watches is fixed at creation, so a different remit is a new seat. A Lead's `mcp_script` cannot call `update_agent` at all: a script hides the arguments this rule reads |
+| the Lead reading a decision | from a verified watch seat it is `SUPERVISOR_DECISION_NOT_DELEGATED` — refused, weighed as an observation. Read off the sender's own Paseo state, not off its message |
+| overlap under `multi` | only seats that decide can overlap; observers sharing a deciding seat's domain are the intended shape |
+| the consult | `lead_ask_supervisor` never picks a watch seat; one that arrives anyway is `LEAD_CONSULT_NOT_DECIDING` |
+| Lead recovery | a watch seat's `create_agent` **and its `team_fork`** are `RECOVERY_NOT_DELEGATED` — the one *action* the Lead's verdict cannot refuse afterwards. A Supervisor is never seated by a fork (`FORK_ROLE_MUST_BE_INDEPENDENT`) |
+
+Each Supervisor is also told, every turn on pi and at session start on Claude, what
+its own label says and what it may not do. `pteam graph` shows each seat's watch,
+and warns on the quiet failure this shape can have — watch seats and nobody
+deciding, where every consult goes to the Human.
+
+**Clearing a seat's context.** A watch seat holds nothing the Lead's briefing
+cannot carry, so a heavy one is **replaced, not compacted**: the Lead seats its
+successor (briefed with what to keep watching and a pointer to the old seat's last
+observation), then archives the old one. Never a fork — it inherits the weight.
+The Lead archives the watch seats it seated when the job is accepted. The label is
+declared, not authenticated, exactly like parentage and domain: it catches mistakes
+and drift, not a seat that forges its own.
 
 ### Multi-supervisor governance — `PASEO_TEAM_TOPOLOGY`
 

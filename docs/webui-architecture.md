@@ -315,6 +315,14 @@ chiếu với `roleProfiles` mà `paseo-team status` đã trả về.
   theo `team.domain`, băng cảnh báo chồng lấn jurisdiction, cạnh `fork` cho
   phiên bàn giao. Chi tiết:
   `docs/multi-supervisor-topology.md` §4.
+- **Supervisor theo loại việc (PR-I)** — *xong*: node mang `watch` (nhãn
+  `team.watch` như đã ghi), `graph.jurisdiction.supervisors[]` thêm `watch` (danh
+  sách concern) và `decides`, conflicts chỉ tính các ghế quyết định, và cờ
+  `graph.jurisdiction.undecided` bật khi có ghế quan sát mà **trong cluster của nó**
+  không ghế nào giữ `decisions` (`undecidedAgents` nêu những ghế đó) — lỗi im lặng duy
+  nhất của hình dạng này (mọi consult dồn về Human). Node mang thêm `watchUnreadable`
+  (phần nhãn không đọc được: ghế đó không quyết định gì dù phần còn lại đọc được).
+  Bảng agent hiện tag "giám sát: …" ở chế độ nâng cao, kèm cảnh báo khi nhãn hỏng.
 
 Trạng thái hiện tại của đồ thị: node + cạnh **spawn** + badge permit là dữ liệu
 thật; cạnh **message** không còn nguồn nào (chat room đã bị Paseo gỡ), và cạnh

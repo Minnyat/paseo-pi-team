@@ -855,4 +855,102 @@ test("route gate: verify compares against the route of the fork's own class, not
 	});
 });
 
+// ---------------------------------------------------------------------------
+// The second door to the Supervisor's authority. team_fork is how a successor
+// Lead can be put in place without create_agent, so the rule that a watch seat
+// observes — and the rule that a Supervisor is only ever seated by create_agent,
+// where its label and its count are checked — have to hold here too.
+// ---------------------------------------------------------------------------
+
+const WATCHER = "cccccccc-3333-4333-8333-333333333333";
+const DECIDING = "dddddddd-4444-4444-8444-444444444444";
+const GENERALIST = "eeeeeeee-5555-4555-8555-555555555555";
+
+test("a watch seat may not fork a successor Lead; a seat that decides, or has no label, may", async () => {
+	await withState(async ({ agentsRoot, home, write }) => {
+		write(WATCHER, { provider: "pi-supervisor/anthropic/model", labels: { "team.watch": "liveness,cost" } });
+		write(DECIDING, { provider: "pi-supervisor/anthropic/model", labels: { "team.watch": "decisions,process" } });
+		write(GENERALIST, { provider: "pi-supervisor/anthropic/model", labels: {} });
+		const calls = [];
+		const as = (id) => ({
+			role: "supervisor",
+			agentsRoot,
+			// The route gate is off for this file's mechanics; the watch rule is not
+			// something it can switch off, which is the point of this test.
+			env: { PASEO_AGENT_ID: id, PASEO_HOME: home, PASEO_TEAM_ROUTE_ENFORCE: "off" },
+			runPaseo: async (args) => {
+				calls.push(args);
+				return { id: FORKED };
+			},
+		});
+		const recovery = {
+			agentId: SOURCE,
+			reason: "takeover",
+			disposition: "lead",
+			scope: "src/auth",
+			provider: "pi-lead/anthropic/claude-opus-5",
+		};
+
+		await assert.rejects(forkAgent(recovery, as(WATCHER)), (error) => {
+			assert.equal(error.code, "RECOVERY_NOT_DELEGATED");
+			assert.match(error.message, /watch seat \(team\.watch: liveness, cost\)/);
+			return true;
+		});
+		assert.deepEqual(calls, [], "nothing was imported");
+		// verify is the other half of the same act (and deletes a fork that is off route).
+		await assert.rejects(verifyFork({ agentId: FORKED }, as(WATCHER)), /RECOVERY_NOT_DELEGATED/);
+		assert.deepEqual(calls, []);
+
+		for (const id of [DECIDING, GENERALIST]) {
+			const result = await forkAgent(recovery, as(id));
+			assert.equal(result.agentId, FORKED, `${id} may fork a successor Lead`);
+		}
+		assert.equal(calls.length, 2, "one import each");
+
+		// A Lead forking is not a recovery and never asks.
+		const lead = await forkAgent(recovery, { ...as(WATCHER), role: "lead" });
+		assert.equal(lead.agentId, FORKED);
+	});
+});
+
+test("a Supervisor seat is never the product of a fork, whatever the disposition says", async () => {
+	await withState(async ({ agentsRoot }) => {
+		for (const provider of [
+			"pi-supervisor/anthropic/claude-opus-5",
+			"claude-supervisor/claude-opus-5",
+			"claude-supervisor-audit/claude-opus-5",
+			"pi-supervisor",
+		]) {
+			const calls = [];
+			await assert.rejects(
+				forkAgent(
+					{
+						agentId: SOURCE,
+						reason: "change-model",
+						// Not one of the words the disposition scan knows: it is free text.
+						disposition: "governance seat",
+						provider,
+						labels: { "team.watch": "decisions" },
+					},
+					{
+						role: "lead",
+						agentsRoot,
+						runPaseo: async (args) => {
+							calls.push(args);
+							return { id: FORKED };
+						},
+					},
+				),
+				(error) => {
+					assert.equal(error.code, "FORK_ROLE_MUST_BE_INDEPENDENT", provider);
+					assert.match(error.message, /create_agent/);
+					return true;
+				},
+				provider,
+			);
+			assert.deepEqual(calls, [], `no import for ${provider}`);
+		}
+	});
+});
+
 console.log("team-fork tests passed");

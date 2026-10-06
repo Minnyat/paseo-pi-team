@@ -91,14 +91,18 @@ import {
 	parseSupervisorBlock,
 	peerMessageTurnNotice,
 	resolveLeases,
+	seatsSupervisor,
 	selfCluster,
+	selfWatch,
 	selfWorkspaceId,
 	sendAgentPromptTargetId,
 	supervisorAttribution,
 	supervisorSeats,
+	lookupSupervisorSeatsForSeating,
 	supervisorTurnNotice,
 	supervisorTurnVerdict,
 	teamTopology,
+	watchSeatNotice,
 	routeEnforcementNotice,
 	routeTargetFor,
 	updateAgentTouchesRoute,
@@ -262,6 +266,16 @@ function governanceContext(input: unknown, role: TeamRole): GovernanceContext {
 		matchesPaseoToolName(classified.target ?? "", ["create_agent"])
 	) {
 		context.selfWorkspaceId = selfWorkspaceId();
+		// The cluster's seats are what a Lead seating a Supervisor is judged
+		// against (one that decides, then watch seats), and nothing else needs
+		// them — so they are read for that call alone. A Supervisor's own
+		// recovery create_agent is held to its own watch instead.
+		if (role === "lead" && seatsSupervisor(extractCreateAgentArgs(input))) {
+			const lookup = lookupSupervisorSeatsForSeating(process.env, { cluster: context.cluster });
+			context.seats = lookup.seats;
+			context.seatsFault = lookup.fault;
+		}
+		if (role === "supervisor") context.selfWatch = selfWatch();
 	}
 	// The seat an update_agent re-routes, for the update route gate — read only
 	// when the update touches model, thinking or the class label.
@@ -348,6 +362,7 @@ function leadConsultNotice(prompt: string): string | null {
 		attribution,
 		supervisorDomain: process.env.PASEO_TEAM_DOMAIN?.trim() || null,
 		supervisorCluster: selfCluster(),
+		supervisorWatch: selfWatch(),
 		topology: teamTopology(),
 	});
 	return leadConsultTurnNotice({ block, verdict, attribution });
@@ -642,12 +657,16 @@ export default function (pi: ExtensionAPI) {
 				: r === "supervisor"
 					? leadConsultNotice(event.prompt)
 					: null;
+		// What this Supervisor watches, from its own state — every turn, like the
+		// role prompt, because pi rebuilds the system prompt each time.
+		const watchNotice = r === "supervisor" ? watchSeatNotice(r, selfWatch()) : null;
 		// Every turn while the opt-out is set — see routeEnforcementNotice.
 		const routeNotice = routeEnforcementNotice(r);
-		if (!rolePrompt && !notice && !routeNotice) return;
+		if (!rolePrompt && !notice && !routeNotice && !watchNotice) return;
 		const sections = [
 			event.systemPrompt,
 			rolePrompt ? `## Paseo Team Role\n${rolePrompt}` : "",
+			watchNotice ?? "",
 			notice ?? "",
 			routeNotice ?? "",
 		].filter(Boolean);
