@@ -515,7 +515,7 @@ What the policy enforces, on both runtimes:
 
 | Where | Rule |
 |---|---|
-| a Lead seating a Supervisor | the first seat decides; after it every seat is a watch seat. A second deciding seat is refused (it would make every consult `SUPERVISOR_AMBIGUOUS`) — to replace the deciding seat, archive it, then seat the successor; an unreadable seat list, even one torn record, refuses (`SUPERVISOR_LOOKUP_FAILED`, naming what could not be read); a label outside the catalog, or a key that is not exactly `team.watch`, is refused by name |
+| a Lead seating a Supervisor | the first seat decides; after it every seat is a watch seat. A second deciding seat is refused (it would make every consult `SUPERVISOR_AMBIGUOUS`) — replacing the deciding seat is the Human's call (it archives the old one, then the Lead seats the successor — never archive a seat that created you: Paseo cascades an archive to what it created); an unreadable seat list, even one torn record, refuses (`SUPERVISOR_LOOKUP_FAILED`, naming what could not be read); a label outside the catalog, or a key that is not exactly `team.watch`, is refused by name |
 | route class | a watch seat may route from `MONITOR_ECONOMY`, the class that already meant "supervisor heartbeat, structured observation"; the seat that decides keeps `SUPERVISOR_GOVERNANCE` |
 | `update_agent` | refuses `team.watch` (`WATCH_IMMUTABLE`): what a seat watches is fixed at creation, so a different remit is a new seat. A Lead's `mcp_script` cannot call `update_agent` at all: a script hides the arguments this rule reads |
 | the Lead reading a decision | from a verified watch seat it is `SUPERVISOR_DECISION_NOT_DELEGATED` — refused, weighed as an observation. Read off the sender's own Paseo state, not off its message |

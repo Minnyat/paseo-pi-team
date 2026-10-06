@@ -3060,8 +3060,11 @@ export function leadAskSupervisorToolDescription(): string {
  *     seat observes and does not name `decisions`. A second deciding seat would
  *     make every consult SUPERVISOR_AMBIGUOUS (and, under `multi`, make the Lead
  *     refuse both). Watch seats cannot manufacture authority, so seating them is
- *     the Lead's own instrument-making. Replacing the DECIDING seat is archive,
- *     then seat: an archived seat is not counted.
+ *     the Lead's own instrument-making. Replacing the DECIDING seat is the
+ *     Human's call — it archives the old one, then the Lead seats the successor:
+ *     an archived seat is not counted. (Paseo's archive cascades to the agents the
+ *     seat created, so it is not a step for the Lead to take on a seat that
+ *     created it.)
  *   - A cluster that has never used `team.watch` is the pack as it was. A seat
  *     with no label in a cluster where no Supervisor carries one is allowed
  *     exactly as it always was (its cost, a consult that comes back
@@ -3168,19 +3171,18 @@ export function leadCreateSupervisorArgsBlockReason(
 	if (seatDecides(watch)) {
 		// Under `multi` a second deciding seat only contends when its jurisdiction
 		// meets the new one's, exactly as supervisorJurisdictionVerdict counts it.
-		const incumbents = context.seats.filter(
-			(seat) =>
-				seatDecides(seat.watch) &&
-				(!multi ||
-					(normalizeDomain(seat.domain) !== null && domainConflicts(seat.domain, declared))),
-		);
+		const meets = (seat: SupervisorSeat): boolean =>
+			!multi || (normalizeDomain(seat.domain) !== null && domainConflicts(seat.domain, declared));
+		const incumbents = context.seats.filter((seat) => seatDecides(seat.watch) && meets(seat));
 		// A cluster that has never used the label is the pack as it was (see above):
-		// allowed. "Never used" covers the new seat and EVERY Supervisor already there,
-		// observers included — a watch seat beside a label-free decider is a cluster that
-		// uses it, and a second label-free seat there is the ambiguity this rule is for.
-		const legacy = watch === null && context.seats.every((seat) => !seat.watch);
+		// allowed. "Never used" covers the new seat and EVERY Supervisor whose
+		// jurisdiction meets its own, observers included — a watch seat beside a
+		// label-free decider is a cluster that uses it, and a second label-free seat
+		// there is the ambiguity this rule is for. A seat in an unrelated domain is
+		// not part of the same question under `multi`.
+		const legacy = watch === null && context.seats.every((seat) => !meets(seat) || !seat.watch);
 		if (incumbents.length > 0 && !legacy) {
-			return `Refusing create_agent: this cluster already has a Supervisor that decides (${incumbents.map(named).join(", ")}). A second one would make every consult SUPERVISOR_AMBIGUOUS${multi ? " and make a Lead refuse BOTH on JURISDICTION_OVERLAP" : ""} — the authority to decide is held by exactly one seat. To ADD a seat, make it a WATCH seat: set labels["${TEAM_WATCH_LABEL}"] to what it observes (${WATCH_CONCERNS.filter((concern) => concern !== WATCH_DECISIONS).join(", ")}) and leave \`${WATCH_DECISIONS}\` out. To REPLACE the deciding seat, archive it first (ask it for a handoff note beforehand), then seat the successor: an archived seat is not counted.`;
+			return `Refusing create_agent: this cluster already has a Supervisor that decides (${incumbents.map(named).join(", ")}). A second one would make every consult SUPERVISOR_AMBIGUOUS${multi ? " and make a Lead refuse BOTH on JURISDICTION_OVERLAP" : ""} — the authority to decide is held by exactly one seat. To ADD a seat, make it a WATCH seat: set labels["${TEAM_WATCH_LABEL}"] to what it observes (${WATCH_CONCERNS.filter((concern) => concern !== WATCH_DECISIONS).join(", ")}) and leave \`${WATCH_DECISIONS}\` out. Replacing the deciding seat is the Human's call: ask it for a handoff note, ask the Human to archive it, then seat the successor — an archived seat is not counted. (Archiving a seat archives the agents it created, so never archive one that created you.)`;
 		}
 		return null;
 	}

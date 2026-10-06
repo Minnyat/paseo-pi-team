@@ -57,8 +57,10 @@ import {
 	parseLeadConsultBlock,
 	parseRoleProvider,
 	parseSupervisorBlock,
+	parseTaskBrief,
 	parseWatch,
 	recoveryNotDelegatedReason,
+	resolvePeerMode,
 	seatDecides,
 	seatsSupervisor,
 	selfWatch,
@@ -69,6 +71,7 @@ import {
 	supervisorSeatsForSeating,
 	supervisorTurnNotice,
 	supervisorTurnVerdict,
+	teamToolBlockReason,
 	updateAgentRouteBlockReason,
 	updateAgentWatchBlockReason,
 	watchIsValid,
@@ -308,7 +311,7 @@ test("an archived Supervisor is not a seat: Paseo archives by soft delete and th
 	assert.deepEqual(supervisorSeatsForSeating(env, { cluster: "shop" })?.map((seat) => seat.agentId).sort(), live);
 });
 
-test("replacing the deciding seat is archive, then seat — and the archived one stops blocking it", () => {
+test("replacing the deciding seat: the Human archives it, then the successor is seated — the archived one stops blocking it", () => {
 	const decider = (extra?: Record<string, unknown>): Seat => ({
 		id: DECIDER,
 		provider: "pi-supervisor/anthropic/model",
@@ -327,7 +330,7 @@ test("replacing the deciding seat is archive, then seat — and the archived one
 	// says how to get there.
 	const refusal = String(leadCreateSupervisorArgsBlockReason(successor, { seats: seatsOf([decider(), watcher]) }));
 	assert.match(refusal, /already has a Supervisor that decides/);
-	assert.match(refusal, /To REPLACE the deciding seat, archive it first/);
+	assert.match(refusal, /ask the Human to archive it, then seat the successor/);
 	// After: the record is still on disk, flagged, and it no longer counts.
 	assert.equal(
 		leadCreateSupervisorArgsBlockReason(successor, { seats: seatsOf([decider({ archivedAt: ARCHIVED_AT }), watcher]) }),
@@ -421,8 +424,11 @@ test("after that a Lead seats watch seats, and only watch seats", () => {
 		assert.ok(reason.includes(DECIDER), "it names the incumbent");
 		assert.match(reason, /SUPERVISOR_AMBIGUOUS/);
 		assert.match(reason, /To ADD a seat, make it a WATCH seat/);
-		// The way out is stated, not left to the Human: archive, then seat.
-		assert.match(reason, /To REPLACE the deciding seat, archive it first/);
+		// The way out is stated: the Human archives the old seat, then the Lead seats the
+		// successor — and the cascade that makes archiving a seat that created you wrong.
+		assert.match(reason, /Replacing the deciding seat is the Human's call/);
+		assert.match(reason, /ask the Human to archive it, then seat the successor/);
+		assert.match(reason, /never archive one that created you/);
 		}
 		});
 
@@ -468,17 +474,27 @@ test("after that a Lead seats watch seats, and only watch seats", () => {
 				null,
 				"another observer is fine, as ever",
 			);
-			// ...also under multi, where "the cluster" is every seat in it, not just the
-			// ones whose jurisdiction meets the new one's.
+			// ...also under multi, but only an observer whose jurisdiction MEETS the new
+			// seat's counts: one domain adopting the label must not change what another
+			// domain's label-free seating is allowed.
+			const multiSeat = { topology: "multi" as const, selfDomain: "backend" };
 			assert.match(
 				String(
 					leadCreateSupervisorArgsBlockReason(seatArgs({ "team.domain": "backend.auth" }), {
-						topology: "multi",
-						selfDomain: "backend",
-						seats: [seat(DECIDER, "backend"), seat(LIVENESS, "frontend", "liveness")],
+						...multiSeat,
+						seats: [seat(DECIDER, "backend"), seat(LIVENESS, "backend", "liveness")],
 					}),
 				),
 				/JURISDICTION_OVERLAP/,
+				"an observer in the same jurisdiction",
+			);
+			assert.equal(
+				leadCreateSupervisorArgsBlockReason(seatArgs({ "team.domain": "backend.auth" }), {
+					...multiSeat,
+					seats: [seat(DECIDER, "backend"), seat(LIVENESS, "frontend", "liveness")],
+				}),
+				null,
+				"an observer in an unrelated domain leaves it as it was",
 			);
 			});
 
@@ -1663,6 +1679,30 @@ test("every refusal this feature adds is documented where a Lead would look it u
 // prompt goes in once — the same failure the Peer's reporting duty and the
 // Lead's consult routing each needed a standing line for.
 // ---------------------------------------------------------------------------
+
+test("a follow-up to the standing scout carries a V3 block, because peer_ask_lead needs one", () => {
+	// The documented block, taken from the example the Lead is shown — not retyped
+	// here, so an edit that breaks it breaks this.
+	const example = read("examples/supervisor-watch.md").split(/\r?\n/);
+	const begin = example.findIndex((line) => line.trim() === "PASEO_TEAM_TASK_V3_BEGIN");
+	assert.ok(begin >= 0, "the example carries the follow-up block");
+	const block = example.slice(begin).join("\n");
+	const brief = parseTaskBrief(block);
+	assert.ok(brief);
+	assert.deepEqual(brief.malformed, []);
+	assert.equal(resolvePeerMode(brief), "read-only", "a read stays a read");
+	// ...and with it the scout can hand its answer back; bare, it cannot.
+	assert.equal(teamToolBlockReason("peer", "peer_ask_lead", brief), null);
+	assert.match(String(teamToolBlockReason("peer", "peer_ask_lead", null)), /requires a valid current V3 task brief/);
+
+	// The three places a Lead reads the rule say the same thing.
+	const lead = read("prompts/lead.md");
+	const skill = read("skills/paseo-team-lead/SKILL.md");
+	assert.match(lead.replace(/\s+/g, " "), /standing scout per job and keep asking it with `send_agent_prompt` and a short read-only V3 block/);
+	assert.match(skill.replace(/\s+/g, " "), /`send_agent_prompt` with a short `MODE: read-only` V3 block/);
+	assert.match(skill.replace(/\s+/g, " "), /Never send it bare/);
+	assert.ok(!/plain `send_agent_prompt`/.test(skill), "the claim that a bare follow-up is fine is gone");
+});
 
 test("a Claude Lead is reminded every turn to delegate reading and running, a Peer is not", async () => {
 	const { home } = clusterHome();

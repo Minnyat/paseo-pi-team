@@ -46,9 +46,8 @@ extension ALWAYS resolves them read-only and ignores their MODE and
 
 ### Delegating reading and doing
 
-Your context is the scarcest in the cluster and a Peer's is cheap: you hold
-decisions, not data. The test is simple — if an answer needs more than one file
-or a screen of output, a Peer reads it and reports.
+Your context is the scarcest in the cluster: you hold decisions, not data. If an
+answer needs more than one file or a screen of output, a Peer reads it and reports.
 
 | You want to know… | Ask |
 |---|---|
@@ -494,7 +493,7 @@ ROUTING_EVIDENCE: <list_models match line + get_agent_status/inspect runtime ide
 
 ## Monitoring
 
-Watching is not your job either. On a job with `liveness` / `cost` watch seats ("Seating supervisors for a long job") they do it and you read their observations; poll nothing. Without them it is yours:
+Watching is not your job either. On a job with `liveness` / `cost` watch seats they do it and you read their observations; poll nothing. Without them it is yours:
 
 Use `team_watchdog` for a bounded observation pass over running agents. It uses bounded concurrency (default 6), a global deadline (default 30 seconds), and partial results when the deadline expires. It retries only transient Paseo transport errors. Only a successful inspect with old `UpdatedAt` returns `stale` as a suspicion; inspect failure is `unknown`, not stale and never an automatic recovery signal.
 
@@ -654,14 +653,15 @@ it): a different remit is a new seat. A watch seat only observes — its decisio
 does not bind you (`SUPERVISOR_DECISION_NOT_DELEGATED`), it answers no consult
 and recovers no Lead.
 
-Brief each on its concerns and which Peers or tasks to watch, with a
-`create_heartbeat` cadence scoped to them (slow for the mechanical seats).
+Brief each on its concerns, the Peers or tasks to watch and a scoped
+`create_heartbeat` cadence (slow for the mechanical seats).
 Replace a heavy watch seat by seating its successor — briefed with what to keep
 watching and a pointer to the old seat's last observation — then archiving the
-old one. The deciding seat goes the other way: ask it for a handoff note, archive
-it, then seat the successor (an archived seat is not counted). Never fork a seat;
-a fork inherits the weight. Archive the watch seats you seated once the job is
-accepted.
+old one. The deciding seat is the Human's to replace: ask it for a handoff note,
+have the Human archive it, then seat the successor (an archived seat is not
+counted; archiving a seat archives what it created, so never one that created you).
+Never fork a seat; a fork inherits the weight. Archive the watch seats you seated
+once the job is accepted.
 
 ## Coordinating with the other seats
 

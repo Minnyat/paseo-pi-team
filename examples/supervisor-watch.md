@@ -77,7 +77,7 @@ What the policy says when the order or the count is wrong:
 | The Lead tries | Answer |
 |---|---|
 | a watch seat before any seat that decides | refused — *"a watch seat … reports beside a Supervisor that decides, and none covers this Lead yet"* |
-| a second seat with no `team.watch`, or one naming `decisions`, beside the seat above | refused — *"this cluster already has a Supervisor that decides (…)"*; every consult would be `SUPERVISOR_AMBIGUOUS`. (Beside a seat that carries no `team.watch` either, a label-free seat is allowed exactly as it always was.) |
+| a second seat with no `team.watch`, or one naming `decisions`, beside the seat above | refused — *"this cluster already has a Supervisor that decides (…)"*; every consult would be `SUPERVISOR_AMBIGUOUS`. (In a cluster where no Supervisor carries a `team.watch`, a label-free seat is allowed exactly as it always was.) |
 | `team.watch: "liveness,vibes"` | refused, naming what is not in the catalog |
 | a key spelled `Team.Watch` or `team_watch` | refused — *"Label keys are exact"*; the seat would otherwise read as one that watches everything and decides |
 | `MONITOR_ECONOMY` for the seat that decides | `ROUTE_CLASS_WRONG_FLOW` — it keeps `SUPERVISOR_GOVERNANCE` |
@@ -155,9 +155,15 @@ archives the watch seats it seated; the seat that decides stays.
 ## 6. Replacing the seat that decides
 
 Two seats that decide would make every consult ambiguous, so this one goes the other
-way round: the Lead asks the deciding seat for a handoff note (what it decided, what
-is still open), archives it, then seats the successor with the same labels, briefed
-from the note. Paseo archives by soft delete — the old record stays on disk with
-`archivedAt` set — and the policy does not count an archived seat, so the successor
-is not refused as a second decider. Between the archive and the successor, a consult
-reports `NO_SUPERVISOR_SEAT`, which is the one case where asking the Human is right.
+way round, and it is the Human's call: the Lead asks the deciding seat for a handoff
+note (what it decided, what is still open), asks the Human to archive it, then seats
+the successor with the same labels, briefed from the note. Paseo archives by soft
+delete — the old record stays on disk with `archivedAt` set — and the policy does not
+count an archived seat, so the successor is not refused as a second decider. Between
+the archive and the successor, a consult reports `NO_SUPERVISOR_SEAT`, which is the one
+case where asking the Human is right anyway.
+
+Never archive a seat that created you. Paseo cascades an archive to every agent the
+seat created ("subagent fleets don't outlive their orchestrator"), and a Lead that a
+Supervisor recovered is that Supervisor's subagent: archiving the Supervisor would
+archive the Lead, and with it the Peers the Lead created.

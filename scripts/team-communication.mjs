@@ -396,11 +396,15 @@ export async function sendLeadConsult(input, options = {}) {
       requested: consult.supervisorAgentId,
     });
   } catch (error) {
-    // "Nobody" is the one answer a scan that could not read part of the agent
-    // state cannot give: the record it missed may be the seat being asked about.
-    // A seat that WAS found is routed to as it always was, so one torn record in
-    // some other project does not stop every Lead on the host from consulting.
-    if (error?.code === "NO_SUPERVISOR_SEAT") readSeats(true);
+    // "Nobody" — and "the seat you named is not one of ours" — are the answers a
+    // scan that could not read part of the agent state cannot give: the record it
+    // missed may be the seat being asked about. A seat that WAS found is routed to
+    // as it always was, so one torn record in some other project does not stop
+    // every Lead on the host from consulting.
+    const namedButNotFound =
+      error?.code === "SUPERVISOR_NOT_ELIGIBLE" &&
+      !seats.some((seat) => seat.agentId === consult.supervisorAgentId);
+    if (error?.code === "NO_SUPERVISOR_SEAT" || namedButNotFound) readSeats(true);
     throw error;
   }
   const body = buildConsultBody(consult, { self, domain: leadDomain, header: core.LEAD_CONSULT_HEADER });

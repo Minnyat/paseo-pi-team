@@ -485,6 +485,16 @@ const corrupt = "66666666-6666-4666-8666-666666666666";
 writeFileSync(join(dir, `${corrupt}.json`), '{"id": "66666666-6666-4666-8666-666666666666", "provider": "pi-super');
 assert.equal((await send()).recipient, ids.decider, "a seat that was found is routed to despite an unrelated torn record");
 
+// Naming a seat the list does not hold is "not eligible" only when the list was
+// complete: the record the scan could not read may be the very seat that was
+// named. A seat that WAS found and is not eligible keeps the precise answer.
+await assert.rejects(send({ supervisorAgentId: corrupt }), (error) => {
+  assert.equal(error.code, "SUPERVISOR_LOOKUP_FAILED");
+  assert.ok(error.message.includes(corrupt), "it names the record");
+  return true;
+});
+await assert.rejects(send({ supervisorAgentId: ids.liveness }), (error) => error.code === "SUPERVISOR_NOT_ELIGIBLE");
+
 // "Nobody" is the one answer a scan that could not read everything cannot give:
 // the record it missed may be the seat being asked about. Without a seat to
 // route to, a torn record is LOOKUP_FAILED — and with a clean scan the same

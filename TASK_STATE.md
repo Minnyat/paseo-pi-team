@@ -8,7 +8,7 @@
 - [x] Một cụm có thể có nhiều Supervisor mà `lead_ask_supervisor`/overlap không vỡ: nhãn `team.watch` (danh mục đóng `decisions|liveness|process|evidence|cost`), đúng một ghế giữ `decisions`.
 - [x] Mỗi loại quyền chặn ở chỗ vi phạm được: dựng ghế (Lead), đọc decision (Lead), consult, recovery (chính ghế) — trên CẢ HAI runtime.
 - [x] Cụm chưa dùng nhãn giữ hành vi cũ (272 test nền xanh; ghế không nhãn cạnh ghế không nhãn vẫn dựng được như trước). Hai điều duy nhất đổi ở đó là sửa lỗi: ghế đã archive không còn bị đếm, state hỏng không còn đọc thành "chưa có ai".
-- [x] Thay ghế quyết định có đường đi: archive nó (xin ghi chú bàn giao) rồi dựng ghế mới; ghế archive không bị đếm.
+- [x] Thay ghế quyết định có đường đi: Lead xin ghi chú bàn giao, Human archive ghế cũ, Lead dựng ghế mới; ghế archive không bị đếm. (Human, không phải Lead, vì archive lan xuống mọi agent ghế đó đã tạo — Lead do Supervisor khôi phục sẽ tự archive mình và các Peer.)
 - [x] Ghế quan sát dùng được `MONITOR_ECONOMY`; ghế quyết định thì không.
 - [x] Context sạch = thay ghế (không compact, không fork); tài liệu + ví dụ (`examples/supervisor-watch.md`).
 - [x] Trong `instruction-budget` mà không nới ngân sách (gộp phần trùng thay vì append).
@@ -29,10 +29,11 @@
 - [x] P0: đọc kiến trúc (prompts, SKILL, policy-core, hai adapter, team-communication, graph), chạy baseline 272/272 + typecheck.
 - [x] P1: lõi `team.watch` (policy-core + agent-directory) + gate dựng ghế + lớp route + verdict + consult + recovery + immutability.
 - [x] P2: nối dây pi + Claude (+ MCP description), `chooseSupervisor`, graph + WebUI.
-- [x] P3: test (`test/watch.test.mts` 57 case, + team-fork, route-gate, team-communication, graph, cli-contract; cả suite 332/332) và mutation 54/54 bị bắt (20 con ở điểm nối dây của adapter).
+- [x] P3: test (`test/watch.test.mts` 58 case, + team-fork, route-gate, team-communication, graph, cli-contract; cả suite 333/333) và mutation 54/54 bị bắt (20 con ở điểm nối dây của adapter), cộng 18 con cho các dòng sửa sau rà soát lần hai.
 - [x] P4: doctrine (lead.md / supervisor.md / SKILL) + README + PR-I trong `docs/multi-supervisor-topology.md` + model-routing + claude-runtime + ví dụ.
 - [x] P5: rà soát đối kháng bằng agent độc lập (probe thật trên hai adapter, so với bản trước PR). Tìm ra 9 nhóm lỗi thật (fork là cửa thứ hai, route khi không biết nhãn, `mcp_script`, doctrine lệch policy về brief V3, cổng mở khi một file state hỏng, consult đọc "không đọc được" thành "không có ai", claim "cụm cũ không đổi" sai, doc drift, lỗ hổng test); đã sửa hết, mỗi cái có test. Bảng đầy đủ: `docs/multi-supervisor-topology.md` "Đã sửa sau rà soát độc lập".
-- [ ] P6: chạy lại probe của reviewer trên HEAD mới, hỏi advisor lần nữa, rồi mới nói "merge được". Chưa mở PR.
+- [x] P6a: reviewer chạy lại toàn bộ probe trên b2f4578: mọi lỗi cũ đã đóng; còn 3 lỗi thấp (miễn trừ không nhãn tính cả domain khác dưới `multi`, consult nêu đích danh ghế hỏng, doc drift) + 1 nguy cơ mới đáng kể (thay ghế quyết định bằng archive có thể archive chính Lead qua cascade). Đã sửa hết: miễn trừ giới hạn theo jurisdiction, consult đọc strict khi sắp nói "không có ai/không đủ tư cách mà bạn nêu", thay ghế quyết định trở lại là việc của Human, test khoá doctrine scout.
+- [ ] P6b: hỏi advisor lần cuối, rồi mới nói "merge được". Chưa mở PR.
 
 ## Open questions / risks
 - (Đã đo, đóng: Paseo archive = soft delete với `archivedAt`; policy bỏ ghế đó ra khỏi danh sách ghế.) Còn mở: hai `create_agent` quyết định trong cùng một lượt (Claude song song) cùng qua cổng; `selfWatch` đọc "không đọc được" thành "không nhãn" (cố ý, xem PR-I); ghế không nhãn có sẵn không bao giờ thu hẹp được.

@@ -937,9 +937,12 @@ một ghế nặng thay được mà không mất phần còn lại.
 2. **Quyền bị chặn ở chỗ nó có thể bị vi phạm, không ở một chỗ.** Lead dựng ghế
    (ghế đầu phải là ghế quyết định; sau đó chỉ ghế quan sát; ghế quyết định thứ hai
    bị từ chối vì sẽ làm mọi consult thành `SUPERVISOR_AMBIGUOUS`, trừ cụm chưa từng dùng
-   nhãn). Thay ghế quyết định = archive nó (xin ghi chú bàn giao trước) rồi dựng ghế kế
-   nhiệm: Paseo archive bằng soft delete nên bản ghi còn nguyên với `archivedAt`, và ghế
-   đã archive không được đếm. Lead *đọc* decision
+   nhãn). Thay ghế quyết định là việc của Human: Lead xin ghi chú bàn giao, nhờ Human
+   archive ghế cũ, rồi dựng ghế kế nhiệm — Paseo archive bằng soft delete nên bản ghi còn
+   nguyên với `archivedAt`, và ghế đã archive không được đếm. (Archive lan xuống mọi
+   agent mà ghế đó đã tạo — `cascadeArchiveChildren` — nên Lead không bao giờ archive
+   một ghế đã tạo ra chính nó: Lead do Supervisor khôi phục là subagent của Supervisor
+   đó.) Lead *đọc* decision
    (`SUPERVISOR_DECISION_NOT_DELEGATED`, đọc từ state của **người gửi**, không từ nội
    dung message — message không có trường nào để tự nhận `decisions`). Consult
    (`chooseSupervisor` không bao giờ chọn ghế quan sát; consult lạc vào vẫn bị
@@ -1007,7 +1010,7 @@ nên phần trùng lặp (topology/cluster trong SKILL, giải thích `modeId`, 
 | Nối dây hai adapter: `seats` (chỉ đọc cho đúng lời gọi dựng Supervisor), `selfWatch` (chỉ cho `create_agent` của Supervisor) | `paseo-team-policy.ts` `governanceContext`; `claude-hook.mjs` `seatsForDecision`/`selfWatchForDecision`; `claude-policy.ts` |
 | `graph.jurisdiction.undecided` ("chỉ có ghế quan sát, chưa ai quyết định" — lỗi im lặng duy nhất của hình dạng này), conflicts chỉ giữa ghế quyết định, node mang `watch` | `cli/lib/graph.mjs`; WebUI `app.js` |
 
-Test: `test/watch.test.mts` (57 case: danh mục, parser, gate dựng ghế trên cả hai
+Test: `test/watch.test.mts` (58 case: danh mục, parser, gate dựng ghế trên cả hai
 runtime, ghế đã archive và bản ghi hỏng, lớp route, verdict, overlap, consult,
 recovery, `mcp_script`, và **hai adapter chạy thật**: hook Claude và extension pi) +
 `team-fork.test.mjs` (hai cửa tới recovery) + `route-gate.test.mts` (`update_agent` của
@@ -1015,8 +1018,10 @@ ghế quan sát) + `team-communication.test.mjs` (chọn ghế quyết định, 
 hỏng, end-to-end với core thật) + `graph.test.mjs` + `cli-contract.test.mjs`. Đo bằng
 mutation (`mutate`, chạy riêng các file test liên quan): **54/54 đột biến bị bắt**, gồm
 20 đột biến ở điểm nối dây của các adapter (`seats`, `seatsFault`, `selfWatch`, cổng
-`update_agent`, notice, injection của `chooseSupervisor`, cổng fork) — loại lỗi đã
-làm hỏng repo này nhiều lần (README, "Testing the tests"). Cả suite: 332/332.
+`update_agent`, notice, injection của `chooseSupervisor`, cổng fork), cộng 18 đột biến
+cho các dòng sửa sau rà soát lần hai (phạm vi miễn trừ theo jurisdiction, consult đọc
+strict, đường thay ghế) — đều bị bắt. Loại lỗi đã làm hỏng repo này nhiều lần (README,
+"Testing the tests"). Cả suite: 333/333.
 
 **Đã sửa sau rà soát độc lập (2026-10-06).** Một agent độc lập, chạy probe thật trên
 cả hai adapter và so từng cổng với bản trước PR (hàng chục nghìn so sánh), tìm ra các
@@ -1030,7 +1035,7 @@ lỗi sau; mỗi cái đã sửa tại chỗ vi phạm được và có test kho
 | Doctrine nói follow-up cho scout không cần khối V3 — nhưng `peer_ask_lead` đòi brief V3 hợp lệ, nên scout không có đường trả lời ngoài activity log | lead.md, SKILL, ví dụ: follow-up mang khối V3 `MODE: read-only` ngắn |
 | Cổng dựng ghế mở khi một file state hỏng (chỉ lỗi root/dir mới là "không nhìn được"): ghế quyết định thứ hai qua cổng | mọi lỗi quét → `SUPERVISOR_LOOKUP_FAILED`, kèm tên bản ghi hỏng; lời khuyên `pteam preflight` (không bao giờ đọc `agents/`) bỏ đi |
 | `lead_ask_supervisor` vẫn đọc state không đọc được thành `NO_SUPERVISOR_SEAT` ("được phép hỏi Human") | khi sắp trả lời "không có ai", consult đọc lại với `supervisorSeats({ strict: true })` → `SUPERVISOR_LOOKUP_FAILED`; ghế đã tìm thấy vẫn được route tới như cũ |
-| Cổng "một ghế quyết định" từ chối ghế không nhãn thứ hai cả trên cụm chưa từng dùng nhãn — thay đổi hành vi mặc định, và ghế đã archive vẫn bị đếm nên không thay được ghế quyết định | cổng chỉ bật khi cụm đã dùng nhãn (ghế mới hoặc bất kỳ Supervisor nào trong cụm mang `team.watch`); ghế có `archivedAt` không được đếm (**đo trên `@getpaseo/server` 0.10.3**: `buildArchivedAgentRecord` ghi `archivedAt`, không xoá file); thay ghế quyết định = archive rồi dựng ghế mới |
+| Cổng "một ghế quyết định" từ chối ghế không nhãn thứ hai cả trên cụm chưa từng dùng nhãn — thay đổi hành vi mặc định, và ghế đã archive vẫn bị đếm nên không thay được ghế quyết định | cổng chỉ bật khi cụm đã dùng nhãn (ghế mới hoặc bất kỳ Supervisor nào trong cụm mang `team.watch`); ghế có `archivedAt` không được đếm (**đo trên `@getpaseo/server` 0.10.3**: `buildArchivedAgentRecord` ghi `archivedAt`, không xoá file); thay ghế quyết định = Human archive, Lead dựng ghế mới |
 | Khoá nhãn viết sai (`Team.Watch`) đọc thành "không nhãn" = ghế quyết định | từ chối, nêu tên khoá |
 | `graph.jurisdiction.undecided` tính trên cả host; nhãn không đọc được hiện y như một watch hợp lệ | tính theo từng cluster (`undecidedAgents`); node mang `watchUnreadable`, WebUI cảnh báo |
 | Test: nhánh `AGENT_STATE_DIR_UNREADABLE`, bản ghi hỏng, `team_fork`, `mcp_script` không có test; test recovery chỉ kiểm `!/RECOVERY_NOT_DELEGATED/` | thêm test từng cái; recovery của ghế quyết định/không nhãn kiểm *được cho qua*, không chỉ "không bị chặn bởi luật này" |
@@ -1066,6 +1071,16 @@ sự có mặt của khoá là đủ.
   `watchSeatNotice` không nói gì với ghế không nhãn. Muốn có ghế quyết định gọn
   context trên một cụm cũ thì thay nó theo đường archive → dựng ghế mới (đã nêu ở
   trên); các ghế quan sát dựng cạnh ghế cũ thì dùng được ngay.
+- `archive_agent` lan xuống mọi agent mà ghế bị archive đã tạo (`cascadeArchiveChildren`,
+  đọc từ nguồn Paseo 0.10.3, chưa chạy daemon). Lead do Supervisor khôi phục là subagent của
+  Supervisor đó, nên Lead archive Supervisor ấy sẽ archive chính nó và các Peer của nó. Policy
+  không chặn lời gọi này (nó có sẵn từ trước PR): doctrine nói thay ghế quyết định là việc của
+  Human và cấm archive ghế đã tạo ra mình; một cổng "không archive tổ tiên của chính mình" là
+  bước tiếp theo hợp lý, chưa làm.
+- Ghế do Human tạo ngoài `create_agent` với khoá nhãn viết sai (`Team.Watch`) vẫn đọc thành
+  "không nhãn" và quyết định — chỉ ghế do Lead dựng mới được cổng bảo vệ. Luật overlap phía
+  Lead vẫn đọc danh sách ghế kiểu lenient (một bản ghi đối thủ bị hỏng che mất một overlap
+  dưới `multi`); điều này có từ trước PR.
 - Supervisor không có terminal nên không dùng được `pteam activity --max-chars`;
   `get_agent_activity` thô vẫn là nguồn đọc log duy nhất của nó. Ghế `process` và
   `evidence` đọc báo cáo của Peer — nên quy tắc "report trỏ tới file, dài cỡ một màn"
