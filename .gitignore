@@ -22,8 +22,10 @@ auth.json
 .claude/
 
 # Built policy core. `extensions/paseo-team-core/*.ts` is the source; `npm run
-# build` emits the `.js` beside it because Node refuses to strip types under
+# build:core` emits the `.js` beside it because Node refuses to strip types under
 # `node_modules`, so an installed `pteam` can only load the built variant
-# (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). Generated, never edited.
-extensions/paseo-team-core/*.js
+# (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). The `.js` IS committed: a git-tag
+# install (`pteam update` is `npm i -g github:<slug>#<tag>`) has no toolchain
+# and no prepare step, so the tag itself must carry the built core. CI fails if
+# the committed `.js` drifts from its `.ts`. Never edit the `.js` by hand.
 *.tsbuildinfo

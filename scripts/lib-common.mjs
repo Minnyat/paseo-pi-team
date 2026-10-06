@@ -385,7 +385,7 @@ const POLICY_CORE_DIR = "paseo-team-core";
 
 /**
  * The same module, under two extensions. `.ts` is the source pi loads directly
- * from `~/.pi/agent/extensions/`; `.js` is what `npm run build` emits beside it
+ * from `~/.pi/agent/extensions/`; `.js` is what `npm run build:core` emits beside it
  * and is the ONLY one that loads out of an installed package, because Node
  * refuses to strip types under `node_modules`
  * (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). Preferring `.js` therefore

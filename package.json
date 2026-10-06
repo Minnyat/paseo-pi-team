@@ -29,8 +29,8 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "pretest": "npm run build",
+    "build:core": "tsc -p tsconfig.build.json",
+    "pretest": "npm run build:core",
     "test": "node --test \"test/*.test.mjs\" \"test/*.test.mts\"",
     "typecheck": "tsc --noEmit -p tsconfig.ci.json",
     "check": "npm run test && npm run typecheck",

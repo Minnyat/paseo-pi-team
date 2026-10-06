@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,3 +57,25 @@ if (process.platform === "win32") {
 }
 
 console.log("self-update tests passed");
+
+// --- a git-tag install must never trigger npm's git-dep preparation ------------
+// `pteam update` is `npm i -g github:<slug>#<tag>`. pacote runs an inner
+// `npm install` over the clone when package.json has any of these scripts; that
+// inner install inherits global mode and either links a temp clone that is
+// deleted right after (dangling pteam) or collides with the outer reify
+// (ENOTEMPTY, bin removed). 3.6.1 dropped prepare/prepack but left `build`.
+for (const name of ["preinstall", "install", "postinstall", "prepare", "prepack", "build"]) {
+	assert.equal(PKG.scripts?.[name], undefined, `scripts.${name} makes pacote prepare the git dep and breaks \`pteam update\``);
+}
+{
+	// Git-tag installs have no toolchain, so the built core must be tracked.
+	const root = join(HERE, "..");
+	const inRepo = spawnSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+	if (inRepo.status === 0) {
+		for (const f of ["policy-core", "claude-policy", "agent-directory"]) {
+			const rel = `extensions/paseo-team-core/${f}.js`;
+			const ignored = spawnSync("git", ["-C", root, "check-ignore", "-q", rel]);
+			assert.equal(ignored.status, 1, `${rel} must not be gitignored: a tag install ships what git tracks`);
+		}
+	}
+}

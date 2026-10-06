@@ -192,6 +192,11 @@ export function detectInstallMode() {
 	return existsSync(join(ROOT, ".git")) ? "checkout" : "global";
 }
 
+// Why package.json must stay free of preinstall/install/postinstall/prepare/
+// prepack/build: pacote then "prepares" the git dep with an inner `npm install`
+// that inherits global mode, which leaves a dangling symlink or ENOTEMPTY and a
+// deleted `pteam`. The built policy core is therefore committed (see .gitignore)
+// and test/self-update.test.mjs guards both halves.
 export function npmUpdateArgv(slug, tag) {
 	return ["install", "-g", `github:${slug}#${tag}`];
 }

@@ -38,6 +38,12 @@ jobs:
       # editing this workflow, so the suite cannot silently lose coverage.
       - name: tests
         run: npm test
+      # `npm test` rebuilds the core (pretest), so a committed .js that no longer
+      # matches its .ts shows up here as a diff. A git-tag install ships these
+      # files as-is — stale ones would silently install the previous rules.
+      - name: committed core is up to date
+        if: runner.os == 'Linux' && matrix.node == '24'
+        run: git diff --exit-code -- 'extensions/paseo-team-core/*.js'
       # Globbed, not enumerated: preflight.mjs has no importing test, so a
       # parse error there would otherwise reach users. A new script is covered
       # the moment it lands.
