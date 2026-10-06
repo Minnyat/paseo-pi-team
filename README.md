@@ -75,6 +75,7 @@ paseo-team-orchestration/
 │       └── SKILL.md                # Reviewer read-only OCR delegation workflow
 ├── examples/
 │   ├── engineer-task.md            # PASEO_TEAM_TASK_V3 brief (engineer, write)
+│   ├── parallel-writers-task.md    # two engineers sharing one seam contract
 │   ├── reviewer-task.md            # independent reviewer brief (read-only)
 │   ├── architect-task.md           # solution-architect brief (read-only)
 │   ├── scout-task.md               # repository-scout brief (read-only)
@@ -247,7 +248,9 @@ Every authority is recomputed from the brief of the **current turn**:
 - A Peer's `git commit`/`git push` through bash is blocked unless the V3 brief
   grants `*_AUTHORITY: allowed`.
 - Push authority is **branch-scoped**: exactly
-  `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, nothing else.
+  `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or the same command
+  with one leading `-C <worktree-path>` (one unquoted path) for a writer in a
+  git worktree — nothing else.
 - Force-push is blocked in every spelling (`-f`, `-uf`, `-fu`, `--force*`,
   refspec `+`), and so are Peer merges.
 - `BROWSER_MCP_AUTHORITY` is a current-turn field scoped to the browser

@@ -33,6 +33,12 @@ to cover, not a form to fill in.
 - Do not merge or deploy.
 - Do not hide blockers.
 - Do not follow a wrong premise just because the Lead proposed it.
+- What your brief locks — a seam contract another Peer builds against, a
+  transitional state and the task that removes it — is binding: change it only
+  through `REOPEN_REQUEST`, because the other side of the seam will not see your
+  change. What the brief leaves unsaid inside `OWNED_SCOPE` (helpers, names,
+  how the code is laid out) is your call, not an omission to ask about. Keep
+  anything marked transitional visibly so, and build nothing new on it.
 - When a question, dependency, or blocker arises that could change the task's
   direction, use `peer_ask_lead` to send it to your own parent Lead; do not
   pick a different recipient yourself.
@@ -118,6 +124,10 @@ INITIAL_WORKTREE_CLEAN: yes | no
   The independent Reviewer is the exception: it reviews from a detached worktree
   it makes itself, where any dirt at all is a blocker
   (`DIRTY_REVIEW_WORKSPACE`, see `paseo-ocr-reviewer`).
+- A brief that gives you a git worktree (because another writer commits at the
+  same time) moves both gates there: run them as `git -C <path> rev-parse HEAD`
+  and `git -C <path> status --porcelain`, since a shell call can start back in
+  the Lead's checkout. That tree is yours alone, so any dirt in it is a blocker.
 
 Start editing only when both gates pass.
 
@@ -173,7 +183,10 @@ SCOPE_CONFLICT
 ```
 
 `REOPEN_REQUEST` must describe the wrong premise, the evidence, and an
-alternative.
+alternative. The premise includes the solution itself: if the change your brief
+asks for would not produce the outcome it is for, say so before you build it.
+Send it with `peer_ask_lead` as `kind: question`, or `kind: blocked` when the
+dependent work cannot go on until it is answered.
 
 The browser grants nothing else: not file-write, not git, not Paseo
 orchestration, not another MCP server. It is per-turn, and a brief with
@@ -200,14 +213,19 @@ Push the task branch only when:
 PUSH_TASK_BRANCH_AUTHORITY: allowed
 ```
 
-Push authority is branch-scoped: the extension allows EXACTLY one form:
+Push authority is branch-scoped: the extension allows exactly one form, in two
+spellings — the second for a writer working in a worktree:
 
 ```text
 git push -u origin HEAD:refs/heads/agent/<TASK_ID>
+git -C <worktree-path> push -u origin HEAD:refs/heads/agent/<TASK_ID>
 ```
 
-Every other form (different remote, different branch, `--all`/`--tags`/
-`--mirror`, branch deletion, chained `&&` commands) is blocked. Force-push in
+The path is one unquoted token (no spaces, quotes, `$` or `~`; forward slashes
+on Windows), and `-C` is the only option allowed before `push`. Every other
+form (different remote, different branch, other git options, `--all`/`--tags`/
+`--mirror`, branch deletion, chained `&&` commands, `cd <wt> && git push`) is
+blocked. Force-push in
 every spelling (`-f`, `-uf`, `-fu`, `--force*`, a `+` refspec), merge, and
 `git commit --amend` are permanently blocked by the extension. Deploy is
 forbidden at the PROTOCOL level (Human-only deploy) — the bash guard is a

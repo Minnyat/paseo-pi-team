@@ -91,19 +91,25 @@ Field semantics:
 - `CANDIDATE_SHA` in the output is meaningful only with
   `COMMIT_AUTHORITY: allowed`.
 - `PUSH_TASK_BRANCH_AUTHORITY: allowed` is branch-scoped: the extension allows
-  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>` — the writer's
+  exactly `git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, or the same
+  command with one leading `-C <worktree-path>` (an unquoted path) — the writer's
   task branch MUST be named `agent/<TASK_ID>`. Every other push form
-  (different remote/branch, `--all`/`--tags`/`--mirror`, deletion, chained
-  commands) is blocked; force-push in every spelling is always blocked.
+  (different remote/branch, other git options, `--all`/`--tags`/`--mirror`,
+  deletion, chained commands) is blocked; force-push in every spelling is always
+  blocked.
 
 ## One workspace per job: another Peer's edits are not your environment breaking
 
 Every Peer of one job runs in the workspace its Lead was started in; `create_agent`
 puts it there when `workspaceId` is left out. Isolation does not come from a tree
 of the Peer's own — it comes from `OWNED_SCOPE` plus the scope lease: one writer
-per scope, enforced before the writer is even created. The one private tree is the
-independent Reviewer's: it makes a detached `git worktree add` at the exact
-candidate SHA itself, inside the shared workspace.
+per scope, enforced before the writer is even created. The private trees are git
+worktrees inside the shared workspace, never Paseo workspaces: the independent
+Reviewer's, a detached `git worktree add` at the exact candidate SHA it makes
+itself, and one per writer when two writers commit at the same time (a checkout
+has one HEAD). Name that writer's path in its brief and tell it to run its base
+gate and push as `git -C <path> …`; the paragraph below is for writers without
+one.
 
 So `git status` legitimately shows other people's work. A Peer that reads
 ` M docs/OTHER.md` or `?? notes/other-peer.md` and reports
@@ -138,6 +144,14 @@ headers, field names or status codes the Peer has to decode; the headings in the
 skeleton above are a checklist for you, and a sentence each is enough. Address
 the Peer directly, and expect it to answer you the same way — a person asking its
 lead a question, or telling them what it found.
+
+Two of those headings carry most of the weight. OBJECTIVE is the outcome — what
+has to be true afterwards, and why — not the change you expect to produce it; a
+Peer handed only the solution cannot tell you it is the wrong one. CONSTRAINTS is
+where you lock what other work depends on: the seam contract, word for word as
+in the other writer's brief, and any transitional state with the task that
+removes it ("Splitting into tasks" in the Lead skill). Helpers, names and how the
+code is laid out inside `OWNED_SCOPE` are not constraints; leave them to the Peer.
 
 ## `acceptance-verifier` — the standard body
 

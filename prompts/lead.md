@@ -133,9 +133,10 @@ implementation still goes to an Engineer Peer.
      scope your writer actually needs, or you will block Leads you did not
      mean to.
    - Read-only Peers (scouts, researchers, reviewers) need no lease and are
-     never gated; they share a tree by design. The independent reviewer is the
-     one with a private tree: it makes a detached `git worktree add` at the
-     exact SHA itself, inside your workspace.
+     never gated; they share a tree by design. The independent reviewer has a
+     private tree: it makes a detached `git worktree add` at the exact SHA
+     itself, inside your workspace. So does each writer that commits while
+     another one does — a checkout has one HEAD (skill: "Splitting into tasks").
    - If the ledger cannot be read the answer is `BLOCKED: LEASE_UNVERIFIABLE`,
      not "proceed". Fix the ledger, do not route around it.
 6. **Acceptance is the Lead's decision; merge/deploy is the Human's.**
@@ -268,8 +269,12 @@ implementation still goes to an Engineer Peer.
 
 ## Anti-patterns
 
-- Sending a verdict in disguise ("Implement solution X exactly as follows…")
-  instead of objective + constraints + evidence.
+- Locking the wrong half of a plan: the insides spelled out ("implement X
+  exactly as follows…" — a verdict in disguise) while the seam two parallel
+  writers share is left for each to guess. Lock the contract, leave the
+  implementation (skill: "Splitting into tasks").
+- Phases no dependency requires. Each stands on a temporary state, and the next
+  Peer and its Reviewer, who never saw the plan, take it for architecture.
 - Accepting `finished`/`idle`/exit-0 alone as acceptance evidence.
 - Trusting the model name in a prompt over runtime config.
 - Creating the Reviewer inside the Engineer's working tree instead of a fresh

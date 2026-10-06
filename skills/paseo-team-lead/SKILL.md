@@ -9,7 +9,9 @@ description: Coordinate research, implementation, correction, and independent re
 
 1. Inspect repository state (git status, recent history, uncommitted changes).
 2. Read relevant project instructions (`AGENTS.md`, `WORKSPACE_PROTOCOL.md` if present).
-3. Identify objective, success boundary and risks.
+3. Identify the outcome — what has to be true afterwards, and for whom —
+   separately from any solution the request names, then the success boundary
+   and risks. A named solution is evidence about the outcome, not the spec.
 4. **Check that this cluster has a Supervisor.** `lead_ask_supervisor` reports
    `NO_SUPERVISOR_SEAT` when it does not, and a cluster without one has no
    delegated decision path — every question in it lands on the Human. Seating
@@ -19,11 +21,14 @@ description: Coordinate research, implementation, correction, and independent re
 
 ## Research
 
-Create read-only Peers when independent work can run in parallel:
-
-- Repository Scout
-- Documentation Researcher
-- Solution Challenger
+Research is for understanding the domain — what the code does today, who owns
+it, what the outcome actually needs — not for starting the build. Staff it by
+open question, not by habit: one read-only Peer per question you cannot answer
+from the repo yourself (a Repository Scout, Documentation Researcher or
+Solution Challenger is the usual shape). If you can already state the outcome,
+the owners and the seams, go straight to Decision. Scaling ceremony to the task
+never scales the invariants: the V3 brief, the lease and the exact-SHA
+independent review apply to a one-line change too.
 
 Every Peer works in YOUR workspace (see step 8 of the routing cycle). Send them a
 **V3 read-only brief** (`PASEO_TEAM_TASK_V3_BEGIN` … `PASEO_TEAM_TASK_V3_END`
@@ -40,8 +45,46 @@ Synthesize evidence. Record:
 - rejected alternatives;
 - owned scope;
 - excluded scope;
+- the seam contract: for every boundary two tasks share (an API, a schema, a
+  behavior, a state another task reads), what is fixed;
+- every transitional state, with the task that removes it;
 - verification;
 - unresolved risks.
+
+### Splitting into tasks
+
+Split along a real dependency or an ownership boundary, never because more
+phases look more rigorous. The test for every task and every phase: if it did
+not exist, what would go wrong? If the answer is "nothing, the plan would just
+be shorter", merge it.
+
+A phase no dependency requires usually stands on a transitional state — a shim,
+a flag, a compatibility path, a half-migrated schema — that exists only so the
+plan's steps can be committed one at a time. Here that state is more dangerous
+than it looks: every task gets a fresh Peer and every candidate a fresh
+Reviewer on its own SHA, and none of them knows the shim was meant to go. Tests
+get written against it, the next task builds on it, review approves it as
+architecture. So when one is unavoidable, name it — what it is, which task
+removes it — in three briefs: the one that creates it, the Reviewer's brief for
+that intermediate SHA, and the one that removes it. The job is not accepted
+while it still exists.
+
+Lock the seams, not the insides. `OWNED_SCOPE` says where a writer may work; a
+brief that also dictates how — which helper, which variable, how the logic is
+laid out — is pseudo-code in prose: the Peer types it out and loses the room to
+tell you the plan is wrong. A brief that leaves the seam open lets two parallel
+writers each build a correct half that does not fit the other. Put the seam
+contract, word for word the same, in both writers' briefs, and leave everything
+behind it to them. The contract holds only what crosses the seam: a fact about
+one side — its rollout flag, a helper name the Human asked for — goes outside
+it, in that side's brief, attributed to whoever asked. Inside, it reads as
+shared and frozen, and the two copies stop being identical.
+
+Writers that commit at the same time cannot share one checkout: it has one
+HEAD. Give each its own `git worktree` on `agent/<TASK_ID>` and name the path in
+its brief — a git worktree inside your workspace, like the Reviewer's, never a
+Paseo workspace. Its shell may start back in your checkout, so the base gate and
+the push run as `git -C <path> …`; the push guard accepts exactly that spelling.
 
 ## Accessing Paseo tools
 
@@ -108,8 +151,10 @@ For EVERY `create_agent`, run this exact cycle. Do not skip steps.
    files.
 
 1. Pick `MODEL_CLASS` from task risk + disposition (classes table below).
-2. Pick `HOST_ID` from the controller-local cluster routing file
-   `~/.paseo-pi-team/cluster-routing.local.json` (capability filter: writers
+2. Pick `HOST_ID` from the controller-local `cluster-routing.local.json` in the
+   pack's config directory — `~/.paseo-team-orchestration`, or `~/.paseo-pi-team`
+   on a host installed before the rename (`PST_TEAM_CONFIG_DIR` overrides both;
+   never conclude "no routing file" from one path) (capability filter: writers
    need `git-write`+`focused-test`; reviewers need `git-read`+`independent-review`).
 3. Read that host's route from the SAME file (single source of truth for the
    whole cluster — never infer a remote host's route from local memory), or
@@ -193,8 +238,9 @@ This is the exact failure mode the cluster config exists to prevent.
    `baseBranch`, `refName` or `githubPrNumber`. Each of those is Paseo's way of
    minting a NEW workspace or detaching the agent, and a Lead that used them
    left a trail of workspaces nobody could tell apart.
-   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0),
-     not by a tree of its own: one writer per scope, enforced before it exists.
+   - A **Writer** is kept apart by `OWNED_SCOPE` and the scope lease (step 0):
+     one writer per scope, enforced before it exists. Writers committing in
+     parallel each add a git worktree ("Splitting into tasks").
    - The **independent Reviewer** still reviews a detached checkout of the exact
      candidate SHA, and still never touches the Engineer's tree — it makes that
      checkout itself with `git worktree add --detach <path> <candidate-sha>`
@@ -702,7 +748,9 @@ After implementation:
    expensive seat for what is actually judgement: contradictions nobody
    flagged, an argument that does not hold, a risk the diff creates.
 
-   So structure the review in two passes:
+   So when the mechanical part is large, split the review in two passes (a
+   small diff is one pass; the exact-SHA worktree and the independent verdict
+   never shrink):
    - **Pass A (mechanical, cheap).** A script, or a `FAST_READ` Peer whose
      brief is a checklist, produces a RAW FINDINGS LIST: file, line, what was
      compared, matched/mismatched. It states facts and takes no view.
@@ -878,14 +926,12 @@ brief at all, which grants nothing (browser included). It never grants Paseo
 orchestration or unrelated MCP servers, even though Browser Control shares a
 server with `create_agent`.
 
-PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the only bash form the
-extension permits is exactly
-`git push -u origin HEAD:refs/heads/agent/<TASK_ID>` (no other remote,
-branch, flag, deletion or chained command; force-push in any spelling —
-`-f`, `-uf`, `-fu`, `--force*`, `+refspec` — is always blocked). Task
-branches therefore MUST be named `agent/<TASK_ID>`. Branch protection on
-the shared remote stays mandatory; the extension is a guard, not the full
-security boundary.
+PUSH_TASK_BRANCH_AUTHORITY is BRANCH-SCOPED: the one form is
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally with a single
+`-C <path>` for a worktree (an unquoted path). Every other remote, branch,
+option, deletion or chain is blocked, and force-push in any spelling. Task
+branches MUST be named `agent/<TASK_ID>`. Branch protection on the remote stays
+mandatory; the extension is a guard, not the security boundary.
 
 The brief carries authority and scope, never routing. There is no model,
 provider, thinking, host, workspace or agent field in it: those are parameters
@@ -919,6 +965,9 @@ and why, what you already know, what to leave alone and what you would like
 back, in plain sentences addressed to the Peer — not a form with codes the Peer
 has to decode. The same goes for anything you send afterwards (a correction, an
 answer to its question): reply the way you would to a teammate who asked you.
+OBJECTIVE is the outcome, not the change you expect to produce it; CONSTRAINTS
+holds the seam contract and any transitional state ("Splitting into tasks"),
+and nothing about the insides of `OWNED_SCOPE`.
 
 ## Peer output contract
 

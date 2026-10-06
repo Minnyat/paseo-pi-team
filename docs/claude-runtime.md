@@ -192,7 +192,8 @@ what it used to do.
 The Peer bash guard is unchanged from pi: no Paseo CLI,
 no commit/push without the matching authority, force-push and merge never, and
 a granted push is branch-scoped to exactly
-`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`.
+`git push -u origin HEAD:refs/heads/agent/<TASK_ID>`, optionally spelled with
+one leading `-C <worktree-path>`.
 
 ## Install
 
